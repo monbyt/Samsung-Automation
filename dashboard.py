@@ -253,6 +253,16 @@ def jobs_list():
     </tr>{% endfor %}</table>
     {% else %}<p class="muted">No jobs yet — click <b>New mail job</b> to add one.</p>{% endif %}
   </div></div>
+  <div class="panel"><h2>How a job runs</h2>
+    <p class="muted" style="line-height:1.6">
+      1. Scheduler checks if <b>next run</b> time has passed<br>
+      2. Chrome opens W1 → clicks your <b>mailbox</b> button<br>
+      3. Finds the newest email matching your <b>subject</b> regex<br>
+      4. Downloads the Excel attachment<br>
+      5. Decrypts via Excel COM → loads into your <b>SQL table</b><br>
+      Use <b>Run now</b> to test without waiting for the schedule.
+    </p>
+  </div>
   <div class="panel"><h2>Recording a new mail type</h2>
     <p class="muted">Use Playwright codegen to find mailbox/subject selectors, then add a job here:</p>
     <pre style="background:#0d1017;padding:12px;border-radius:8px;font-size:12px">python -m playwright codegen --channel chrome http://w1.samsung.net</pre>
@@ -274,49 +284,82 @@ def jobs_list():
 @app.route("/jobs/new", methods=["GET", "POST"])
 def jobs_new():
     error = None
+    form = {
+        "job_id": "",
+        "name": "",
+        "mailbox": "Extract",
+        "subject_pattern": "",
+        "target_table": "orders",
+        "interval_hours": "2",
+        "ingest_mode": "replace",
+        "enabled": True,
+    }
+
     if request.method == "POST":
+        form = {
+            "job_id": request.form.get("job_id", ""),
+            "name": request.form.get("name", ""),
+            "mailbox": request.form.get("mailbox", ""),
+            "subject_pattern": request.form.get("subject_pattern", ""),
+            "target_table": request.form.get("target_table", ""),
+            "interval_hours": request.form.get("interval_hours", "2"),
+            "ingest_mode": request.form.get("ingest_mode", "replace"),
+            "enabled": request.form.get("enabled") == "on",
+        }
         try:
+            if not form["name"].strip():
+                raise ValueError("Display name is required.")
+            if not form["mailbox"].strip():
+                raise ValueError("Mailbox is required.")
+            if not form["subject_pattern"].strip():
+                raise ValueError("Subject pattern is required.")
             add_job(
-                job_id=request.form["job_id"].strip().lower(),
-                name=request.form["name"].strip(),
-                mailbox=request.form["mailbox"].strip(),
-                subject_pattern=request.form["subject_pattern"].strip(),
-                target_table=request.form["target_table"].strip().lower(),
-                interval_hours=int(request.form.get("interval_hours", 2)),
-                enabled=request.form.get("enabled") == "on",
-                ingest_mode=request.form.get("ingest_mode", "replace"),
+                job_id=form["job_id"],
+                name=form["name"].strip(),
+                mailbox=form["mailbox"].strip(),
+                subject_pattern=form["subject_pattern"].strip(),
+                target_table=form["target_table"],
+                interval_hours=int(form["interval_hours"] or 2),
+                enabled=form["enabled"],
+                ingest_mode=form["ingest_mode"],
             )
-            return redirect(url_for("jobs_list", msg=f"Job '{request.form['job_id']}' created"))
+            from mail.jobs_db import _normalize_job_id
+            slug = _normalize_job_id(form["job_id"])
+            return redirect(url_for("jobs_list", msg=f"Job '{slug}' created"))
         except Exception as e:
             error = str(e)
 
     body = """
   <h1>New mail job</h1>
+  <div class="sub">Job ID is auto-lowercased (spaces → underscores). Subject is a regex matched against email titles.</div>
   {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
-  <form method="post" class="panel">
-    <div class="form-row"><label>Job ID (slug, e.g. order_extract)</label>
-      <input type="text" name="job_id" required pattern="[a-z][a-z0-9_]+"></div>
+  <form method="post" class="panel" novalidate>
+    <div class="form-row"><label>Job ID (e.g. order_extract)</label>
+      <input type="text" name="job_id" required value="{{ form.job_id }}"
+        placeholder="order_extract"></div>
     <div class="form-row"><label>Display name</label>
-      <input type="text" name="name" required placeholder="Order Extract"></div>
+      <input type="text" name="name" required value="{{ form.name }}"
+        placeholder="Order Extract"></div>
     <div class="form-row"><label>W1 mailbox button name</label>
-      <input type="text" name="mailbox" required value="Extract"></div>
+      <input type="text" name="mailbox" required value="{{ form.mailbox }}"></div>
     <div class="form-row"><label>Subject pattern (regex)</label>
-      <input type="text" name="subject_pattern" required placeholder="Order Extract - AE/GCC"></div>
+      <input type="text" name="subject_pattern" required value="{{ form.subject_pattern }}"
+        placeholder="Order Extract - AE/GCC"></div>
     <div class="form-row"><label>SQL table name</label>
-      <input type="text" name="target_table" required value="orders"></div>
+      <input type="text" name="target_table" required value="{{ form.target_table }}"></div>
     <div class="form-row"><label>Check every (hours)</label>
-      <input type="number" name="interval_hours" value="2" min="1" required></div>
+      <input type="number" name="interval_hours" value="{{ form.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
-        <option value="replace" selected>Replace — swap old rows for this job (recommended)</option>
-        <option value="append">Append — keep all historical rows</option>
+        <option value="replace" {{ 'selected' if form.ingest_mode=='replace' else '' }}>Replace — swap old rows (recommended)</option>
+        <option value="append" {{ 'selected' if form.ingest_mode=='append' else '' }}>Append — keep history</option>
       </select></div>
-    <div class="form-row"><label><input type="checkbox" name="enabled" checked> Enabled</label></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
     <button type="submit">Create job</button>
     <a href="/jobs"><button type="button">Cancel</button></a>
   </form>
 """
-    return _layout("New Job", "jobs", body, error=error)
+    return _layout("New Job", "jobs", body, error=error, form=form)
 
 
 @app.route("/jobs/parse", methods=["GET", "POST"])

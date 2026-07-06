@@ -67,8 +67,16 @@ def _interval_hours(row):
     return max(1, int(mins) // 60)
 
 
+def _normalize_job_id(raw: str) -> str:
+    """Turn user input into a safe slug (lowercase, underscores)."""
+    s = raw.strip().lower()
+    s = re.sub(r"[^a-z0-9_]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
 def _slug_ok(job_id: str) -> bool:
-    return bool(re.match(r"^[a-z][a-z0-9_]{1,62}$", job_id))
+    return bool(job_id) and bool(re.match(r"^[a-z][a-z0-9_]*$", job_id))
 
 
 def _row_to_dict(row):
@@ -159,24 +167,36 @@ def get_due_jobs(now=None):
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
             interval_hours=2, enabled=True, ingest_mode="replace"):
+    job_id = _normalize_job_id(job_id)
     if not _slug_ok(job_id):
-        raise ValueError("Job ID must be lowercase letters, numbers, underscores (e.g. order_extract).")
+        raise ValueError(
+            "Job ID must start with a letter and use only letters, numbers, "
+            "underscores (e.g. order_extract)."
+        )
+    target_table = _normalize_job_id(target_table)  # table names same rules
+    if not target_table:
+        raise ValueError("SQL table name is required.")
     _ensure_tables()
     now = datetime.now()
     hours = max(1, int(interval_hours))
-    with engine.begin() as conn:
-        conn.execute(mail_jobs.insert().values(
-            job_id=job_id,
-            name=name,
-            mailbox=mailbox,
-            subject_pattern=subject_pattern,
-            target_table=target_table,
-            ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
-            interval_hours=hours,
-            enabled=1 if enabled else 0,
-            next_run=now + timedelta(hours=hours),
-            created_at=now,
-        ))
+    try:
+        with engine.begin() as conn:
+            conn.execute(mail_jobs.insert().values(
+                job_id=job_id,
+                name=name,
+                mailbox=mailbox,
+                subject_pattern=subject_pattern,
+                target_table=target_table,
+                ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
+                interval_hours=hours,
+                enabled=1 if enabled else 0,
+                next_run=now + timedelta(hours=hours),
+                created_at=now,
+            ))
+    except Exception as e:
+        if "UNIQUE" in str(e).upper() or "unique" in str(e):
+            raise ValueError(f"Job ID '{job_id}' already exists — pick a different ID.") from e
+        raise
 
 
 def update_job(job_id, **fields):

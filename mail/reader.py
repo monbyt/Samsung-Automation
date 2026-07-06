@@ -67,22 +67,72 @@ def _download_from_open_email(page, frame, download_dir):
     return save_path
 
 
-def _list_matching_subjects(frame, mailbox, subject_pattern):
+def _has_regex_metachars(text: str) -> bool:
+    """True if subject_pattern uses regex syntax beyond a plain string."""
+    return text != re.escape(text)
+
+
+def _open_mailbox_and_click_email(frame, mailbox, subject_pattern):
+    """
+    Open mailbox folder, then click the newest matching email.
+
+    Uses the same locator strategy as the original download.py for plain
+    subject strings (exact title match on the email row div).
+    """
     frame.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(1)
+    time.sleep(1.5)
+
+    pattern = re.compile(subject_pattern, re.IGNORECASE)
+
+    # Plain subject (e.g. "Order Extract - AE/GCC") — exact match, same as download.py
+    if not _has_regex_metachars(subject_pattern):
+        email = frame.locator("div").filter(
+            has_text=re.compile(rf"^{re.escape(subject_pattern)}$", re.IGNORECASE)
+        )
+        email.first.wait_for(state="visible", timeout=15_000)
+        email.first.scroll_into_view_if_needed()
+        email.first.click(timeout=10_000)
+        time.sleep(0.5)
+        return subject_pattern
+
+    # Regex pattern — click the first row whose title line matches
+    rows = frame.locator("div").filter(has_text=pattern)
+    for i in range(min(rows.count(), 30)):
+        row = rows.nth(i)
+        try:
+            line = row.inner_text(timeout=2_000).strip().split("\n")[0].strip()
+            if not pattern.search(line):
+                continue
+            row.scroll_into_view_if_needed()
+            row.click(timeout=10_000)
+            time.sleep(0.5)
+            return line
+        except Exception:
+            continue
+
+    # Last resort — first matching div in the list (same list position as before)
+    rows.first.wait_for(state="visible", timeout=15_000)
+    rows.first.scroll_into_view_if_needed()
+    rows.first.click(timeout=10_000)
+    time.sleep(0.5)
+    return subject_pattern
+
+
+def _list_matching_subjects(frame, mailbox, subject_pattern):
+    """Return subject lines for matching emails (newest first)."""
+    frame.get_by_role("button", name=mailbox, exact=True).click()
+    time.sleep(1.5)
 
     pattern = re.compile(subject_pattern, re.IGNORECASE)
     rows = frame.locator("div").filter(has_text=pattern)
-    count = rows.count()
     subjects = []
-    for i in range(count):
+    for i in range(min(rows.count(), 30)):
         try:
-            text = rows.nth(i).inner_text(timeout=2_000).strip().split("\n")[0]
+            text = rows.nth(i).inner_text(timeout=2_000).strip().split("\n")[0].strip()
             if pattern.search(text):
                 subjects.append(text)
         except Exception:
             continue
-    # de-dupe while preserving order
     seen = set()
     unique = []
     for s in subjects:
@@ -90,13 +140,6 @@ def _list_matching_subjects(frame, mailbox, subject_pattern):
             seen.add(s)
             unique.append(s)
     return unique
-
-
-def _click_email_by_subject(frame, subject):
-    frame.locator("div").filter(
-        has_text=re.compile(rf"^{re.escape(subject)}$")
-    ).first.click()
-    time.sleep(0.5)
 
 
 def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
@@ -109,38 +152,30 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
     downloaded = []
 
     print(f"[{filter_id}] Scanning mailbox '{mailbox}' for /{subject_pattern}/")
+
+    # Peek at matches for logging, then click using the same locator logic
     subjects = _list_matching_subjects(frame, mailbox, subject_pattern)
     print(f"[{filter_id}] Found {len(subjects)} matching email(s)")
-
-    # Same subject line is reused for recurring reports — take the newest only.
     if not subjects:
         return downloaded
-    subjects = [subjects[0]]
 
-    for subject in subjects:
-        key = f"{filter_id}::{subject}"
-        if key in processed_subjects:
-            print(f"[{filter_id}] Already handled: {subject}")
-            continue
+    print(f"[{filter_id}] Opening newest: {subjects[0]}")
+    opened_subject = _open_mailbox_and_click_email(frame, mailbox, subject_pattern)
 
-        print(f"[{filter_id}] Opening: {subject}")
-        _click_email_by_subject(frame, subject)
-        path = _download_from_open_email(page, frame, download_dir)
-        downloaded.append({
-            "path": path,
-            "filter_id": filter_id,
-            "table": mail_filter["table"],
-            "subject": subject,
-            "ingest_mode": mail_filter.get("ingest_mode", "replace"),
-        })
-        processed_subjects.add(key)
+    key = f"{filter_id}::{opened_subject}"
+    if key in processed_subjects:
+        print(f"[{filter_id}] Already handled this session: {opened_subject}")
+        return downloaded
 
-        # Return to mailbox list for the next email
-        try:
-            frame.get_by_role("button", name=mailbox, exact=True).click()
-            time.sleep(0.5)
-        except Exception:
-            _open_mail_frame(page)
+    path = _download_from_open_email(page, frame, download_dir)
+    downloaded.append({
+        "path": path,
+        "filter_id": filter_id,
+        "table": mail_filter["table"],
+        "subject": opened_subject,
+        "ingest_mode": mail_filter.get("ingest_mode", "replace"),
+    })
+    processed_subjects.add(key)
 
     return downloaded
 

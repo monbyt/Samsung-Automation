@@ -37,7 +37,7 @@ def _handle_download(item):
 def run_once():
     print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] === Mail check ===")
     summary = run_mail_check(on_download=_handle_download)
-        record_monitor_run(summary)
+    record_monitor_run(summary)
     print(
         f"Done — {len(summary['downloads'])} file(s) downloaded, "
         f"{len(summary['errors'])} error(s)"

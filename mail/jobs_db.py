@@ -1,6 +1,7 @@
 """
 Mail job definitions stored in SQL — managed from the dashboard.
 """
+import os
 import re
 from datetime import datetime, timedelta
 
@@ -21,6 +22,7 @@ mail_jobs = Table(
     Column("mailbox", String(100), nullable=False),
     Column("subject_pattern", String(500), nullable=False),
     Column("target_table", String(100), nullable=False),
+    Column("download_folder", String(200)),
     Column("ingest_mode", String(20), default="replace"),
     Column("interval_hours", Integer, default=2),
     Column("interval_minutes", Integer),  # legacy — migrated to interval_hours
@@ -58,6 +60,20 @@ def _migrate_jobs_columns():
                     "UPDATE mail_jobs SET interval_hours = MAX(1, interval_minutes / 60) "
                     "WHERE interval_hours IS NULL OR interval_hours = 0"
                 ))
+        if "download_folder" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE mail_jobs ADD COLUMN download_folder VARCHAR(200)"
+            ))
+
+
+def resolve_download_dir(job: dict) -> str:
+    """Desktop subfolder for this job's downloads, e.g. Desktop/Product-Extract."""
+    folder = job.get("download_folder") or job.get("folder")
+    if not folder:
+        jid = job.get("job_id") or job.get("id") or "downloads"
+        folder = jid.replace("_", "-").title()
+    desktop = getattr(config, "DESKTOP_DIR", os.path.dirname(config.DOWNLOAD_DIR))
+    return os.path.join(desktop, folder)
 
 
 def _interval_hours(row):
@@ -87,6 +103,11 @@ def _row_to_dict(row):
         "mailbox": row.mailbox,
         "subject_pattern": row.subject_pattern,
         "target_table": row.target_table,
+        "download_folder": getattr(row, "download_folder", None) or "",
+        "download_dir": resolve_download_dir({
+            "job_id": row.job_id,
+            "download_folder": getattr(row, "download_folder", None),
+        }),
         "ingest_mode": getattr(row, "ingest_mode", None) or "replace",
         "interval_hours": _interval_hours(row),
         "enabled": bool(row.enabled),
@@ -105,6 +126,8 @@ def _filter_dict(job):
         "subject": job["subject_pattern"],
         "table": job["target_table"],
         "ingest_mode": job.get("ingest_mode", "replace"),
+        "download_dir": job.get("download_dir") or resolve_download_dir(job),
+        "download_folder": job.get("download_folder", ""),
     }
 
 
@@ -119,6 +142,7 @@ def seed_from_config():
     now = datetime.now()
     hours = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2)
     for f in config.MAIL_FILTERS:
+        folder = f.get("folder", f["id"].replace("_", "-").title())
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
                 job_id=f["id"],
@@ -126,6 +150,7 @@ def seed_from_config():
                 mailbox=f["mailbox"],
                 subject_pattern=f["subject"],
                 target_table=f["table"],
+                download_folder=folder,
                 ingest_mode="replace",
                 interval_hours=hours,
                 enabled=1,
@@ -166,7 +191,8 @@ def get_due_jobs(now=None):
 
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
-            interval_hours=2, enabled=True, ingest_mode="replace"):
+            interval_hours=2, enabled=True, ingest_mode="replace",
+            download_folder=None):
     job_id = _normalize_job_id(job_id)
     if not _slug_ok(job_id):
         raise ValueError(
@@ -176,6 +202,8 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
     target_table = _normalize_job_id(target_table)  # table names same rules
     if not target_table:
         raise ValueError("SQL table name is required.")
+    if not download_folder:
+        download_folder = job_id.replace("_", "-").title()
     _ensure_tables()
     now = datetime.now()
     hours = max(1, int(interval_hours))
@@ -187,6 +215,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
                 mailbox=mailbox,
                 subject_pattern=subject_pattern,
                 target_table=target_table,
+                download_folder=download_folder,
                 ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
                 interval_hours=hours,
                 enabled=1 if enabled else 0,
@@ -202,7 +231,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
 def update_job(job_id, **fields):
     allowed = {
         "name", "mailbox", "subject_pattern", "target_table",
-        "interval_hours", "enabled", "ingest_mode",
+        "interval_hours", "enabled", "ingest_mode", "download_folder",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:

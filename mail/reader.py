@@ -38,12 +38,24 @@ def _configure_downloads(profile_dir, download_dir):
         json.dump(prefs, f)
 
 
+def _set_cdp_download(page, download_dir):
+    try:
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("Browser.setDownloadBehavior", {
+            "behavior": "allow",
+            "downloadPath": download_dir,
+            "eventsEnabled": True,
+        })
+    except Exception:
+        pass
+
+
 def _mail_frame(page):
     return page.locator('iframe[title="Mail"]').content_frame
 
 
 def _open_mail_frame(page):
-    """Open W1 mail — matches Playwright codegen exactly."""
+    """Open W1 mail — matches Playwright codegen."""
     page.goto(config.W1_URL)
     page.wait_for_load_state("domcontentloaded")
     page.get_by_role("button", name="Mail", exact=True).click()
@@ -53,31 +65,82 @@ def _open_mail_frame(page):
 
 
 def _subject_regex(subject: str):
-    """
-    Anchored regex for an email subject line.
-    Codegen: div.filter(has_text=re.compile(r"^Product Extract - SGE\\+GCC$"))
-    """
     return re.compile(rf"^{re.escape(subject)}$")
 
 
-def _email_row(frame, subject: str):
+def _email_row_exact(frame, subject: str):
     return frame.locator("div").filter(has_text=_subject_regex(subject))
 
 
 def _open_mailbox(frame, mailbox):
     frame.get_by_role("button", name=mailbox).click()
-    time.sleep(1)
+    time.sleep(1.5)
+
+
+def _peek_subjects(frame, subject: str, limit=8):
+    """Log nearby email titles to help debug subject mismatches."""
+    hints = []
+    try:
+        rows = frame.locator("div").filter(has_text=re.compile(re.escape(subject[:12]), re.I))
+        for i in range(min(rows.count(), limit)):
+            try:
+                line = rows.nth(i).inner_text(timeout=1_000).strip().split("\n")[0][:80]
+                if line and line not in hints:
+                    hints.append(line)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return hints
 
 
 def _click_matching_email(frame, subject: str):
-    """Click email row — same locator as Playwright codegen."""
-    row = _email_row(frame, subject)
-    row.first.wait_for(state="visible", timeout=15_000)
-    row.first.scroll_into_view_if_needed()
-    row.first.click(timeout=10_000)
-    time.sleep(0.5)
-    print(f"  Clicked email: {subject}")
-    return subject
+    """
+    Click the email row. Tries codegen exact match, then partial contains.
+    The /slashes/ in logs are NOT part of your subject — just debug formatting.
+    """
+    errors = []
+
+    # 1) Codegen: div + anchored regex (Product Extract - SGE+GCC)
+    try:
+        row = _email_row_exact(frame, subject)
+        row.first.wait_for(state="visible", timeout=10_000)
+        row.first.scroll_into_view_if_needed()
+        row.first.click(timeout=10_000)
+        time.sleep(0.5)
+        print(f"  Clicked email (exact): {subject}")
+        return subject
+    except Exception as e:
+        errors.append(f"exact: {e}")
+
+    # 2) Partial — row contains subject text (extra date/sender text on the div)
+    try:
+        row = frame.locator("div").filter(has_text=subject)
+        row.first.wait_for(state="visible", timeout=10_000)
+        row.first.scroll_into_view_if_needed()
+        row.first.click(timeout=10_000)
+        time.sleep(0.5)
+        print(f"  Clicked email (contains): {subject}")
+        return subject
+    except Exception as e:
+        errors.append(f"contains: {e}")
+
+    # 3) get_by_text fallback
+    try:
+        row = frame.get_by_text(subject, exact=True)
+        row.first.click(timeout=10_000)
+        time.sleep(0.5)
+        print(f"  Clicked email (get_by_text): {subject}")
+        return subject
+    except Exception as e:
+        errors.append(f"text: {e}")
+
+    hints = _peek_subjects(frame, subject)
+    hint_txt = f" Visible nearby: {hints}" if hints else ""
+    raise RuntimeError(
+        f"Could not click email with subject '{subject}'.{hint_txt} "
+        f"Check Mail Jobs — subject must match the email title exactly. ({errors[-1]})"
+    )
 
 
 def _download_from_open_email(page, frame, download_dir):
@@ -101,23 +164,33 @@ def _download_from_open_email(page, frame, download_dir):
     return save_path
 
 
-def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
-    """
-    Check one mail filter for new emails. Returns list of downloaded file paths.
-    """
+def check_filter(page, frame, mail_filter, processed_subjects):
+    """Check one mail filter — download into that job's own Desktop folder."""
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
-    subject_pattern = mail_filter["subject"]
-    downloaded = []
+    subject = mail_filter["subject"]
+    download_dir = mail_filter.get("download_dir") or config.DOWNLOAD_DIR
 
-    print(f"[{filter_id}] Scanning mailbox '{mailbox}' for /{subject_pattern}/")
+    os.makedirs(download_dir, exist_ok=True)
+    _configure_downloads(config.PROFILE_DIR, download_dir)
+    _set_cdp_download(page, download_dir)
+
+    downloaded = []
+    print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}' → folder {download_dir}")
+
+    # Back to mailbox list (previous job may have left us inside an open email)
+    try:
+        frame.get_by_role("button", name=mailbox).click(timeout=3_000)
+        time.sleep(0.5)
+    except Exception:
+        frame = _open_mail_frame(page)
 
     _open_mailbox(frame, mailbox)
-    opened_subject = _click_matching_email(frame, subject_pattern)
+    opened_subject = _click_matching_email(frame, subject)
 
     key = f"{filter_id}::{opened_subject}"
     if key in processed_subjects:
-        print(f"[{filter_id}] Already handled this session: {opened_subject}")
+        print(f"[{filter_id}] Already handled this session")
         return downloaded
 
     path = _download_from_open_email(page, frame, download_dir)
@@ -129,24 +202,19 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
         "ingest_mode": mail_filter.get("ingest_mode", "replace"),
     })
     processed_subjects.add(key)
-
+    print(f"[{filter_id}] Saved to {path}")
     return downloaded
 
 
 def run_mail_check(filters=None, on_download=None):
-    """
-    One full mail scan across the given filters (or all enabled jobs from DB).
-    *on_download* callback: fn(item_dict) called after each successful download.
-    Returns summary dict.
-    """
+    """One full mail scan across the given filters."""
     if filters is None:
         from mail.jobs_db import list_jobs, job_as_filter
         filters = [job_as_filter(j) for j in list_jobs() if j["enabled"]]
     if not filters:
         return {"checked_at": datetime.now(), "downloads": [], "errors": ["No enabled mail jobs."]}
-    os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
+
     os.makedirs(config.PROFILE_DIR, exist_ok=True)
-    _configure_downloads(config.PROFILE_DIR, config.DOWNLOAD_DIR)
 
     summary = {
         "checked_at": datetime.now(),
@@ -164,25 +232,11 @@ def run_mail_check(filters=None, on_download=None):
             args=["--disable-popup-blocking", "--no-first-run"],
         )
         page = context.pages[0] if context.pages else context.new_page()
-
-        try:
-            cdp = context.new_cdp_session(page)
-            cdp.send("Browser.setDownloadBehavior", {
-                "behavior": "allow",
-                "downloadPath": config.DOWNLOAD_DIR,
-                "eventsEnabled": True,
-            })
-        except Exception:
-            pass
-
         frame = _open_mail_frame(page)
 
         for mail_filter in filters:
             try:
-                items = check_filter(
-                    page, frame, mail_filter,
-                    config.DOWNLOAD_DIR, processed_subjects,
-                )
+                items = check_filter(page, frame, mail_filter, processed_subjects)
                 for item in items:
                     summary["downloads"].append(item)
                     if on_download:

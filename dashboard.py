@@ -83,17 +83,25 @@ input[type=text], input[type=number] { cursor: text; width: 100%; max-width: 400
 
 
 def _list_excel_files():
-    if not os.path.isdir(config.DOWNLOAD_DIR):
-        return []
-    files = [
-        f for f in os.listdir(config.DOWNLOAD_DIR)
-        if f.lower().endswith((".xlsx", ".xls"))
-    ]
-    files.sort(
-        key=lambda f: os.path.getmtime(os.path.join(config.DOWNLOAD_DIR, f)),
-        reverse=True,
-    )
-    return files
+    """Excel files across all job download folders on the Desktop."""
+    entries = []
+    try:
+        seed_from_config()
+        dirs = {j.get("download_dir") for j in list_jobs() if j.get("download_dir")}
+    except Exception:
+        dirs = set()
+    dirs.add(config.DOWNLOAD_DIR)
+    for folder in dirs:
+        if not folder or not os.path.isdir(folder):
+            continue
+        label = os.path.basename(folder)
+        for f in os.listdir(folder):
+            if not f.lower().endswith((".xlsx", ".xls")):
+                continue
+            path = os.path.join(folder, f)
+            entries.append({"label": f"{label}/{f}", "path": path})
+    entries.sort(key=lambda e: os.path.getmtime(e["path"]), reverse=True)
+    return entries
 
 
 def _local_ip():
@@ -235,12 +243,12 @@ def jobs_list():
   </div>
   <div class="panel"><h2>Scheduled jobs</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Mode</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Folder</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
     {% for j in jobs %}<tr>
       <td><span class="pill">{{ j.job_id }}</span><br><span class="muted">{{ j.name }}</span></td>
       <td>{{ j.mailbox }}</td><td><code>{{ j.subject_pattern }}</code></td>
       <td>{{ j.target_table }}</td>
-      <td><span class="pill">{{ j.ingest_mode }}</span></td>
+      <td><span class="pill">{{ j.download_folder or '—' }}</span></td>
       <td>{{ j.interval_hours }}h</td>
       <td>{{ j.next_run or '—' }}</td>
       <td>{{ j.last_run or '—' }}</td>
@@ -290,6 +298,7 @@ def jobs_new():
         "mailbox": "Extract",
         "subject_pattern": "",
         "target_table": "orders",
+        "download_folder": "Order-Extract",
         "interval_hours": "2",
         "ingest_mode": "replace",
         "enabled": True,
@@ -302,6 +311,7 @@ def jobs_new():
             "mailbox": request.form.get("mailbox", ""),
             "subject_pattern": request.form.get("subject_pattern", ""),
             "target_table": request.form.get("target_table", ""),
+            "download_folder": request.form.get("download_folder", ""),
             "interval_hours": request.form.get("interval_hours", "2"),
             "ingest_mode": request.form.get("ingest_mode", "replace"),
             "enabled": request.form.get("enabled") == "on",
@@ -319,6 +329,7 @@ def jobs_new():
                 mailbox=form["mailbox"].strip(),
                 subject_pattern=form["subject_pattern"].strip(),
                 target_table=form["target_table"],
+                download_folder=form["download_folder"].strip(),
                 interval_hours=int(form["interval_hours"] or 2),
                 enabled=form["enabled"],
                 ingest_mode=form["ingest_mode"],
@@ -347,6 +358,10 @@ def jobs_new():
         placeholder="Order Extract - AE/GCC"></div>
     <div class="form-row"><label>SQL table name</label>
       <input type="text" name="target_table" required value="{{ form.target_table }}"></div>
+    <div class="form-row"><label>Desktop folder name</label>
+      <input type="text" name="download_folder" required value="{{ form.download_folder }}"
+        placeholder="Product-Extract"></div>
+    <p class="muted">Files save to Desktop\<folder> e.g. C:\Users\you\Desktop\Product-Extract</p>
     <div class="form-row"><label>Check every (hours)</label>
       <input type="number" name="interval_hours" value="{{ form.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
@@ -371,20 +386,20 @@ def jobs_parse():
     error = request.args.get("err")
 
     if request.method == "POST":
-        filename = request.form.get("filename", "")
+        filepath = request.form.get("filepath", "")
         table = request.form.get("target_table", "")
         filter_id = request.form.get("filter_id", "manual")
-        path = os.path.join(config.DOWNLOAD_DIR, filename)
+        path = filepath
         try:
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"File not found: {filename}")
+            if not path or not os.path.isfile(path):
+                raise FileNotFoundError(f"File not found: {path}")
             force = request.form.get("force") == "on"
             ingest_download(
                 path, table=table, filter_id=filter_id,
                 ingest_mode=request.form.get("ingest_mode", "replace"),
                 force=force,
             )
-            return redirect(url_for("jobs_parse", msg=f"Parsed {filename} → {table}"))
+            return redirect(url_for("jobs_parse", msg=f"Parsed {os.path.basename(path)} → {table}"))
         except Exception as e:
             error = str(e)
 
@@ -394,9 +409,9 @@ def jobs_parse():
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
   <form method="post" class="panel">
-    <div class="form-row"><label>Excel file in {{ download_dir }}</label>
-      <select name="filename" required>
-        {% for f in files %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+    <div class="form-row"><label>Excel file (all job folders on Desktop)</label>
+      <select name="filepath" required>
+        {% for f in files %}<option value="{{ f.path }}">{{ f.label }}</option>{% endfor %}
       </select>
       {% if not files %}<p class="muted">No Excel files found — run a mail job first.</p>{% endif %}
     </div>
@@ -442,6 +457,7 @@ def jobs_edit(job_id):
                 mailbox=request.form["mailbox"].strip(),
                 subject_pattern=request.form["subject_pattern"].strip(),
                 target_table=request.form["target_table"].strip().lower(),
+                download_folder=request.form.get("download_folder", "").strip(),
                 interval_hours=int(request.form.get("interval_hours", 2)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
@@ -462,6 +478,8 @@ def jobs_edit(job_id):
       <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
     <div class="form-row"><label>SQL table</label>
       <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
+    <div class="form-row"><label>Desktop folder</label>
+      <input type="text" name="download_folder" value="{{ job.download_folder }}" required></div>
     <div class="form-row"><label>Every (hours)</label>
       <input type="number" name="interval_hours" value="{{ job.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>

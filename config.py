@@ -7,7 +7,8 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── W1 / Order Extract ─────────────────────────────────────────
-DOWNLOAD_DIR = r"C:\Users\m.tasoglu\Desktop\Order-Extract"
+DESKTOP_DIR = r"C:\Users\m.tasoglu\Desktop"
+DOWNLOAD_DIR = os.path.join(DESKTOP_DIR, "Order-Extract")
 
 # Chrome profile that stays logged into W1 (created on first run)
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile")
@@ -33,12 +34,14 @@ MAIL_FILTERS = [
         "mailbox": "Extract",
         "subject": "Order Extract - AE/GCC",
         "table": "orders",
+        "folder": "Order-Extract",
     },
     {
         "id": "product_extract",
         "mailbox": "Product Extract",
         "subject": "Product Extract - SGE+GCC",
         "table": "product_orders",
+        "folder": "Product-Extract",
     },
 ]
 

@@ -241,7 +241,7 @@ def jobs_list():
       <td>{{ j.mailbox }}</td><td><code>{{ j.subject_pattern }}</code></td>
       <td>{{ j.target_table }}</td>
       <td><span class="pill">{{ j.ingest_mode }}</span></td>
-      <td>{{ j.interval_minutes }}m</td>
+      <td>{{ j.interval_hours }}h</td>
       <td>{{ j.next_run or '—' }}</td>
       <td>{{ j.last_run or '—' }}</td>
       <td class="{{ 'ok' if j.last_status=='ok' else 'err' if j.last_status else '' }}">{{ j.last_status or '—' }}</td>
@@ -282,7 +282,7 @@ def jobs_new():
                 mailbox=request.form["mailbox"].strip(),
                 subject_pattern=request.form["subject_pattern"].strip(),
                 target_table=request.form["target_table"].strip().lower(),
-                interval_minutes=int(request.form.get("interval_minutes", 60)),
+                interval_hours=int(request.form.get("interval_hours", 2)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
             )
@@ -304,8 +304,8 @@ def jobs_new():
       <input type="text" name="subject_pattern" required placeholder="Order Extract - AE/GCC"></div>
     <div class="form-row"><label>SQL table name</label>
       <input type="text" name="target_table" required value="orders"></div>
-    <div class="form-row"><label>Check every (minutes)</label>
-      <input type="number" name="interval_minutes" value="60" min="1" required></div>
+    <div class="form-row"><label>Check every (hours)</label>
+      <input type="number" name="interval_hours" value="2" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" selected>Replace — swap old rows for this job (recommended)</option>
@@ -399,7 +399,7 @@ def jobs_edit(job_id):
                 mailbox=request.form["mailbox"].strip(),
                 subject_pattern=request.form["subject_pattern"].strip(),
                 target_table=request.form["target_table"].strip().lower(),
-                interval_minutes=int(request.form.get("interval_minutes", 60)),
+                interval_hours=int(request.form.get("interval_hours", 2)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
             )
@@ -419,8 +419,8 @@ def jobs_edit(job_id):
       <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
     <div class="form-row"><label>SQL table</label>
       <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
-    <div class="form-row"><label>Every (minutes)</label>
-      <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
+    <div class="form-row"><label>Every (hours)</label>
+      <input type="number" name="interval_hours" value="{{ job.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" {{ 'selected' if job.ingest_mode=='replace' else '' }}>Replace old rows</option>

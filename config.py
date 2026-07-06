@@ -22,8 +22,8 @@ HEADLESS = False
 # Jobs do NOT run immediately on startup — configure them in the dashboard.
 SCHEDULER_TICK_SECONDS = 60
 
-# Default interval when seeding jobs from MAIL_FILTERS below (minutes).
-DEFAULT_JOB_INTERVAL_MINUTES = 60
+# Default interval when seeding jobs from MAIL_FILTERS below (hours).
+DEFAULT_JOB_INTERVAL_HOURS = 2
 
 # Each filter = one mailbox + subject pattern → one SQL table.
 # Add more dicts to monitor additional email types.
@@ -49,7 +49,7 @@ DASHBOARD_RUNS_SCHEDULER = True
 # Backward-compatible aliases (first filter)
 MAILBOX = MAIL_FILTERS[0]["mailbox"]
 MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
-MONITOR_INTERVAL_MINUTES = DEFAULT_JOB_INTERVAL_MINUTES
+MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 
 # ── NERP RPA ───────────────────────────────────────────────────
 NERP_SSO_URL = "https://sts.secsso.net/adfs/ls/"

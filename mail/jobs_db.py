@@ -22,7 +22,8 @@ mail_jobs = Table(
     Column("subject_pattern", String(500), nullable=False),
     Column("target_table", String(100), nullable=False),
     Column("ingest_mode", String(20), default="replace"),
-    Column("interval_minutes", Integer, default=60),
+    Column("interval_hours", Integer, default=2),
+    Column("interval_minutes", Integer),  # legacy — migrated to interval_hours
     Column("enabled", Integer, default=1),
     Column("last_run", DateTime),
     Column("next_run", DateTime),
@@ -48,6 +49,22 @@ def _migrate_jobs_columns():
             conn.execute(sqltext(
                 "ALTER TABLE mail_jobs ADD COLUMN ingest_mode VARCHAR(20) DEFAULT 'replace'"
             ))
+        if "interval_hours" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE mail_jobs ADD COLUMN interval_hours INTEGER DEFAULT 2"
+            ))
+            if "interval_minutes" in cols:
+                conn.execute(sqltext(
+                    "UPDATE mail_jobs SET interval_hours = MAX(1, interval_minutes / 60) "
+                    "WHERE interval_hours IS NULL OR interval_hours = 0"
+                ))
+
+
+def _interval_hours(row):
+    if getattr(row, "interval_hours", None):
+        return max(1, int(row.interval_hours))
+    mins = getattr(row, "interval_minutes", None) or 60
+    return max(1, int(mins) // 60)
 
 
 def _slug_ok(job_id: str) -> bool:
@@ -63,7 +80,7 @@ def _row_to_dict(row):
         "subject_pattern": row.subject_pattern,
         "target_table": row.target_table,
         "ingest_mode": getattr(row, "ingest_mode", None) or "replace",
-        "interval_minutes": row.interval_minutes,
+        "interval_hours": _interval_hours(row),
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "next_run": row.next_run,
@@ -92,8 +109,8 @@ def seed_from_config():
             return
 
     now = datetime.now()
+    hours = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2)
     for f in config.MAIL_FILTERS:
-        interval = getattr(config, "DEFAULT_JOB_INTERVAL_MINUTES", 60)
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
                 job_id=f["id"],
@@ -102,9 +119,9 @@ def seed_from_config():
                 subject_pattern=f["subject"],
                 target_table=f["table"],
                 ingest_mode="replace",
-                interval_minutes=interval,
+                interval_hours=hours,
                 enabled=1,
-                next_run=now + timedelta(minutes=interval),
+                next_run=now + timedelta(hours=hours),
                 created_at=now,
             ))
 
@@ -141,12 +158,12 @@ def get_due_jobs(now=None):
 
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
-            interval_minutes=60, enabled=True, ingest_mode="replace"):
+            interval_hours=2, enabled=True, ingest_mode="replace"):
     if not _slug_ok(job_id):
         raise ValueError("Job ID must be lowercase letters, numbers, underscores (e.g. order_extract).")
     _ensure_tables()
     now = datetime.now()
-    interval = max(1, int(interval_minutes))
+    hours = max(1, int(interval_hours))
     with engine.begin() as conn:
         conn.execute(mail_jobs.insert().values(
             job_id=job_id,
@@ -155,9 +172,9 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
             subject_pattern=subject_pattern,
             target_table=target_table,
             ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
-            interval_minutes=interval,
+            interval_hours=hours,
             enabled=1 if enabled else 0,
-            next_run=now + timedelta(minutes=interval),
+            next_run=now + timedelta(hours=hours),
             created_at=now,
         ))
 
@@ -165,13 +182,13 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
 def update_job(job_id, **fields):
     allowed = {
         "name", "mailbox", "subject_pattern", "target_table",
-        "interval_minutes", "enabled", "ingest_mode",
+        "interval_hours", "enabled", "ingest_mode",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return
-    if "interval_minutes" in updates:
-        updates["interval_minutes"] = max(1, int(updates["interval_minutes"]))
+    if "interval_hours" in updates:
+        updates["interval_hours"] = max(1, int(updates["interval_hours"]))
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
     if "ingest_mode" in updates and updates["ingest_mode"] not in ("replace", "append"):
@@ -181,7 +198,7 @@ def update_job(job_id, **fields):
         conn.execute(
             update(mail_jobs).where(mail_jobs.c.job_id == job_id).values(**updates)
         )
-    if "interval_minutes" in updates:
+    if "interval_hours" in updates:
         job = get_job(job_id)
         if job:
             schedule_next(job_id, from_time=datetime.now())
@@ -193,14 +210,15 @@ def delete_job(job_id: str):
         conn.execute(mail_jobs.delete().where(mail_jobs.c.job_id == job_id))
 
 
-def schedule_next(job_id: str, from_time=None, interval_minutes=None):
+def schedule_next(job_id: str, from_time=None, interval_hours=None):
     """Set next_run without running the job (used after create / edit)."""
     job = get_job(job_id)
     if not job:
         return
     base = from_time or datetime.now()
-    interval = interval_minutes or job["interval_minutes"]
-    nxt = base + timedelta(minutes=interval)
+    hours = interval_hours if interval_hours is not None else job["interval_hours"]
+    hours = max(1, int(hours))
+    nxt = base + timedelta(hours=hours)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
@@ -215,7 +233,8 @@ def mark_job_finished(job_id: str, status: str, message: str = ""):
     job = get_job(job_id)
     if not job:
         return
-    nxt = now + timedelta(minutes=job["interval_minutes"])
+    hours = max(1, int(job["interval_hours"]))
+    nxt = now + timedelta(hours=hours)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(

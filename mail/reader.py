@@ -67,25 +67,18 @@ def _download_from_open_email(page, frame, download_dir):
     return save_path
 
 
-def _has_regex_metachars(text: str) -> bool:
-    """True if subject_pattern uses regex syntax beyond a plain string."""
-    return text != re.escape(text)
-
-
-def _open_mailbox_and_click_email(frame, mailbox, subject_pattern):
-    """
-    Open mailbox folder, then click the newest matching email.
-
-    Uses the same locator strategy as the original download.py for plain
-    subject strings (exact title match on the email row div).
-    """
+def _open_mailbox(frame, mailbox):
     frame.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(1.5)
+    time.sleep(1)
 
-    pattern = re.compile(subject_pattern, re.IGNORECASE)
 
-    # Plain subject (e.g. "Order Extract - AE/GCC") — exact match, same as download.py
-    if not _has_regex_metachars(subject_pattern):
+def _click_matching_email(frame, subject_pattern):
+    """
+    Click the email row — tries exact title match first (original download.py),
+    then falls back to regex if the job uses a real pattern like 'Sales.*Report'.
+    """
+    # 1) Exact match — this is what worked for Order Extract
+    try:
         email = frame.locator("div").filter(
             has_text=re.compile(rf"^{re.escape(subject_pattern)}$", re.IGNORECASE)
         )
@@ -93,9 +86,13 @@ def _open_mailbox_and_click_email(frame, mailbox, subject_pattern):
         email.first.scroll_into_view_if_needed()
         email.first.click(timeout=10_000)
         time.sleep(0.5)
+        print(f"  Clicked email (exact match): {subject_pattern}")
         return subject_pattern
+    except Exception as e:
+        print(f"  Exact match click failed ({e}), trying regex...")
 
-    # Regex pattern — click the first row whose title line matches
+    # 2) Regex pattern — for jobs that use patterns like 'Order Extract.*'
+    pattern = re.compile(subject_pattern, re.IGNORECASE)
     rows = frame.locator("div").filter(has_text=pattern)
     for i in range(min(rows.count(), 30)):
         row = rows.nth(i)
@@ -106,40 +103,28 @@ def _open_mailbox_and_click_email(frame, mailbox, subject_pattern):
             row.scroll_into_view_if_needed()
             row.click(timeout=10_000)
             time.sleep(0.5)
+            print(f"  Clicked email (regex match): {line}")
             return line
         except Exception:
             continue
 
-    # Last resort — first matching div in the list (same list position as before)
-    rows.first.wait_for(state="visible", timeout=15_000)
-    rows.first.scroll_into_view_if_needed()
-    rows.first.click(timeout=10_000)
-    time.sleep(0.5)
-    return subject_pattern
+    raise RuntimeError(f"Could not click any email matching /{subject_pattern}/")
 
 
-def _list_matching_subjects(frame, mailbox, subject_pattern):
-    """Return subject lines for matching emails (newest first)."""
-    frame.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(1.5)
-
+def _count_matching_emails(frame, subject_pattern):
+    """Count visible emails matching the pattern (mailbox must already be open)."""
     pattern = re.compile(subject_pattern, re.IGNORECASE)
+    exact = re.compile(rf"^{re.escape(subject_pattern)}$", re.IGNORECASE)
     rows = frame.locator("div").filter(has_text=pattern)
-    subjects = []
+    count = 0
     for i in range(min(rows.count(), 30)):
         try:
-            text = rows.nth(i).inner_text(timeout=2_000).strip().split("\n")[0].strip()
-            if pattern.search(text):
-                subjects.append(text)
+            line = rows.nth(i).inner_text(timeout=2_000).strip().split("\n")[0].strip()
+            if exact.search(line) or pattern.search(line):
+                count += 1
         except Exception:
             continue
-    seen = set()
-    unique = []
-    for s in subjects:
-        if s not in seen:
-            seen.add(s)
-            unique.append(s)
-    return unique
+    return count
 
 
 def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
@@ -153,14 +138,13 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
 
     print(f"[{filter_id}] Scanning mailbox '{mailbox}' for /{subject_pattern}/")
 
-    # Peek at matches for logging, then click using the same locator logic
-    subjects = _list_matching_subjects(frame, mailbox, subject_pattern)
-    print(f"[{filter_id}] Found {len(subjects)} matching email(s)")
-    if not subjects:
+    _open_mailbox(frame, mailbox)
+    found = _count_matching_emails(frame, subject_pattern)
+    print(f"[{filter_id}] Found {found} matching email(s)")
+    if found == 0:
         return downloaded
 
-    print(f"[{filter_id}] Opening newest: {subjects[0]}")
-    opened_subject = _open_mailbox_and_click_email(frame, mailbox, subject_pattern)
+    opened_subject = _click_matching_email(frame, subject_pattern)
 
     key = f"{filter_id}::{opened_subject}"
     if key in processed_subjects:

@@ -7,46 +7,68 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── W1 / Order Extract ─────────────────────────────────────────
-# Downloaded Excel files land here
 DOWNLOAD_DIR = r"C:\Users\m.tasoglu\Desktop\Order-Extract"
 
 # Chrome profile that stays logged into W1 (created on first run)
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile")
 
-# W1 portal + the mailbox / subject to grab
 W1_URL = "http://w1.samsung.net"
-MAILBOX = "Extract"
-MAIL_SUBJECT = "Order Extract - AE/GCC"
 
 # Set True to hide the browser window on scheduled W1 runs.
-# Keep False the first time so you can log in + clear Knox popups.
 HEADLESS = False
+
+# ── Mail monitoring ────────────────────────────────────────────
+# How often the mail monitor checks for new emails (minutes).
+# Keep the monitor PC on and run: python mail/monitor.py
+MONITOR_INTERVAL_MINUTES = 10
+
+# Each filter = one mailbox + subject pattern → one SQL table.
+# Add more dicts to monitor additional email types.
+MAIL_FILTERS = [
+    {
+        "id": "order_extract",
+        "mailbox": "Extract",
+        "subject": r"Order Extract - AE/GCC",   # regex match
+        "table": "orders",
+    },
+    # Example — uncomment and edit to add another feed:
+    # {
+    #     "id": "sales_report",
+    #     "mailbox": "Extract",
+    #     "subject": r"Sales Report",
+    #     "table": "sales_reports",
+    # },
+]
+
+# Backward-compatible aliases (first filter)
+MAILBOX = MAIL_FILTERS[0]["mailbox"]
+MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
 
 # ── NERP RPA ───────────────────────────────────────────────────
 NERP_SSO_URL = "https://sts.secsso.net/adfs/ls/"
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 
-# Credentials — set here or via environment variables (env wins).
 NERP_USERNAME = os.environ.get("NERP_USERNAME", "m.tasoglu")
 NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "")
 
-# Excel file to upload in ZLSDF50270
 NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
-
-# SAP program codes
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"
 NERP_PROGRAM_PI = "ZSDM31520"
 
 # ── Database ───────────────────────────────────────────────────
-# Default: a local SQLite file (zero setup, works anywhere).
-# To use your Azure MySQL later, just swap this line, e.g.:
+# SQLite by default (WAL mode enabled for concurrent dashboard reads).
+# For heavy LAN querying, switch to MySQL on a small server:
 #   DB_URL = "mysql+pymysql://user:password@host:3306/dbname"
 DB_URL = f"sqlite:///{os.path.join(BASE_DIR, 'orders.db')}"
 
-# Table that holds the parsed order rows
-ORDERS_TABLE = "orders"
+ORDERS_TABLE = MAIL_FILTERS[0]["table"]
 
-# ── Pipeline behaviour ─────────────────────────────────────────
-# How often the scheduler runs (in hours)
+# ── Dashboard (LAN-accessible) ─────────────────────────────────
+# Bind 0.0.0.0 so colleagues on the same network can open the dashboard.
+# Example: http://192.168.1.50:5000
+DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_PORT = 5000
+
+# ── Legacy scheduler ───────────────────────────────────────────
 INTERVAL_HOURS = 2

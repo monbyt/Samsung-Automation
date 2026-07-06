@@ -8,11 +8,14 @@ just calls this on a timer.
 """
 from datetime import datetime
 
+import config
 from download import download_latest
-from parse_to_db import parse_file
+from parse_to_db import ingest_download
+from db import init_db
 
 
 def run_pipeline():
+    init_db()
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{stamp}] === Order Extract pipeline ===")
 
@@ -21,7 +24,7 @@ def run_pipeline():
     print(f"          Saved: {path}")
 
     print("Step 2/2  Parsing into database...")
-    parse_file(path)
+    ingest_download(path, table=config.ORDERS_TABLE, filter_id="order_extract")
 
     done = datetime.now().strftime("%H:%M:%S")
     print(f"[{done}] Pipeline complete.")

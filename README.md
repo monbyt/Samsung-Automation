@@ -1,58 +1,87 @@
-# Order Extract Pipeline
+# Order Extract + Mail Monitor
 
-Automated download → parse → SQL → dashboard for the W1 "Order Extract - AE/GCC" mail,
-plus a separate NERP RPA workflow.
+Automated W1 mail monitoring → encrypted Excel decrypt → SQL database → LAN dashboard.
 
 ## Project layout
 | Path | What it does |
 |------|--------------|
-| `config.py` | All settings (W1, NERP, DB, schedule). Edit this. |
-| `download.py` | W1 — downloads the latest Order Extract file. |
-| `parse_to_db.py` | Loads the newest Excel file into the SQL database. |
-| `orchestrator.py` | W1 pipeline: download + parse (one full cycle). |
-| `scheduler.py` | Cron job — runs W1 download + parse every N hours. |
-| `dashboard.py` | Web dashboard at http://127.0.0.1:5000 |
-| `nerp/rpa.py` | NERP RPA — SSO login, upload, P/I print workflow. |
-| `run_nerp.py` | Entry point for the NERP script. |
+| `config.py` | All settings — mail filters, DB, dashboard, NERP. **Edit this.** |
+| `mail/reader.py` | W1 mail navigation + Excel download |
+| `mail/monitor.py` | **Always-on mail monitor** (checks every N minutes) |
+| `excel_decrypt.py` | Decrypts password-protected Excel via Excel COM |
+| `parse_to_db.py` | Loads decrypted Excel into SQL tables |
+| `db.py` | Database schema + monitor status |
+| `dashboard.py` | **LAN dashboard** — overview, mail status, data explorer, SQL |
+| `download.py` | One-shot download (legacy) |
+| `orchestrator.py` | One-shot download + parse |
+| `nerp/rpa.py` | NERP RPA workflow |
 
-## One-time setup
-```
+## One-time setup (Windows PC with Excel installed)
+```bat
 set NO_PROXY=*
 pip install -r requirements.txt
 python -m playwright install chrome
 ```
 
-## W1 — first run (log in once)
+## Configure mail filters
+Edit `MAIL_FILTERS` in `config.py` — one entry per email type:
+```python
+MAIL_FILTERS = [
+    {
+        "id": "order_extract",
+        "mailbox": "Extract",
+        "subject": r"Order Extract - AE/GCC",   # regex
+        "table": "orders",
+    },
+]
 ```
+
+## Always-on monitoring (recommended)
+On the PC that stays on 24/7, open **two** windows (or use `run_services.bat`):
+
+**1. Mail monitor** — checks W1 mail every 10 min, downloads + decrypts + loads DB:
+```bat
+python mail\monitor.py
+```
+Or double-click `run_monitor.bat`.
+
+**2. Dashboard** — colleagues on the LAN can view/query data:
+```bat
+python dashboard.py
+```
+Or double-click `run_dashboard.bat`.
+
+Open from any PC on the network: **http://\<monitor-pc-ip\>:5000**
+
+Dashboard pages:
+- **Overview** — ingestion stats
+- **Mail Monitor** — check history + active filters
+- **Data Explorer** — browse tables
+- **SQL Query** — read-only SELECT for ad-hoc queries
+
+JSON API (for integrations):
+- `GET /api/health`
+- `GET /api/tables`
+- `GET /api/table/orders?limit=100&offset=0`
+- `GET /api/ingestions`
+
+## First W1 login
+```bat
 python download.py
 ```
-A Chrome window opens. Log into w1.samsung.net, dismiss the Knox tray
-popup and any "allow access" prompt. After this it stays logged in.
-
-## W1 — running it
-- **One full cycle:** `python orchestrator.py` or double-click `run_now.bat`
-- **Start the cron job:** double-click `run_scheduler.bat` (leave it open)
-- **Open the dashboard:** double-click `run_dashboard.bat`, then go to
-  http://127.0.0.1:5000 in Chrome
+Log into w1.samsung.net, dismiss Knox popups. Session saved in `chrome-profile/`.
 
 ## NERP RPA
-1. Put your upload Excel at `data/Book1.xlsx` (or change `NERP_UPLOAD_FILE` in `config.py`).
-2. Set credentials — either in `config.py` or via env vars:
-   ```
-   set NERP_USERNAME=m.tasoglu
-   set NERP_PASSWORD=your-password-here
-   ```
-3. Run:
-   ```
-   python run_nerp.py
-   ```
-   Or double-click `run_nerp.bat`.
+```bat
+set NERP_PASSWORD=your-password
+python run_nerp.py
+```
 
-First run logs into SSO and saves the session in `chrome-profile-nerp/`.
+## Legacy scheduler (optional)
+`run_scheduler.bat` still works — runs download+parse every 2 hours.
+The mail monitor is better for continuous watching.
 
-## Change the schedule
-Edit `INTERVAL_HOURS` in `config.py`.
-
-## Switch to Azure MySQL later
-Change `DB_URL` in `config.py` to your MySQL connection string —
-everything else stays the same.
+## Network / production tips
+- Keep the monitor PC awake (disable sleep on AC power).
+- Allow port **5000** through Windows Firewall for LAN dashboard access.
+- For heavy concurrent querying, switch `DB_URL` in `config.py` to MySQL.

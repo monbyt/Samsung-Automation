@@ -1,39 +1,21 @@
 """
-Parses the newest Order Extract Excel file into the SQL database.
+Parses Excel files into the SQL database.
 
-- Rows go into the `orders` table (tagged with source_file, batch_id, loaded_at).
-- Every run is recorded in `ingestion_log`.
-- Files are de-duplicated by content hash, so re-downloading the same file
-  won't create duplicate rows.
+- Decrypts password-protected workbooks via Excel COM (Windows).
+- Rows go into per-filter tables (tagged with source_file, batch_id, loaded_at).
+- De-duplicated by content hash — re-downloading the same file is skipped.
 """
+import hashlib
 import os
 import uuid
-import hashlib
 from datetime import datetime
 
 import pandas as pd
-from sqlalchemy import (
-    create_engine, MetaData, Table, Column,
-    Integer, String, Text, DateTime, select, func,
-)
+from sqlalchemy import func, select
 
 import config
-
-engine = create_engine(config.DB_URL)
-metadata = MetaData()
-
-ingestion_log = Table(
-    "ingestion_log", metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("batch_id", String(64)),
-    Column("source_file", String(500)),
-    Column("file_hash", String(64)),
-    Column("row_count", Integer),
-    Column("status", String(50)),
-    Column("message", Text),
-    Column("loaded_at", DateTime),
-)
-metadata.create_all(engine)
+from db import engine, ingestion_log, init_db
+from excel_decrypt import prepare_for_reading
 
 
 def _file_hash(path):
@@ -45,6 +27,7 @@ def _file_hash(path):
 
 
 def _already_ingested(file_hash):
+    init_db()
     with engine.connect() as conn:
         count = conn.execute(
             select(func.count())
@@ -63,20 +46,24 @@ def _clean_columns(df):
     return df
 
 
-def _log(batch_id, path, file_hash, rows, status, message):
+def _log(batch_id, path, file_hash, rows, status, message,
+         filter_id=None, mail_subject=None):
     with engine.begin() as conn:
         conn.execute(ingestion_log.insert().values(
             batch_id=batch_id,
+            filter_id=filter_id,
+            mail_subject=mail_subject,
             source_file=os.path.basename(path),
             file_hash=file_hash,
             row_count=rows,
             status=status,
-            message=message[:1000],
+            message=(message or "")[:1000],
             loaded_at=datetime.now(),
         ))
 
 
-def parse_file(path):
+def parse_file(path, table=None, filter_id=None, mail_subject=None):
+    table = table or config.ORDERS_TABLE
     file_hash = _file_hash(path)
     name = os.path.basename(path)
 
@@ -86,18 +73,28 @@ def parse_file(path):
 
     batch_id = uuid.uuid4().hex[:12]
     try:
-        df = pd.read_excel(path)          # reads the first sheet
+        readable = prepare_for_reading(path)
+        df = pd.read_excel(readable)
         df = _clean_columns(df)
         df["source_file"] = name
         df["batch_id"] = batch_id
+        df["filter_id"] = filter_id or ""
         df["loaded_at"] = datetime.now()
 
-        df.to_sql(config.ORDERS_TABLE, engine, if_exists="append", index=False)
-        _log(batch_id, path, file_hash, len(df), "success", "")
-        print(f"Loaded {len(df)} rows from {name}")
+        df.to_sql(table, engine, if_exists="append", index=False)
+        _log(batch_id, path, file_hash, len(df), "success", "",
+             filter_id=filter_id, mail_subject=mail_subject)
+        print(f"Loaded {len(df)} rows from {name} → {table}")
     except Exception as e:
-        _log(batch_id, path, file_hash, 0, "error", str(e))
+        _log(batch_id, path, file_hash, 0, "error", str(e),
+             filter_id=filter_id, mail_subject=mail_subject)
         print(f"Error parsing {name}: {e}")
+        raise
+
+
+def ingest_download(path, table=None, filter_id=None, mail_subject=None):
+    """Decrypt (if needed) and load one downloaded attachment."""
+    parse_file(path, table=table, filter_id=filter_id, mail_subject=mail_subject)
 
 
 def parse_latest():

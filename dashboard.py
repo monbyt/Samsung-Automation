@@ -14,11 +14,15 @@ os.environ["no_proxy"] = "*"
 from datetime import datetime
 
 import pandas as pd
-from flask import Flask, jsonify, render_template_string, request
-from sqlalchemy import create_engine, inspect, text
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
 import config
 from db import init_db
+from mail.jobs_db import (
+    add_job, delete_job, get_job, list_jobs, seed_from_config, update_job,
+)
+from parse_to_db import ingest_download, parse_file
+from sqlalchemy import create_engine, inspect, text
 
 app = Flask(__name__)
 init_db()
@@ -64,9 +68,32 @@ tr:hover td { background: #1b2130; }
   background: #232a38; color: #b7c0d0; }
 textarea { width: 100%; min-height: 100px; background: #0d1017; color: #e6e9ef;
   border: 1px solid #232a38; border-radius: 8px; padding: 12px; font-family: monospace; }
-button, select { background: #232a38; color: #e6e9ef; border: 1px solid #3a4458;
+button, select, input[type=text], input[type=number] { background: #232a38; color: #e6e9ef; border: 1px solid #3a4458;
   border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+input[type=text], input[type=number] { cursor: text; width: 100%; max-width: 400px; }
+.btn-sm { font-size: 12px; padding: 4px 10px; }
+.btn-run { background: #1a4d2e; border-color: #2d6b42; }
+.btn-danger { background: #4d1a1a; border-color: #6b2d2d; }
+.form-row { margin-bottom: 14px; }
+.form-row label { display: block; font-size: 12px; color: #8a94a6; margin-bottom: 4px; }
+.flash { padding: 12px; border-radius: 8px; margin-bottom: 16px; }
+.flash.ok { background: #1a3d2a; color: #4ec98a; }
+.flash.err { background: #3d1a1a; color: #ef6a6a; }
 """
+
+
+def _list_excel_files():
+    if not os.path.isdir(config.DOWNLOAD_DIR):
+        return []
+    files = [
+        f for f in os.listdir(config.DOWNLOAD_DIR)
+        if f.lower().endswith((".xlsx", ".xls"))
+    ]
+    files.sort(
+        key=lambda f: os.path.getmtime(os.path.join(config.DOWNLOAD_DIR, f)),
+        reverse=True,
+    )
+    return files
 
 
 def _local_ip():
@@ -112,7 +139,7 @@ def _layout(title, active, body, **ctx):
 <div class="wrap">
   <nav>
     <a href="/" class="{{{{ 'active' if active=='home' else '' }}}}">Overview</a>
-    <a href="/mail" class="{{{{ 'active' if active=='mail' else '' }}}}">Mail Monitor</a>
+    <a href="/jobs" class="{{{{ 'active' if active=='jobs' else '' }}}}">Mail Jobs</a>
     <a href="/data" class="{{{{ 'active' if active=='data' else '' }}}}">Data Explorer</a>
     <a href="/query" class="{{{{ 'active' if active=='query' else '' }}}}">SQL Query</a>
   </nav>
@@ -142,13 +169,15 @@ def index():
         last_run = str(last["loaded_at"])
         last_status = last["status"]
 
-    for t in config.MAIL_FILTERS:
-        tbl = t["table"]
+    seed_from_config()
+    jobs = list_jobs()
+    for j in jobs:
+        tbl = j["target_table"]
         if tbl in _tables():
             cnt_df, _ = _read_sql(f"SELECT COUNT(*) AS c FROM {tbl}")
             rows = int(cnt_df.iloc[0]["c"]) if not cnt_df.empty else 0
             total_rows += rows
-            table_stats.append({"id": t["id"], "table": tbl, "rows": rows})
+            table_stats.append({"id": j["job_id"], "table": tbl, "rows": rows})
 
     body = """
   <h1>Overview</h1>
@@ -157,7 +186,7 @@ def index():
     <div class="card"><div class="label">Total rows</div><div class="value">{{ total_rows }}</div></div>
     <div class="card"><div class="label">Files ingested</div><div class="value">{{ total_files }}</div></div>
     <div class="card"><div class="label">Last ingestion</div><div class="value" style="font-size:15px">{{ last_run }}</div></div>
-    <div class="card"><div class="label">Monitor interval</div><div class="value" style="font-size:18px">{{ interval }}m</div></div>
+    <div class="card"><div class="label">Active jobs</div><div class="value" style="font-size:18px">{{ job_count }}</div></div>
   </div>
   <div class="panel"><h2>Tables by mail filter</h2>
     <table><tr><th>Filter</th><th>Table</th><th>Rows</th></tr>
@@ -178,41 +207,247 @@ def index():
         lan_ip=_local_ip(), port=config.DASHBOARD_PORT,
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         total_rows=total_rows, total_files=total_files, last_run=last_run,
-        interval=config.MONITOR_INTERVAL_MINUTES, table_stats=table_stats, log_rows=log_rows,
+        job_count=len(jobs), table_stats=table_stats, log_rows=log_rows,
     )
 
 
-@app.route("/mail")
-def mail_status():
+@app.route("/jobs")
+def jobs_list():
+    seed_from_config()
+    jobs = list_jobs()
+    msg = request.args.get("msg")
+    err = request.args.get("err")
     runs_df, _ = _read_sql(
         "SELECT checked_at, downloads, errors, status, error_detail "
-        "FROM monitor_runs ORDER BY id DESC LIMIT 100"
+        "FROM monitor_runs ORDER BY id DESC LIMIT 20"
     )
     runs = runs_df.to_dict("records") if not runs_df.empty else []
-    last_check = str(runs[0]["checked_at"]) if runs else "Never"
-    filters = config.MAIL_FILTERS
 
     body = """
-  <h1>Mail Monitor</h1>
-  <div class="sub">Last check: {{ last_check }} · Run <code>python mail/monitor.py</code> on the always-on PC</div>
-  <div class="panel"><h2>Active filters</h2>
-    <table><tr><th>ID</th><th>Mailbox</th><th>Subject pattern</th><th>SQL table</th></tr>
-    {% for f in filters %}<tr>
-      <td><span class="pill">{{ f.id }}</span></td><td>{{ f.mailbox }}</td>
-      <td><code>{{ f.subject }}</code></td><td>{{ f.table }}</td>
-    </tr>{% endfor %}</table>
+  <h1>Mail Jobs</h1>
+  <div class="sub">Cron jobs run automatically when due — nothing runs on startup. Scheduler checks every {{ tick }}s.</div>
+  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+  <div style="margin-bottom:16px">
+    <a href="/jobs/new"><button>+ New mail job</button></a>
+    <a href="/jobs/parse"><button>Manual parse to SQL</button></a>
   </div>
-  <div class="panel"><h2>Check history</h2><div class="scroll">
+  <div class="panel"><h2>Scheduled jobs</h2><div class="scroll">
+    {% if jobs %}<table>
+    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
+    {% for j in jobs %}<tr>
+      <td><span class="pill">{{ j.job_id }}</span><br><span class="muted">{{ j.name }}</span></td>
+      <td>{{ j.mailbox }}</td><td><code>{{ j.subject_pattern }}</code></td>
+      <td>{{ j.target_table }}</td>
+      <td>{{ j.interval_minutes }}m</td>
+      <td>{{ j.next_run or '—' }}</td>
+      <td>{{ j.last_run or '—' }}</td>
+      <td class="{{ 'ok' if j.last_status=='ok' else 'err' if j.last_status else '' }}">{{ j.last_status or '—' }}</td>
+      <td style="white-space:nowrap">
+        <form method="post" action="/jobs/{{ j.job_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run now</button></form>
+        <a href="/jobs/{{ j.job_id }}/edit"><button type="button" class="btn-sm">Edit</button></a>
+        <form method="post" action="/jobs/{{ j.job_id }}/toggle" style="display:inline"><button class="btn-sm">{{ 'Disable' if j.enabled else 'Enable' }}</button></form>
+      </td>
+    </tr>{% endfor %}</table>
+    {% else %}<p class="muted">No jobs yet — click <b>New mail job</b> to add one.</p>{% endif %}
+  </div></div>
+  <div class="panel"><h2>Recording a new mail type</h2>
+    <p class="muted">Use Playwright codegen to find mailbox/subject selectors, then add a job here:</p>
+    <pre style="background:#0d1017;padding:12px;border-radius:8px;font-size:12px">python -m playwright codegen --channel chrome http://w1.samsung.net</pre>
+    <p class="muted">Note the <b>mailbox</b> button name and email <b>subject</b> text, then create a job with those values.</p>
+  </div>
+  <div class="panel"><h2>Recent runs</h2><div class="scroll">
     {% if runs %}<table>
-    <tr><th>Checked at</th><th>Downloads</th><th>Errors</th><th>Status</th><th>Detail</th></tr>
+    <tr><th>Time</th><th>Downloads</th><th>Errors</th><th>Status</th><th>Detail</th></tr>
     {% for r in runs %}<tr>
       <td>{{ r.checked_at }}</td><td>{{ r.downloads }}</td><td>{{ r.errors }}</td>
       <td class="{{ 'ok' if r.status=='ok' else 'err' }}">{{ r.status }}</td>
       <td class="muted">{{ r.error_detail or '' }}</td>
-    </tr>{% endfor %}</table>{% else %}<p class="muted">Monitor hasn't run yet.</p>{% endif %}
+    </tr>{% endfor %}</table>{% else %}<p class="muted">No runs yet.</p>{% endif %}
   </div></div>
 """
-    return _layout("Mail Monitor", "mail", body, last_check=last_check, filters=filters, runs=runs)
+    return _layout("Mail Jobs", "jobs", body, jobs=jobs, runs=runs, tick=config.SCHEDULER_TICK_SECONDS, msg=msg, err=err)
+
+
+@app.route("/jobs/new", methods=["GET", "POST"])
+def jobs_new():
+    error = None
+    if request.method == "POST":
+        try:
+            add_job(
+                job_id=request.form["job_id"].strip().lower(),
+                name=request.form["name"].strip(),
+                mailbox=request.form["mailbox"].strip(),
+                subject_pattern=request.form["subject_pattern"].strip(),
+                target_table=request.form["target_table"].strip().lower(),
+                interval_minutes=int(request.form.get("interval_minutes", 60)),
+                enabled=request.form.get("enabled") == "on",
+            )
+            return redirect(url_for("jobs_list", msg=f"Job '{request.form['job_id']}' created"))
+        except Exception as e:
+            error = str(e)
+
+    body = """
+  <h1>New mail job</h1>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="panel">
+    <div class="form-row"><label>Job ID (slug, e.g. order_extract)</label>
+      <input type="text" name="job_id" required pattern="[a-z][a-z0-9_]+"></div>
+    <div class="form-row"><label>Display name</label>
+      <input type="text" name="name" required placeholder="Order Extract"></div>
+    <div class="form-row"><label>W1 mailbox button name</label>
+      <input type="text" name="mailbox" required value="Extract"></div>
+    <div class="form-row"><label>Subject pattern (regex)</label>
+      <input type="text" name="subject_pattern" required placeholder="Order Extract - AE/GCC"></div>
+    <div class="form-row"><label>SQL table name</label>
+      <input type="text" name="target_table" required value="orders"></div>
+    <div class="form-row"><label>Check every (minutes)</label>
+      <input type="number" name="interval_minutes" value="60" min="1" required></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" checked> Enabled</label></div>
+    <button type="submit">Create job</button>
+    <a href="/jobs"><button type="button">Cancel</button></a>
+  </form>
+"""
+    return _layout("New Job", "jobs", body, error=error)
+
+
+@app.route("/jobs/parse", methods=["GET", "POST"])
+def jobs_parse():
+    seed_from_config()
+    jobs = list_jobs()
+    files = _list_excel_files()
+    msg = request.args.get("msg")
+    error = request.args.get("err")
+
+    if request.method == "POST":
+        filename = request.form.get("filename", "")
+        table = request.form.get("target_table", "")
+        filter_id = request.form.get("filter_id", "manual")
+        path = os.path.join(config.DOWNLOAD_DIR, filename)
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"File not found: {filename}")
+            ingest_download(path, table=table, filter_id=filter_id)
+            return redirect(url_for("jobs_parse", msg=f"Parsed {filename} → {table}"))
+        except Exception as e:
+            error = str(e)
+
+    body = """
+  <h1>Manual parse to SQL</h1>
+  <div class="sub">Decrypt + load an Excel file from the download folder without running a mail check.</div>
+  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="panel">
+    <div class="form-row"><label>Excel file in {{ download_dir }}</label>
+      <select name="filename" required>
+        {% for f in files %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+      </select>
+      {% if not files %}<p class="muted">No Excel files found — run a mail job first.</p>{% endif %}
+    </div>
+    <div class="form-row"><label>Target SQL table</label>
+      <input type="text" name="target_table" list="tables" required value="{{ default_table }}">
+      <datalist id="tables">{% for j in jobs %}<option value="{{ j.target_table }}">{% endfor %}</datalist>
+    </div>
+    <div class="form-row"><label>Filter / job ID (for logging)</label>
+      <select name="filter_id">
+        <option value="manual">manual</option>
+        {% for j in jobs %}<option value="{{ j.job_id }}">{{ j.job_id }}</option>{% endfor %}
+      </select>
+    </div>
+    <button type="submit" {{ 'disabled' if not files else '' }}>Parse to SQL</button>
+    <a href="/jobs"><button type="button">Back</button></a>
+  </form>
+"""
+    default_table = jobs[0]["target_table"] if jobs else "orders"
+    return _layout(
+        "Manual Parse", "jobs", body,
+        files=files, jobs=jobs, download_dir=config.DOWNLOAD_DIR,
+        default_table=default_table, msg=msg, error=error,
+    )
+
+
+@app.route("/jobs/<job_id>/edit", methods=["GET", "POST"])
+def jobs_edit(job_id):
+    job = get_job(job_id)
+    if not job:
+        return redirect(url_for("jobs_list", err="Job not found"))
+    error = None
+    if request.method == "POST":
+        try:
+            update_job(
+                job_id,
+                name=request.form["name"].strip(),
+                mailbox=request.form["mailbox"].strip(),
+                subject_pattern=request.form["subject_pattern"].strip(),
+                target_table=request.form["target_table"].strip().lower(),
+                interval_minutes=int(request.form.get("interval_minutes", 60)),
+                enabled=request.form.get("enabled") == "on",
+            )
+            return redirect(url_for("jobs_list", msg=f"Job '{job_id}' updated"))
+        except Exception as e:
+            error = str(e)
+
+    body = """
+  <h1>Edit job: {{ job.job_id }}</h1>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="panel">
+    <div class="form-row"><label>Display name</label>
+      <input type="text" name="name" value="{{ job.name }}" required></div>
+    <div class="form-row"><label>Mailbox</label>
+      <input type="text" name="mailbox" value="{{ job.mailbox }}" required></div>
+    <div class="form-row"><label>Subject pattern</label>
+      <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
+    <div class="form-row"><label>SQL table</label>
+      <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
+    <div class="form-row"><label>Every (minutes)</label>
+      <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
+    <button type="submit">Save</button>
+    <a href="/jobs"><button type="button">Cancel</button></a>
+  </form>
+  <form method="post" action="/jobs/{{ job.job_id }}/delete" class="panel" onsubmit="return confirm('Delete this job?')">
+    <button type="submit" class="btn-danger">Delete job</button>
+  </form>
+"""
+    return _layout("Edit Job", "jobs", body, job=job, error=error)
+
+
+@app.route("/jobs/<job_id>/run", methods=["POST"])
+def jobs_run(job_id):
+    import threading
+    from mail.cron import run_job
+
+    def _bg():
+        try:
+            run_job(job_id)
+        except Exception as e:
+            print(f"Manual run failed: {e}")
+
+    if not get_job(job_id):
+        return redirect(url_for("jobs_list", err="Job not found"))
+    threading.Thread(target=_bg, daemon=True, name=f"run-{job_id}").start()
+    return redirect(url_for("jobs_list", msg=f"Started '{job_id}' — check back in a minute"))
+
+
+@app.route("/jobs/<job_id>/toggle", methods=["POST"])
+def jobs_toggle(job_id):
+    job = get_job(job_id)
+    if not job:
+        return redirect(url_for("jobs_list", err="Job not found"))
+    update_job(job_id, enabled=not job["enabled"])
+    state = "disabled" if job["enabled"] else "enabled"
+    return redirect(url_for("jobs_list", msg=f"Job '{job_id}' {state}"))
+
+
+@app.route("/jobs/<job_id>/delete", methods=["POST"])
+def jobs_delete(job_id):
+    delete_job(job_id)
+    return redirect(url_for("jobs_list", msg=f"Job '{job_id}' deleted"))
+
+
+@app.route("/mail")
+def mail_redirect():
+    return redirect(url_for("jobs_list"))
 
 
 @app.route("/data")
@@ -324,7 +559,13 @@ def api_ingestions():
 
 
 if __name__ == "__main__":
+    seed_from_config()
+    if config.DASHBOARD_RUNS_SCHEDULER:
+        from mail.cron import start_background
+        start_background()
+        print("Mail scheduler running in background (no instant run on startup).")
     ip = _local_ip()
     print(f"Dashboard: http://{ip}:{config.DASHBOARD_PORT}  (LAN)")
     print(f"           http://127.0.0.1:{config.DASHBOARD_PORT}  (local)")
+    print("Manage mail cron jobs at /jobs")
     app.run(host=config.DASHBOARD_HOST, port=config.DASHBOARD_PORT, debug=False, threaded=True)

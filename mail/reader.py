@@ -139,12 +139,17 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
     return downloaded
 
 
-def run_mail_check(on_download=None):
+def run_mail_check(filters=None, on_download=None):
     """
-    One full mail scan across all configured filters.
+    One full mail scan across the given filters (or all enabled jobs from DB).
     *on_download* callback: fn(item_dict) called after each successful download.
     Returns summary dict.
     """
+    if filters is None:
+        from mail.jobs_db import list_jobs, job_as_filter
+        filters = [job_as_filter(j) for j in list_jobs() if j["enabled"]]
+    if not filters:
+        return {"checked_at": datetime.now(), "downloads": [], "errors": ["No enabled mail jobs."]}
     os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
     os.makedirs(config.PROFILE_DIR, exist_ok=True)
     _configure_downloads(config.PROFILE_DIR, config.DOWNLOAD_DIR)
@@ -178,7 +183,7 @@ def run_mail_check(on_download=None):
 
         frame = _open_mail_frame(page)
 
-        for mail_filter in config.MAIL_FILTERS:
+        for mail_filter in filters:
             try:
                 items = check_filter(
                     page, frame, mail_filter,
@@ -201,12 +206,19 @@ def run_mail_check(on_download=None):
 def download_latest():
     """Backward-compatible: download from the first mail filter only."""
     result = None
+    from mail.jobs_db import list_jobs, job_as_filter
+    jobs = list_jobs()
+    if not jobs:
+        from mail.jobs_db import seed_from_config
+        seed_from_config()
+        jobs = list_jobs()
+    filters = [job_as_filter(jobs[0])] if jobs else []
 
     def _capture(item):
         nonlocal result
         result = item["path"]
 
-    summary = run_mail_check(on_download=_capture)
+    summary = run_mail_check(filters=filters, on_download=_capture)
     if result:
         return result
     if summary["downloads"]:

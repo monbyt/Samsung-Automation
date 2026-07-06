@@ -1,0 +1,116 @@
+"""
+Cron scheduler for mail jobs — runs only when due, never on startup.
+"""
+import os
+import sys
+import threading
+import time
+import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+os.environ.setdefault("NO_PROXY", "*")
+os.environ.setdefault("no_proxy", "*")
+
+from datetime import datetime
+
+import config
+from db import record_monitor_run, init_db
+from mail.jobs_db import get_due_jobs, get_job, job_as_filter, mark_job_finished, seed_from_config
+from mail.reader import run_mail_check
+from parse_to_db import ingest_download
+
+_lock = threading.Lock()
+_running = False
+
+
+def _ingest_item(item):
+    ingest_download(
+        item["path"],
+        table=item["table"],
+        filter_id=item["filter_id"],
+        mail_subject=item["subject"],
+    )
+
+
+def run_job(job_id: str) -> dict:
+    """Download mail for one job and parse attachments into SQL."""
+    job = get_job(job_id)
+    if not job:
+        raise ValueError(f"Unknown job: {job_id}")
+
+    print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Running job: {job_id}")
+
+    with _lock:
+        summary = run_mail_check(
+            filters=[job_as_filter(job)],
+            on_download=_ingest_item,
+        )
+        summary["job_id"] = job_id
+
+        if summary["errors"]:
+            mark_job_finished(job_id, "error", "; ".join(summary["errors"]))
+        else:
+            mark_job_finished(job_id, "ok")
+
+        record_monitor_run(summary, job_id=job_id)
+
+    print(
+        f"Job {job_id} done — {len(summary['downloads'])} file(s), "
+        f"{len(summary['errors'])} error(s)"
+    )
+    return summary
+
+
+def tick():
+    """Run all jobs that are due right now."""
+    due = get_due_jobs()
+    for job in due:
+        try:
+            run_job(job["job_id"])
+        except Exception:
+            err = traceback.format_exc()[-500:]
+            print(f"Job {job['job_id']} failed:\n{err}")
+            mark_job_finished(job["job_id"], "error", err)
+            record_monitor_run({
+                "checked_at": datetime.now(),
+                "downloads": [],
+                "errors": [err],
+                "job_id": job["job_id"],
+            })
+
+
+def scheduler_loop():
+    """Background loop — checks every minute, does NOT run jobs on startup."""
+    global _running
+    if _running:
+        return
+    _running = True
+
+    init_db()
+    seed_from_config()
+    tick_seconds = getattr(config, "SCHEDULER_TICK_SECONDS", 60)
+
+    print(
+        f"Mail scheduler started — checking every {tick_seconds}s for due jobs.\n"
+        "Jobs will NOT run immediately on startup; manage them from the dashboard.\n"
+    )
+
+    while True:
+        try:
+            tick()
+        except Exception:
+            print("Scheduler tick failed:")
+            traceback.print_exc()
+        time.sleep(tick_seconds)
+
+
+def start_background():
+    """Start the cron loop in a daemon thread (used by dashboard)."""
+    t = threading.Thread(target=scheduler_loop, daemon=True, name="mail-cron")
+    t.start()
+    return t
+
+
+if __name__ == "__main__":
+    scheduler_loop()

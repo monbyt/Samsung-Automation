@@ -18,9 +18,12 @@ W1_URL = "http://w1.samsung.net"
 HEADLESS = False
 
 # ── Mail monitoring ────────────────────────────────────────────
-# How often the mail monitor checks for new emails (minutes).
-# Keep the monitor PC on and run: python mail/monitor.py
-MONITOR_INTERVAL_MINUTES = 10
+# Scheduler checks every N seconds for jobs whose next_run time has passed.
+# Jobs do NOT run immediately on startup — configure them in the dashboard.
+SCHEDULER_TICK_SECONDS = 60
+
+# Default interval when seeding jobs from MAIL_FILTERS below (minutes).
+DEFAULT_JOB_INTERVAL_MINUTES = 60
 
 # Each filter = one mailbox + subject pattern → one SQL table.
 # Add more dicts to monitor additional email types.
@@ -40,9 +43,13 @@ MAIL_FILTERS = [
     # },
 ]
 
+# Embedded cron inside dashboard.py (set False to use run_monitor.bat separately).
+DASHBOARD_RUNS_SCHEDULER = True
+
 # Backward-compatible aliases (first filter)
 MAILBOX = MAIL_FILTERS[0]["mailbox"]
 MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
+MONITOR_INTERVAL_MINUTES = DEFAULT_JOB_INTERVAL_MINUTES
 
 # ── NERP RPA ───────────────────────────────────────────────────
 NERP_SSO_URL = "https://sts.secsso.net/adfs/ls/"

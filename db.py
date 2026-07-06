@@ -66,15 +66,18 @@ def _migrate_columns():
             conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN mail_subject VARCHAR(500)"))
 
 
-def record_monitor_run(summary):
+def record_monitor_run(summary, job_id=None):
     init_db()
     errors = summary.get("errors", [])
+    detail = "; ".join(errors)[:2000] if errors else None
+    if job_id:
+        detail = f"[{job_id}] " + (detail or "")
     with engine.begin() as conn:
         conn.execute(monitor_runs.insert().values(
             checked_at=summary.get("checked_at", datetime.now()),
             downloads=len(summary.get("downloads", [])),
             errors=len(errors),
-            error_detail="; ".join(errors)[:2000] if errors else None,
+            error_detail=detail,
             status="error" if errors else "ok",
         ))
 

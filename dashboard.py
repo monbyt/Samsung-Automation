@@ -361,7 +361,7 @@ def jobs_new():
     <div class="form-row"><label>Desktop folder name</label>
       <input type="text" name="download_folder" required value="{{ form.download_folder }}"
         placeholder="Product-Extract"></div>
-    <p class="muted">Files save to Desktop\<folder> e.g. C:\Users\you\Desktop\Product-Extract</p>
+    <p class="muted">Files save to Desktop/&lt;folder&gt; — e.g. C:/Users/you/Desktop/Product-Extract</p>
     <div class="form-row"><label>Check every (hours)</label>
       <input type="number" name="interval_hours" value="{{ form.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>

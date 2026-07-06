@@ -3,7 +3,9 @@ __pycache__/
 *.db
 .env
 chrome-profile/
+chrome-profile-nerp/
 Order-Extract/
+data/
 *.xlsx
 *.xls
 .DS_Store

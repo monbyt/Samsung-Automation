@@ -50,15 +50,180 @@ def _set_cdp_download(page, download_dir):
         pass
 
 
+def _click_first(locator, timeout=2_000):
+    try:
+        locator.first.click(timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _page_text(page) -> str:
+    try:
+        return page.inner_text("body", timeout=5_000).lower()
+    except Exception:
+        return ""
+
+
+def _has_expired_session(page) -> bool:
+    text = _page_text(page)
+    return "expired session" in text or "session expired" in text or "session has expired" in text
+
+
+def _dismiss_ok_popups(page, rounds=6):
+    """Click OK / Allow / Confirm on W1 modals (Knox, session, etc.)."""
+    for _ in range(rounds):
+        clicked = False
+        for label in ("OK", "Ok", "Allow", "Accept", "Confirm", "Close", "Yes"):
+            if _click_first(page.get_by_role("button", name=label, exact=True)):
+                clicked = True
+                time.sleep(0.4)
+        try:
+            page.get_by_role("dialog").get_by_role("button", name="OK").click(timeout=800)
+            clicked = True
+            time.sleep(0.4)
+        except Exception:
+            pass
+        try:
+            page.locator('[role="alertdialog"]').get_by_role("button", name="OK").click(timeout=800)
+            clicked = True
+            time.sleep(0.4)
+        except Exception:
+            pass
+        if not clicked:
+            break
+
+
+def _dismiss_expired_session(page):
+    if not _has_expired_session(page):
+        return False
+    print("  W1 expired-session popup — clicking OK...")
+    _dismiss_ok_popups(page)
+    if _has_expired_session(page):
+        _click_first(page.get_by_text(re.compile(r"expired\s+session", re.I)))
+        _dismiss_ok_popups(page)
+    time.sleep(1)
+    return True
+
+
+def _mail_button_visible(page) -> bool:
+    try:
+        page.get_by_role("button", name="Mail", exact=True).wait_for(
+            state="visible", timeout=4_000
+        )
+        return True
+    except PlaywrightTimeout:
+        return False
+
+
+def _needs_w1_login(page) -> bool:
+    if _has_expired_session(page):
+        return True
+    if _mail_button_visible(page):
+        return False
+    text = _page_text(page)
+    url = page.url.lower()
+    if any(k in url for k in ("login", "adfs", "sso", "sts.", "signin")):
+        return True
+    if any(k in text for k in ("sign in", "log in", "user account", "password")):
+        return True
+    try:
+        page.locator('input[type="password"]').first.wait_for(state="visible", timeout=2_000)
+        return True
+    except PlaywrightTimeout:
+        pass
+    return not _mail_button_visible(page)
+
+
+def _w1_login(page):
+    for label in ("Sign in", "Sign In", "Log in", "Login"):
+        _click_first(page.get_by_role("button", name=label))
+        time.sleep(0.5)
+
+    user = config.W1_USERNAME
+    pwd = config.W1_PASSWORD
+    if user and pwd:
+        print("  W1 login — submitting credentials...")
+        for name in ("User Account", "User ID", "Username", "User name", "Email", "ID"):
+            try:
+                page.get_by_role("textbox", name=name).fill(user, timeout=2_000)
+                break
+            except PlaywrightTimeout:
+                continue
+        else:
+            try:
+                page.locator('input[type="text"], input[type="email"]').first.fill(user, timeout=2_000)
+            except Exception:
+                pass
+
+        for name in ("Password",):
+            try:
+                page.get_by_role("textbox", name=name).fill(pwd, timeout=2_000)
+                break
+            except PlaywrightTimeout:
+                pass
+        else:
+            try:
+                page.locator('input[type="password"]').first.fill(pwd, timeout=2_000)
+            except Exception:
+                pass
+
+        for label in ("Sign in", "Sign In", "Log in", "Login", "Submit"):
+            if _click_first(page.get_by_role("button", name=label), timeout=2_000):
+                break
+        else:
+            try:
+                page.locator('input[type="password"]').press("Enter")
+            except Exception:
+                pass
+    else:
+        print(
+            f"  W1 login required — sign in manually in Chrome "
+            f"(waiting up to {config.W1_LOGIN_WAIT_SECONDS}s)..."
+        )
+
+    page.get_by_role("button", name="Mail", exact=True).wait_for(
+        state="visible", timeout=config.W1_LOGIN_WAIT_SECONDS * 1_000
+    )
+    print("  W1 login OK — Mail button visible.")
+
+
+def _ensure_w1_ready(page):
+    """Navigate to W1, dismiss session popups, and log in if needed."""
+    page.goto(config.W1_URL)
+    page.wait_for_load_state("domcontentloaded")
+    time.sleep(1)
+
+    if _dismiss_expired_session(page):
+        page.wait_for_load_state("domcontentloaded")
+        time.sleep(1)
+
+    _dismiss_ok_popups(page)
+
+    if _needs_w1_login(page):
+        print("W1 session expired or not logged in — recovering...")
+        _w1_login(page)
+        page.wait_for_load_state("domcontentloaded")
+        time.sleep(1)
+
+    _dismiss_ok_popups(page)
+
+    if not _mail_button_visible(page):
+        raise RuntimeError(
+            "W1 is not ready — Mail button not found after login recovery. "
+            "Run python download.py once and log in manually."
+        )
+
+
 def _mail_frame(page):
     return page.locator('iframe[title="Mail"]').content_frame
 
 
 def _open_mail_frame(page):
     """Open W1 mail — matches Playwright codegen."""
-    page.goto(config.W1_URL)
-    page.wait_for_load_state("domcontentloaded")
+    _ensure_w1_ready(page)
     page.get_by_role("button", name="Mail", exact=True).click()
+    _dismiss_ok_popups(page)
     frame = _mail_frame(page)
     frame.locator("body").wait_for(state="attached", timeout=15_000)
     return frame
@@ -242,6 +407,19 @@ def run_mail_check(filters=None, on_download=None):
                     if on_download:
                         on_download(item)
             except Exception as e:
+                err = str(e).lower()
+                if "expired" in err or "session" in err or "not logged" in err:
+                    try:
+                        print(f"Session issue on {mail_filter['id']} — re-authenticating...")
+                        frame = _open_mail_frame(page)
+                        items = check_filter(page, frame, mail_filter, processed_subjects)
+                        for item in items:
+                            summary["downloads"].append(item)
+                            if on_download:
+                                on_download(item)
+                        continue
+                    except Exception as retry_e:
+                        e = retry_e
                 msg = f"{mail_filter['id']}: {e}"
                 print(f"ERROR {msg}")
                 summary["errors"].append(msg)

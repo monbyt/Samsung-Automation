@@ -18,6 +18,12 @@ W1_URL = "http://w1.samsung.net/portalapp/home"
 # Set True to hide the browser window on scheduled W1 runs.
 HEADLESS = False
 
+# W1 login — set via env vars (reuses NERP_* if W1_* not set).
+W1_USERNAME = os.environ.get("W1_USERNAME", os.environ.get("NERP_USERNAME", ""))
+W1_PASSWORD = os.environ.get("W1_PASSWORD", os.environ.get("NERP_PASSWORD", ""))
+# Seconds to wait for manual login when no password is configured.
+W1_LOGIN_WAIT_SECONDS = 120
+
 # ── Mail monitoring ────────────────────────────────────────────
 # Scheduler checks every N seconds for jobs whose next_run time has passed.
 # Jobs do NOT run immediately on startup — configure them in the dashboard.

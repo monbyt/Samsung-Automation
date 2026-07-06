@@ -1,0 +1,6 @@
+playwright
+pandas
+openpyxl
+sqlalchemy
+flask
+pywinauto

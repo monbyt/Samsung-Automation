@@ -72,59 +72,52 @@ def _open_mailbox(frame, mailbox):
     time.sleep(1)
 
 
+def _is_regex_pattern(text: str) -> bool:
+    return bool(re.search(r"[\.\^\$\*\+\?\{\}\[\]\|\\]", text))
+
+
+def _email_locator(frame, subject_pattern):
+    """Locate the email row by visible subject text."""
+    if _is_regex_pattern(subject_pattern):
+        return frame.get_by_text(re.compile(subject_pattern, re.IGNORECASE))
+    return frame.get_by_text(subject_pattern, exact=True)
+
+
 def _click_matching_email(frame, subject_pattern):
-    """
-    Click the email row — tries exact title match first (original download.py),
-    then falls back to regex if the job uses a real pattern like 'Sales.*Report'.
-    """
-    # 1) Exact match — this is what worked for Order Extract
+    """Click the email row using get_by_text (how W1 mail UI works)."""
+    loc = _email_locator(frame, subject_pattern)
+
     try:
-        email = frame.locator("div").filter(
-            has_text=re.compile(rf"^{re.escape(subject_pattern)}$", re.IGNORECASE)
-        )
-        email.first.wait_for(state="visible", timeout=15_000)
-        email.first.scroll_into_view_if_needed()
-        email.first.click(timeout=10_000)
+        loc.first.wait_for(state="visible", timeout=15_000)
+        loc.first.scroll_into_view_if_needed()
+        loc.first.click(timeout=10_000)
         time.sleep(0.5)
-        print(f"  Clicked email (exact match): {subject_pattern}")
+        print(f"  Clicked email (get_by_text): {subject_pattern}")
         return subject_pattern
     except Exception as e:
-        print(f"  Exact match click failed ({e}), trying regex...")
+        print(f"  get_by_text exact failed ({e}), trying partial match...")
 
-    # 2) Regex pattern — for jobs that use patterns like 'Order Extract.*'
-    pattern = re.compile(subject_pattern, re.IGNORECASE)
-    rows = frame.locator("div").filter(has_text=pattern)
-    for i in range(min(rows.count(), 30)):
-        row = rows.nth(i)
-        try:
-            line = row.inner_text(timeout=2_000).strip().split("\n")[0].strip()
-            if not pattern.search(line):
-                continue
-            row.scroll_into_view_if_needed()
-            row.click(timeout=10_000)
-            time.sleep(0.5)
-            print(f"  Clicked email (regex match): {line}")
-            return line
-        except Exception:
-            continue
-
-    raise RuntimeError(f"Could not click any email matching /{subject_pattern}/")
+    # Partial / contains match
+    try:
+        partial = frame.get_by_text(subject_pattern)
+        partial.first.wait_for(state="visible", timeout=10_000)
+        partial.first.scroll_into_view_if_needed()
+        partial.first.click(timeout=10_000)
+        time.sleep(0.5)
+        print(f"  Clicked email (get_by_text partial): {subject_pattern}")
+        return subject_pattern
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not click email '{subject_pattern}' — check subject in Mail Jobs."
+        ) from e
 
 
 def _count_matching_emails(frame, subject_pattern):
-    """Count visible emails matching the pattern (mailbox must already be open)."""
-    pattern = re.compile(subject_pattern, re.IGNORECASE)
-    exact = re.compile(rf"^{re.escape(subject_pattern)}$", re.IGNORECASE)
-    rows = frame.locator("div").filter(has_text=pattern)
-    count = 0
-    for i in range(min(rows.count(), 30)):
-        try:
-            line = rows.nth(i).inner_text(timeout=2_000).strip().split("\n")[0].strip()
-            if exact.search(line) or pattern.search(line):
-                count += 1
-        except Exception:
-            continue
-    return count
+    """Count visible emails (mailbox must already be open)."""
+    try:
+        return _email_locator(frame, subject_pattern).count()
+    except Exception:
+        return frame.get_by_text(subject_pattern).count()
 
 
 def check_filter(page, frame, mail_filter, download_dir, processed_subjects):

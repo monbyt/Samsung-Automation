@@ -38,12 +38,46 @@ def _configure_downloads(profile_dir, download_dir):
         json.dump(prefs, f)
 
 
+def _mail_frame(page):
+    return page.locator('iframe[title="Mail"]').content_frame
+
+
 def _open_mail_frame(page):
+    """Open W1 mail — matches Playwright codegen exactly."""
     page.goto(config.W1_URL)
     page.wait_for_load_state("domcontentloaded")
-    page.get_by_role("button", name="Mail").click()
     page.get_by_role("button", name="Mail", exact=True).click()
-    return page.locator('iframe[title="Mail"]').content_frame
+    frame = _mail_frame(page)
+    frame.locator("body").wait_for(state="attached", timeout=15_000)
+    return frame
+
+
+def _subject_regex(subject: str):
+    """
+    Anchored regex for an email subject line.
+    Codegen: div.filter(has_text=re.compile(r"^Product Extract - SGE\\+GCC$"))
+    """
+    return re.compile(rf"^{re.escape(subject)}$")
+
+
+def _email_row(frame, subject: str):
+    return frame.locator("div").filter(has_text=_subject_regex(subject))
+
+
+def _open_mailbox(frame, mailbox):
+    frame.get_by_role("button", name=mailbox).click()
+    time.sleep(1)
+
+
+def _click_matching_email(frame, subject: str):
+    """Click email row — same locator as Playwright codegen."""
+    row = _email_row(frame, subject)
+    row.first.wait_for(state="visible", timeout=15_000)
+    row.first.scroll_into_view_if_needed()
+    row.first.click(timeout=10_000)
+    time.sleep(0.5)
+    print(f"  Clicked email: {subject}")
+    return subject
 
 
 def _download_from_open_email(page, frame, download_dir):
@@ -67,59 +101,6 @@ def _download_from_open_email(page, frame, download_dir):
     return save_path
 
 
-def _open_mailbox(frame, mailbox):
-    frame.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(1)
-
-
-def _is_regex_pattern(text: str) -> bool:
-    return bool(re.search(r"[\.\^\$\*\+\?\{\}\[\]\|\\]", text))
-
-
-def _email_locator(frame, subject_pattern):
-    """Locate the email row by visible subject text."""
-    if _is_regex_pattern(subject_pattern):
-        return frame.get_by_text(re.compile(subject_pattern, re.IGNORECASE))
-    return frame.get_by_text(subject_pattern, exact=True)
-
-
-def _click_matching_email(frame, subject_pattern):
-    """Click the email row using get_by_text (how W1 mail UI works)."""
-    loc = _email_locator(frame, subject_pattern)
-
-    try:
-        loc.first.wait_for(state="visible", timeout=15_000)
-        loc.first.scroll_into_view_if_needed()
-        loc.first.click(timeout=10_000)
-        time.sleep(0.5)
-        print(f"  Clicked email (get_by_text): {subject_pattern}")
-        return subject_pattern
-    except Exception as e:
-        print(f"  get_by_text exact failed ({e}), trying partial match...")
-
-    # Partial / contains match
-    try:
-        partial = frame.get_by_text(subject_pattern)
-        partial.first.wait_for(state="visible", timeout=10_000)
-        partial.first.scroll_into_view_if_needed()
-        partial.first.click(timeout=10_000)
-        time.sleep(0.5)
-        print(f"  Clicked email (get_by_text partial): {subject_pattern}")
-        return subject_pattern
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not click email '{subject_pattern}' — check subject in Mail Jobs."
-        ) from e
-
-
-def _count_matching_emails(frame, subject_pattern):
-    """Count visible emails (mailbox must already be open)."""
-    try:
-        return _email_locator(frame, subject_pattern).count()
-    except Exception:
-        return frame.get_by_text(subject_pattern).count()
-
-
 def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
     """
     Check one mail filter for new emails. Returns list of downloaded file paths.
@@ -132,11 +113,6 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
     print(f"[{filter_id}] Scanning mailbox '{mailbox}' for /{subject_pattern}/")
 
     _open_mailbox(frame, mailbox)
-    found = _count_matching_emails(frame, subject_pattern)
-    print(f"[{filter_id}] Found {found} matching email(s)")
-    if found == 0:
-        return downloaded
-
     opened_subject = _click_matching_email(frame, subject_pattern)
 
     key = f"{filter_id}::{opened_subject}"

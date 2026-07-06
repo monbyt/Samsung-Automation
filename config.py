@@ -12,7 +12,7 @@ DOWNLOAD_DIR = r"C:\Users\m.tasoglu\Desktop\Order-Extract"
 # Chrome profile that stays logged into W1 (created on first run)
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile")
 
-W1_URL = "http://w1.samsung.net"
+W1_URL = "http://w1.samsung.net/portalapp/home"
 
 # Set True to hide the browser window on scheduled W1 runs.
 HEADLESS = False
@@ -31,16 +31,15 @@ MAIL_FILTERS = [
     {
         "id": "order_extract",
         "mailbox": "Extract",
-        "subject": r"Order Extract - AE/GCC",   # regex match
+        "subject": "Order Extract - AE/GCC",
         "table": "orders",
     },
-    # Example — uncomment and edit to add another feed:
-    # {
-    #     "id": "sales_report",
-    #     "mailbox": "Extract",
-    #     "subject": r"Sales Report",
-    #     "table": "sales_reports",
-    # },
+    {
+        "id": "product_extract",
+        "mailbox": "Product Extract",
+        "subject": "Product Extract - SGE+GCC",
+        "table": "product_orders",
+    },
 ]
 
 # Embedded cron inside dashboard.py (set False to use run_monitor.bat separately).

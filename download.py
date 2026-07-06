@@ -5,8 +5,7 @@ straight into DOWNLOAD_DIR.
 We try three layers to avoid the native 'Save As' popup:
   1. Chrome profile prefs (no prompt, fixed folder).
   2. CDP download behaviour at runtime.
-  3. Background watcher that auto-confirms the Windows Save As dialog
-     (Enter / full path) if layers 1–2 don't catch it.
+  3. Press Enter on the native Save As dialog if layers 1–2 don't catch it.
 """
 import os
 import re
@@ -18,7 +17,7 @@ os.environ["no_proxy"] = "*"
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 import config
-from win_save_as import start_save_as_watcher, wait_for_new_file
+from win_save_as import dismiss_save_as_dialog, wait_for_new_file
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -93,19 +92,17 @@ def download_latest():
             has_text=re.compile(rf"^{re.escape(config.MAIL_SUBJECT)}$")
         ).first.click()
 
-        # Layer 3: if a native Save As dialog still pops up, confirm it.
-        start_save_as_watcher(config.DOWNLOAD_DIR)
-
         save_path = None
         try:
-            with page.expect_download(timeout=20_000) as download_info:
+            with page.expect_download(timeout=8_000) as download_info:
                 frame.get_by_role("button", name="Download").click()
             download = download_info.value
             save_path = os.path.join(config.DOWNLOAD_DIR, download.suggested_filename)
             download.save_as(save_path)
         except PlaywrightTimeout:
-            print("Browser didn't capture the download — waiting for Save As / file...")
-            save_path = wait_for_new_file(config.DOWNLOAD_DIR)
+            print("Browser didn't capture download — pressing Enter on Save As...")
+            dismiss_save_as_dialog(timeout=60)
+            save_path = wait_for_new_file(config.DOWNLOAD_DIR, timeout=60)
 
         # Dismiss any confirmation dialog
         try:

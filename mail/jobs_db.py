@@ -21,6 +21,7 @@ mail_jobs = Table(
     Column("mailbox", String(100), nullable=False),
     Column("subject_pattern", String(500), nullable=False),
     Column("target_table", String(100), nullable=False),
+    Column("ingest_mode", String(20), default="replace"),
     Column("interval_minutes", Integer, default=60),
     Column("enabled", Integer, default=1),
     Column("last_run", DateTime),
@@ -34,6 +35,19 @@ mail_jobs = Table(
 def _ensure_tables():
     init_db()
     metadata.create_all(engine)
+    _migrate_jobs_columns()
+
+
+def _migrate_jobs_columns():
+    if not config.DB_URL.startswith("sqlite"):
+        return
+    from sqlalchemy import text as sqltext
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(sqltext("PRAGMA table_info(mail_jobs)"))}
+        if "ingest_mode" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE mail_jobs ADD COLUMN ingest_mode VARCHAR(20) DEFAULT 'replace'"
+            ))
 
 
 def _slug_ok(job_id: str) -> bool:
@@ -48,6 +62,7 @@ def _row_to_dict(row):
         "mailbox": row.mailbox,
         "subject_pattern": row.subject_pattern,
         "target_table": row.target_table,
+        "ingest_mode": getattr(row, "ingest_mode", None) or "replace",
         "interval_minutes": row.interval_minutes,
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
@@ -64,6 +79,7 @@ def _filter_dict(job):
         "mailbox": job["mailbox"],
         "subject": job["subject_pattern"],
         "table": job["target_table"],
+        "ingest_mode": job.get("ingest_mode", "replace"),
     }
 
 
@@ -85,6 +101,7 @@ def seed_from_config():
                 mailbox=f["mailbox"],
                 subject_pattern=f["subject"],
                 target_table=f["table"],
+                ingest_mode="replace",
                 interval_minutes=interval,
                 enabled=1,
                 next_run=now + timedelta(minutes=interval),
@@ -124,7 +141,7 @@ def get_due_jobs(now=None):
 
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
-            interval_minutes=60, enabled=True):
+            interval_minutes=60, enabled=True, ingest_mode="replace"):
     if not _slug_ok(job_id):
         raise ValueError("Job ID must be lowercase letters, numbers, underscores (e.g. order_extract).")
     _ensure_tables()
@@ -137,6 +154,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
             mailbox=mailbox,
             subject_pattern=subject_pattern,
             target_table=target_table,
+            ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
             interval_minutes=interval,
             enabled=1 if enabled else 0,
             next_run=now + timedelta(minutes=interval),
@@ -147,7 +165,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
 def update_job(job_id, **fields):
     allowed = {
         "name", "mailbox", "subject_pattern", "target_table",
-        "interval_minutes", "enabled",
+        "interval_minutes", "enabled", "ingest_mode",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
@@ -156,6 +174,8 @@ def update_job(job_id, **fields):
         updates["interval_minutes"] = max(1, int(updates["interval_minutes"]))
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
+    if "ingest_mode" in updates and updates["ingest_mode"] not in ("replace", "append"):
+        updates["ingest_mode"] = "replace"
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(

@@ -25,11 +25,20 @@ _running = False
 
 
 def _ingest_item(item):
+    from parse_to_db import file_hash, get_last_ingest_hash_for_filter, ingest_download
+
+    h = file_hash(item["path"])
+    fid = item["filter_id"]
+    if get_last_ingest_hash_for_filter(fid) == h:
+        print(f"  Unchanged file for {fid}, skipping SQL load")
+        return
+
     ingest_download(
         item["path"],
         table=item["table"],
-        filter_id=item["filter_id"],
+        filter_id=fid,
         mail_subject=item["subject"],
+        ingest_mode=item.get("ingest_mode", "replace"),
     )
 
 

@@ -2,8 +2,9 @@
 Parses Excel files into the SQL database.
 
 - Decrypts password-protected workbooks via Excel COM (Windows).
-- Rows go into per-filter tables (tagged with source_file, batch_id, loaded_at).
-- De-duplicated by content hash — re-downloading the same file is skipped.
+- ingest_mode=replace: new version replaces prior rows for the same filter_id.
+- ingest_mode=append: keeps history (every ingest adds rows).
+- Identical file hash is always skipped (unchanged attachment).
 """
 import hashlib
 import os
@@ -11,14 +12,14 @@ import uuid
 from datetime import datetime
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 import config
 from db import engine, ingestion_log, init_db
 from excel_decrypt import prepare_for_reading
 
 
-def _file_hash(path):
+def file_hash(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
@@ -26,16 +27,49 @@ def _file_hash(path):
     return h.hexdigest()
 
 
-def _already_ingested(file_hash):
+def _file_hash(path):
+    return file_hash(path)
+
+
+def _already_ingested(file_hash_value):
     init_db()
     with engine.connect() as conn:
         count = conn.execute(
             select(func.count())
             .select_from(ingestion_log)
-            .where(ingestion_log.c.file_hash == file_hash)
+            .where(ingestion_log.c.file_hash == file_hash_value)
             .where(ingestion_log.c.status == "success")
         ).scalar()
     return bool(count)
+
+
+def get_last_ingest_hash_for_filter(filter_id):
+    """Hash of the last successful ingest for this mail job (if any)."""
+    if not filter_id:
+        return None
+    init_db()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(ingestion_log.c.file_hash)
+            .where(ingestion_log.c.filter_id == filter_id)
+            .where(ingestion_log.c.status == "success")
+            .order_by(ingestion_log.c.id.desc())
+            .limit(1)
+        ).first()
+    return row[0] if row else None
+
+
+def _clear_filter_rows(table, filter_id):
+    """Remove prior rows for this mail job before loading an updated file."""
+    if not filter_id or filter_id == "manual":
+        return 0
+    init_db()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"DELETE FROM {table} WHERE filter_id = :fid"),
+            {"fid": filter_id},
+        )
+        return result.rowcount or 0
 
 
 def _clean_columns(df):
@@ -46,7 +80,7 @@ def _clean_columns(df):
     return df
 
 
-def _log(batch_id, path, file_hash, rows, status, message,
+def _log(batch_id, path, file_hash_value, rows, status, message,
          filter_id=None, mail_subject=None):
     with engine.begin() as conn:
         conn.execute(ingestion_log.insert().values(
@@ -54,7 +88,7 @@ def _log(batch_id, path, file_hash, rows, status, message,
             filter_id=filter_id,
             mail_subject=mail_subject,
             source_file=os.path.basename(path),
-            file_hash=file_hash,
+            file_hash=file_hash_value,
             row_count=rows,
             status=status,
             message=(message or "")[:1000],
@@ -62,16 +96,26 @@ def _log(batch_id, path, file_hash, rows, status, message,
         ))
 
 
-def parse_file(path, table=None, filter_id=None, mail_subject=None):
+def parse_file(path, table=None, filter_id=None, mail_subject=None,
+               ingest_mode="replace", force=False):
+    """
+    Load Excel into SQL.
+
+    ingest_mode:
+      replace — drop existing rows for this filter_id, then insert (latest snapshot).
+      append  — add rows without removing older versions.
+    """
     table = table or config.ORDERS_TABLE
-    file_hash = _file_hash(path)
+    file_hash_value = file_hash(path)
     name = os.path.basename(path)
 
-    if _already_ingested(file_hash):
-        print(f"Already ingested, skipping: {name}")
-        return
+    if not force and _already_ingested(file_hash_value):
+        print(f"Unchanged file, skipping: {name}")
+        return {"skipped": True, "reason": "unchanged", "rows": 0}
 
     batch_id = uuid.uuid4().hex[:12]
+    mode = (ingest_mode or "replace").lower()
+
     try:
         readable = prepare_for_reading(path)
         df = pd.read_excel(readable)
@@ -81,20 +125,30 @@ def parse_file(path, table=None, filter_id=None, mail_subject=None):
         df["filter_id"] = filter_id or ""
         df["loaded_at"] = datetime.now()
 
+        replaced = 0
+        if mode == "replace":
+            replaced = _clear_filter_rows(table, filter_id)
+
         df.to_sql(table, engine, if_exists="append", index=False)
-        _log(batch_id, path, file_hash, len(df), "success", "",
+        note = f"replaced {replaced} old rows" if replaced else mode
+        _log(batch_id, path, file_hash_value, len(df), "success", note,
              filter_id=filter_id, mail_subject=mail_subject)
-        print(f"Loaded {len(df)} rows from {name} → {table}")
+        print(f"Loaded {len(df)} rows from {name} → {table} ({note})")
+        return {"skipped": False, "rows": len(df), "replaced": replaced, "batch_id": batch_id}
     except Exception as e:
-        _log(batch_id, path, file_hash, 0, "error", str(e),
+        _log(batch_id, path, file_hash_value, 0, "error", str(e),
              filter_id=filter_id, mail_subject=mail_subject)
         print(f"Error parsing {name}: {e}")
         raise
 
 
-def ingest_download(path, table=None, filter_id=None, mail_subject=None):
+def ingest_download(path, table=None, filter_id=None, mail_subject=None,
+                    ingest_mode="replace", force=False):
     """Decrypt (if needed) and load one downloaded attachment."""
-    parse_file(path, table=table, filter_id=filter_id, mail_subject=mail_subject)
+    return parse_file(
+        path, table=table, filter_id=filter_id, mail_subject=mail_subject,
+        ingest_mode=ingest_mode, force=force,
+    )
 
 
 def parse_latest():

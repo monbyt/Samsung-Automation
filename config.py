@@ -72,6 +72,10 @@ DB_URL = f"sqlite:///{os.path.join(BASE_DIR, 'orders.db')}"
 ORDERS_TABLE = MAIL_FILTERS[0]["table"]
 
 # ── Dashboard (LAN-accessible) ─────────────────────────────────
+# Optional API key for LAN access (leave empty to allow all on the network).
+# Colleagues pass header:  X-API-Key: your-key-here
+API_KEY = os.environ.get("API_KEY", "")
+
 # Bind 0.0.0.0 so colleagues on the same network can open the dashboard.
 # Example: http://192.168.1.50:5000
 DASHBOARD_HOST = "0.0.0.0"

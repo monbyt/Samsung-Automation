@@ -112,6 +112,11 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
     subjects = _list_matching_subjects(frame, mailbox, subject_pattern)
     print(f"[{filter_id}] Found {len(subjects)} matching email(s)")
 
+    # Same subject line is reused for recurring reports — take the newest only.
+    if not subjects:
+        return downloaded
+    subjects = [subjects[0]]
+
     for subject in subjects:
         key = f"{filter_id}::{subject}"
         if key in processed_subjects:
@@ -126,6 +131,7 @@ def check_filter(page, frame, mail_filter, download_dir, processed_subjects):
             "filter_id": filter_id,
             "table": mail_filter["table"],
             "subject": subject,
+            "ingest_mode": mail_filter.get("ingest_mode", "replace"),
         })
         processed_subjects.add(key)
 

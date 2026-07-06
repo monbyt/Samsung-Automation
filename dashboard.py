@@ -142,6 +142,7 @@ def _layout(title, active, body, **ctx):
     <a href="/jobs" class="{{{{ 'active' if active=='jobs' else '' }}}}">Mail Jobs</a>
     <a href="/data" class="{{{{ 'active' if active=='data' else '' }}}}">Data Explorer</a>
     <a href="/query" class="{{{{ 'active' if active=='query' else '' }}}}">SQL Query</a>
+    <a href="/api/docs" class="{{{{ 'active' if active=='api' else '' }}}}">API</a>
   </nav>
   {body}
 </div></body></html>
@@ -234,11 +235,12 @@ def jobs_list():
   </div>
   <div class="panel"><h2>Scheduled jobs</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Mode</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
     {% for j in jobs %}<tr>
       <td><span class="pill">{{ j.job_id }}</span><br><span class="muted">{{ j.name }}</span></td>
       <td>{{ j.mailbox }}</td><td><code>{{ j.subject_pattern }}</code></td>
       <td>{{ j.target_table }}</td>
+      <td><span class="pill">{{ j.ingest_mode }}</span></td>
       <td>{{ j.interval_minutes }}m</td>
       <td>{{ j.next_run or '—' }}</td>
       <td>{{ j.last_run or '—' }}</td>
@@ -282,6 +284,7 @@ def jobs_new():
                 target_table=request.form["target_table"].strip().lower(),
                 interval_minutes=int(request.form.get("interval_minutes", 60)),
                 enabled=request.form.get("enabled") == "on",
+                ingest_mode=request.form.get("ingest_mode", "replace"),
             )
             return redirect(url_for("jobs_list", msg=f"Job '{request.form['job_id']}' created"))
         except Exception as e:
@@ -303,6 +306,11 @@ def jobs_new():
       <input type="text" name="target_table" required value="orders"></div>
     <div class="form-row"><label>Check every (minutes)</label>
       <input type="number" name="interval_minutes" value="60" min="1" required></div>
+    <div class="form-row"><label>When a newer file arrives</label>
+      <select name="ingest_mode">
+        <option value="replace" selected>Replace — swap old rows for this job (recommended)</option>
+        <option value="append">Append — keep all historical rows</option>
+      </select></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" checked> Enabled</label></div>
     <button type="submit">Create job</button>
     <a href="/jobs"><button type="button">Cancel</button></a>
@@ -327,7 +335,12 @@ def jobs_parse():
         try:
             if not os.path.isfile(path):
                 raise FileNotFoundError(f"File not found: {filename}")
-            ingest_download(path, table=table, filter_id=filter_id)
+            force = request.form.get("force") == "on"
+            ingest_download(
+                path, table=table, filter_id=filter_id,
+                ingest_mode=request.form.get("ingest_mode", "replace"),
+                force=force,
+            )
             return redirect(url_for("jobs_parse", msg=f"Parsed {filename} → {table}"))
         except Exception as e:
             error = str(e)
@@ -354,6 +367,12 @@ def jobs_parse():
         {% for j in jobs %}<option value="{{ j.job_id }}">{{ j.job_id }}</option>{% endfor %}
       </select>
     </div>
+    <div class="form-row"><label>When loading</label>
+      <select name="ingest_mode">
+        <option value="replace">Replace old rows for this job</option>
+        <option value="append">Append rows</option>
+      </select></div>
+    <div class="form-row"><label><input type="checkbox" name="force"> Force re-parse (even if file unchanged)</label></div>
     <button type="submit" {{ 'disabled' if not files else '' }}>Parse to SQL</button>
     <a href="/jobs"><button type="button">Back</button></a>
   </form>
@@ -382,6 +401,7 @@ def jobs_edit(job_id):
                 target_table=request.form["target_table"].strip().lower(),
                 interval_minutes=int(request.form.get("interval_minutes", 60)),
                 enabled=request.form.get("enabled") == "on",
+                ingest_mode=request.form.get("ingest_mode", "replace"),
             )
             return redirect(url_for("jobs_list", msg=f"Job '{job_id}' updated"))
         except Exception as e:
@@ -401,6 +421,11 @@ def jobs_edit(job_id):
       <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
     <div class="form-row"><label>Every (minutes)</label>
       <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
+    <div class="form-row"><label>When a newer file arrives</label>
+      <select name="ingest_mode">
+        <option value="replace" {{ 'selected' if job.ingest_mode=='replace' else '' }}>Replace old rows</option>
+        <option value="append" {{ 'selected' if job.ingest_mode=='append' else '' }}>Append rows</option>
+      </select></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
     <button type="submit">Save</button>
     <a href="/jobs"><button type="button">Cancel</button></a>
@@ -530,30 +555,171 @@ def sql_query():
 
 # ── JSON API for network integrations ──────────────────────────
 
+def _check_api_key():
+    if not config.API_KEY:
+        return None
+    provided = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if provided != config.API_KEY:
+        return jsonify({"error": "unauthorized — set X-API-Key header or ?api_key="}), 401
+    return None
+
+
+def _api_guard():
+    err = _check_api_key()
+    if err:
+        return err
+
+
+@app.route("/api/docs")
+def api_docs():
+    ip = _local_ip()
+    port = config.DASHBOARD_PORT
+    base = f"http://{ip}:{port}"
+    key_note = (
+        "All requests need header <code>X-API-Key: YOUR_KEY</code> "
+        "(set <code>API_KEY</code> in config.py or env)."
+        if config.API_KEY else
+        "No API key configured — open access on your LAN."
+    )
+    body = f"""
+  <h1>API docs</h1>
+  <div class="sub">Base URL: <code>{base}</code> · {key_note}</div>
+  <div class="panel"><h2>Endpoints</h2>
+  <table>
+    <tr><th>Method</th><th>URL</th><th>Description</th></tr>
+    <tr><td>GET</td><td><code>/api/health</code></td><td>Server status</td></tr>
+    <tr><td>GET</td><td><code>/api/tables</code></td><td>List SQL tables</td></tr>
+    <tr><td>GET</td><td><code>/api/jobs</code></td><td>List mail cron jobs</td></tr>
+    <tr><td>GET</td><td><code>/api/table/orders?limit=100&amp;offset=0</code></td><td>Rows from a table (paginated)</td></tr>
+    <tr><td>GET</td><td><code>/api/table/orders/latest?filter_id=order_extract</code></td><td>Latest snapshot for one job</td></tr>
+    <tr><td>GET</td><td><code>/api/ingestions</code></td><td>Ingestion history</td></tr>
+    <tr><td>POST</td><td><code>/api/query</code></td><td>Read-only SQL (JSON body)</td></tr>
+  </table></div>
+  <div class="panel"><h2>Examples (curl)</h2>
+  <pre style="background:#0d1017;padding:12px;border-radius:8px;font-size:12px;overflow-x:auto">
+# List tables
+curl "{base}/api/tables"
+
+# Get 500 order rows
+curl "{base}/api/table/orders?limit=500"
+
+# Latest data for one mail job
+curl "{base}/api/table/orders/latest?filter_id=order_extract"
+
+# Read-only SQL
+curl -X POST "{base}/api/query" -H "Content-Type: application/json" \\
+  -d '{{"sql": "SELECT * FROM orders LIMIT 10"}}'
+
+# Python
+import requests
+r = requests.get("{base}/api/table/orders", params={{"limit": 100}})
+print(r.json()["rows"])
+</pre></div>
+  <div class="panel"><h2>From Excel / Power Query</h2>
+  <p class="muted">Data → Get Data → From Web → paste:</p>
+  <pre style="background:#0d1017;padding:12px;border-radius:8px">{base}/api/table/orders?limit=10000</pre>
+  </div>
+"""
+    return _layout("API", "api", body)
+
+
 @app.route("/api/health")
 def api_health():
+    if err := _api_guard():
+        return err
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
 
 @app.route("/api/tables")
 def api_tables():
+    if err := _api_guard():
+        return err
     return jsonify({"tables": _tables()})
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    if err := _api_guard():
+        return err
+    seed_from_config()
+    jobs = list_jobs()
+    return jsonify({"jobs": jobs})
 
 
 @app.route("/api/table/<name>")
 def api_table(name):
+    if err := _api_guard():
+        return err
     if name not in _tables():
         return jsonify({"error": "table not found"}), 404
-    limit = min(int(request.args.get("limit", 100)), 1000)
+    limit = min(int(request.args.get("limit", 100)), 10000)
     offset = int(request.args.get("offset", 0))
-    df, err = _read_sql(f"SELECT * FROM {name} LIMIT :lim OFFSET :off", {"lim": limit, "off": offset})
+    filter_id = request.args.get("filter_id")
+    if filter_id:
+        df, err = _read_sql(
+            f"SELECT * FROM {name} WHERE filter_id = :fid LIMIT :lim OFFSET :off",
+            {"fid": filter_id, "lim": limit, "off": offset},
+        )
+    else:
+        df, err = _read_sql(
+            f"SELECT * FROM {name} LIMIT :lim OFFSET :off",
+            {"lim": limit, "off": offset},
+        )
     if err:
         return jsonify({"error": err}), 400
     return jsonify({"table": name, "rows": df.to_dict("records"), "count": len(df)})
 
 
+@app.route("/api/table/<name>/latest")
+def api_table_latest(name):
+    """Latest snapshot — rows from the most recent successful ingest for a filter."""
+    if err := _api_guard():
+        return err
+    if name not in _tables():
+        return jsonify({"error": "table not found"}), 404
+    filter_id = request.args.get("filter_id", "")
+    if filter_id:
+        df, err = _read_sql(
+            f"SELECT * FROM {name} WHERE filter_id = :fid",
+            {"fid": filter_id},
+        )
+    else:
+        batch_df, err = _read_sql(
+            f"SELECT batch_id FROM {name} ORDER BY loaded_at DESC LIMIT 1"
+        )
+        if err or batch_df.empty:
+            return jsonify({"table": name, "rows": [], "count": 0})
+        bid = batch_df.iloc[0]["batch_id"]
+        df, err = _read_sql(
+            f"SELECT * FROM {name} WHERE batch_id = :bid",
+            {"bid": bid},
+        )
+    if err:
+        return jsonify({"error": err}), 400
+    return jsonify({"table": name, "filter_id": filter_id or None,
+                    "rows": df.to_dict("records"), "count": len(df)})
+
+
+@app.route("/api/query", methods=["POST"])
+def api_query():
+    if err := _api_guard():
+        return err
+    data = request.get_json(silent=True) or {}
+    sql = data.get("sql", "")
+    try:
+        safe = _safe_select(sql)
+        df, err = _read_sql(safe)
+        if err:
+            return jsonify({"error": err}), 400
+        return jsonify({"rows": df.head(5000).to_dict("records"), "count": len(df)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/ingestions")
 def api_ingestions():
+    if err := _api_guard():
+        return err
     df, _ = _read_sql("SELECT * FROM ingestion_log ORDER BY id DESC LIMIT 100")
     return jsonify({"ingestions": df.to_dict("records")})
 

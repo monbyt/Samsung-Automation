@@ -33,14 +33,45 @@ def _live_page(context, page=None):
     return context.new_page()
 
 
-def _needs_login(page) -> bool:
-    try:
-        page.get_by_role("textbox", name="User Account").wait_for(
-            state="visible", timeout=5_000
-        )
-        return True
-    except PlaywrightTimeout:
+def _nerp_visible(page) -> bool:
+    if page is None or page.is_closed():
         return False
+    try:
+        if page.locator("#canvas").is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
+    try:
+        if page.get_by_role("textbox", name="Search Program").is_visible(timeout=500):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _find_login_page(context, page=None, timeout_ms: int = 45_000):
+    """Find SSO login form — may appear on any tab after nerpsr redirect."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        page = _live_page(context, page)
+        if _nerp_visible(page):
+            return None
+
+        candidates = [page] + [p for p in reversed(context.pages) if p is not page]
+        for candidate in candidates:
+            if candidate is None or candidate.is_closed():
+                continue
+            try:
+                candidate.get_by_role("textbox", name="User Account").wait_for(
+                    state="visible", timeout=1_500
+                )
+                return candidate
+            except PlaywrightTimeout:
+                continue
+
+        page.wait_for_timeout(500)
+
+    return None
 
 
 def _login(page) -> None:
@@ -49,6 +80,7 @@ def _login(page) -> None:
             "Set NERP_USERNAME and NERP_PASSWORD in config.py."
         )
 
+    page = _live_page(page.context, page)
     page.get_by_role("textbox", name="User Account").click()
     page.get_by_role("textbox", name="User Account").fill(config.NERP_USERNAME)
     page.get_by_role("textbox", name="Password").click()
@@ -61,20 +93,10 @@ def _wait_for_nerp_ready(context, page, timeout_ms: int = 120_000):
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
         page = _live_page(context, page)
-        try:
-            page.locator("#canvas").wait_for(state="visible", timeout=2_000)
+        if _nerp_visible(page):
             return page
-        except PlaywrightTimeout:
-            pass
-        try:
-            page.get_by_role("textbox", name="Search Program").wait_for(
-                state="visible", timeout=2_000
-            )
-            return page
-        except PlaywrightTimeout:
-            pass
         page.wait_for_timeout(500)
-    raise RuntimeError("NERP did not load after SSO login (timed out).")
+    raise RuntimeError("NERP did not load after login (timed out).")
 
 
 def _open_home(page) -> None:
@@ -125,6 +147,17 @@ def _create_and_print_pi(shell) -> None:
         pass
 
 
+def _fresh_page(context):
+    """Discard stale profile tabs that cause 'browser has been closed' errors."""
+    for old in list(context.pages):
+        try:
+            if not old.is_closed():
+                old.close()
+        except Exception:
+            pass
+    return context.new_page()
+
+
 def run(upload_file=None) -> None:
     path = upload_file or config.NERP_UPLOAD_FILE
     if not os.path.isfile(path):
@@ -140,12 +173,15 @@ def run(upload_file=None) -> None:
             args=["--disable-popup-blocking", "--no-first-run"],
         )
 
-        page = _live_page(context)
-        page.goto(config.NERP_SSO_URL, wait_until="domcontentloaded")
+        page = _fresh_page(context)
+        print(f"Opening {config.NERP_URL} ...")
+        page.goto(config.NERP_URL, wait_until="domcontentloaded", timeout=90_000)
+        page = _live_page(context, page)
 
-        if _needs_login(page):
+        login_page = _find_login_page(context, page)
+        if login_page:
             print("Logging into NERP SSO...")
-            _login(page)
+            _login(login_page)
         else:
             print("Using saved NERP session.")
 

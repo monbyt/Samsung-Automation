@@ -23,7 +23,7 @@ def _load_dotenv():
                     continue
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
+                if key and val and key not in os.environ:
                     os.environ[key] = val
 
 
@@ -83,9 +83,9 @@ NERP_SSO_URL = NERP_URL
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 
-# Samsung SSO — edit here; env vars / .env still override if set.
-NERP_USERNAME = os.environ.get("NERP_USERNAME", "m.tasoglu")
-NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "Pass2002?")
+# Samsung SSO — edit here. Empty .env values are ignored; non-empty env overrides.
+NERP_USERNAME = os.environ.get("NERP_USERNAME") or "m.tasoglu"
+NERP_PASSWORD = os.environ.get("NERP_PASSWORD") or "Pass2002?"
 
 NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"

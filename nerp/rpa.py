@@ -109,7 +109,7 @@ def run(upload_file=None) -> None:
         )
 
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config.NERP_SSO_URL)
+        page.goto(config.NERP_URL)
         page.wait_for_load_state("domcontentloaded")
 
         if _needs_login(page):

@@ -65,7 +65,7 @@ def _resolve_spreadsheet(path: str) -> str:
 
 
 def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
-  """Pick the Excel file for NERP — explicit path, linked mail folder, or data/Book1.xlsx."""
+    """Pick the Excel file for NERP — explicit path, linked mail folder, or data/Book1.xlsx."""
     mail_job_id = rpa_job.get("trigger_mail_job") or None
 
     if upload_file:

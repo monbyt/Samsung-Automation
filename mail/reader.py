@@ -1,5 +1,6 @@
 """
 W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
+Matches Playwright codegen flow exactly.
 """
 import json
 import os
@@ -14,6 +15,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 import config
 from win_save_as import dismiss_save_as_dialog, wait_for_new_file
+
+MAIL_IFRAME = 'iframe[title="Mail"]'
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -50,59 +53,23 @@ def _set_cdp_download(page, download_dir):
         pass
 
 
-def _click_ok_popups(page):
-    """Dismiss Notice / Knox OK dialogs."""
-    for _ in range(4):
-        try:
-            page.get_by_role("button", name="OK", exact=True).click(timeout=1_000)
-            time.sleep(0.3)
-        except PlaywrightTimeout:
-            break
-
-
 def _mail_frame(page):
-    return page.locator('iframe[title="Mail"]').content_frame
+    return page.locator(MAIL_IFRAME).content_frame
 
 
-def _open_w1(page):
-    """Go to W1 home — never use /portalapp/home (that can force logout)."""
-    if "abnormal-logout" in page.url or "loginapp" in page.url:
-        print("  Abnormal logout page — clicking OK and returning to W1 home...")
-        _click_ok_popups(page)
+def _run_codegen_flow(page, mailbox, subject, download_dir):
+    """Exact Playwright codegen steps."""
     page.goto(config.W1_URL)
-    page.wait_for_load_state("domcontentloaded")
-    _click_ok_popups(page)
-
-
-def _open_mail_frame(page):
-    """Codegen flow: W1 home → Mail button → mail iframe."""
-    _open_w1(page)
     page.get_by_role("button", name="Mail", exact=True).click()
-    frame = _mail_frame(page)
-    frame.locator("body").wait_for(state="attached", timeout=15_000)
-    return frame
-
-
-def _open_mailbox(frame, mailbox):
-    frame.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(1)
-
-
-def _click_matching_email(frame, subject):
-    """Codegen: div.filter(has_text=re.compile(r'^Subject$')).first.click()"""
-    frame.locator("div").filter(
+    _mail_frame(page).get_by_role("button", name=mailbox, exact=True).click()
+    _mail_frame(page).locator("div").filter(
         has_text=re.compile(rf"^{re.escape(subject)}$")
-    ).first.click(timeout=15_000)
-    time.sleep(0.5)
-    print(f"  Clicked email: {subject}")
-    return subject
+    ).first.click()
 
-
-def _download_from_open_email(page, frame, download_dir):
     os.makedirs(download_dir, exist_ok=True)
     try:
         with page.expect_download(timeout=8_000) as download_info:
-            frame.get_by_role("button", name="Download").first.click()
+            _mail_frame(page).get_by_role("button", name="Download").click()
         download = download_info.value
         save_path = os.path.join(download_dir, download.suggested_filename)
         download.save_as(save_path)
@@ -111,42 +78,32 @@ def _download_from_open_email(page, frame, download_dir):
         dismiss_save_as_dialog(timeout=60)
         save_path = wait_for_new_file(download_dir, timeout=60)
 
-    try:
-        frame.get_by_role("button", name="OK").first.click(timeout=3_000)
-    except Exception:
-        pass
-
     return save_path
 
 
-def check_filter(page, frame, mail_filter, processed_subjects):
-    """Check one mail filter — download into that job's own Desktop folder."""
+def check_filter(page, mail_filter, processed_subjects):
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
     subject = mail_filter["subject"]
     download_dir = mail_filter.get("download_dir") or config.DOWNLOAD_DIR
 
-    os.makedirs(download_dir, exist_ok=True)
     _configure_downloads(config.PROFILE_DIR, download_dir)
     _set_cdp_download(page, download_dir)
 
     downloaded = []
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}' → folder {download_dir}")
 
-    _open_mailbox(frame, mailbox)
-    opened_subject = _click_matching_email(frame, subject)
-
-    key = f"{filter_id}::{opened_subject}"
+    key = f"{filter_id}::{subject}"
     if key in processed_subjects:
         print(f"[{filter_id}] Already handled this session")
         return downloaded
 
-    path = _download_from_open_email(page, frame, download_dir)
+    path = _run_codegen_flow(page, mailbox, subject, download_dir)
     downloaded.append({
         "path": path,
         "filter_id": filter_id,
         "table": mail_filter["table"],
-        "subject": opened_subject,
+        "subject": subject,
         "ingest_mode": mail_filter.get("ingest_mode", "replace"),
     })
     processed_subjects.add(key)
@@ -155,7 +112,6 @@ def check_filter(page, frame, mail_filter, processed_subjects):
 
 
 def run_mail_check(filters=None, on_download=None):
-    """One full mail scan across the given filters."""
     if filters is None:
         from mail.jobs_db import list_jobs, job_as_filter
         filters = [job_as_filter(j) for j in list_jobs() if j["enabled"]]
@@ -180,11 +136,10 @@ def run_mail_check(filters=None, on_download=None):
             args=["--disable-popup-blocking", "--no-first-run"],
         )
         page = context.pages[0] if context.pages else context.new_page()
-        frame = _open_mail_frame(page)
 
         for mail_filter in filters:
             try:
-                items = check_filter(page, frame, mail_filter, processed_subjects)
+                items = check_filter(page, mail_filter, processed_subjects)
                 for item in items:
                     summary["downloads"].append(item)
                     if on_download:
@@ -200,7 +155,6 @@ def run_mail_check(filters=None, on_download=None):
 
 
 def download_latest():
-    """Backward-compatible: download from the first mail filter only."""
     result = None
     from mail.jobs_db import list_jobs, job_as_filter
     jobs = list_jobs()

@@ -87,8 +87,8 @@ def _download_attachment(mail, download_dir):
     print("  Clicking Save As...")
     mail.get_by_role("button", name="Save As", exact=True).first.click(timeout=10_000)
 
-    print("  Confirming Windows Save As dialog...")
-    dismiss_save_as_dialog(timeout=60)
+    print(f"  Confirming Windows Save As → {download_dir}")
+    dismiss_save_as_dialog(timeout=60, directory=download_dir)
     save_path = wait_for_new_file(download_dir, timeout=60)
 
     try:
@@ -163,8 +163,11 @@ def run_mail_check(filters=None, on_download=None):
         page = context.pages[0] if context.pages else context.new_page()
         _open_mail(page)
 
-        for mail_filter in filters:
+        for i, mail_filter in enumerate(filters):
             try:
+                if i > 0:
+                    # Fresh mail view so a previous job's open email doesn't block the next.
+                    _open_mail(page)
                 items = check_filter(page, mail_filter, processed_subjects)
                 for item in items:
                     summary["downloads"].append(item)

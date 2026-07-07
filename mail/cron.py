@@ -62,6 +62,10 @@ def run_job(job_id: str) -> dict:
             mark_job_finished(job_id, "error", "; ".join(summary["errors"]))
         else:
             mark_job_finished(job_id, "ok")
+            if summary.get("downloads"):
+                from rpa.runner import trigger_for_mail_job
+                upload = summary["downloads"][-1].get("path")
+                trigger_for_mail_job(job_id, upload_file=upload)
 
         record_monitor_run(summary, job_id=job_id)
 
@@ -99,6 +103,8 @@ def scheduler_loop():
 
     init_db()
     seed_from_config()
+    from rpa.jobs_db import seed_from_config as seed_rpa
+    seed_rpa()
     tick_seconds = getattr(config, "SCHEDULER_TICK_SECONDS", 60)
 
     print(

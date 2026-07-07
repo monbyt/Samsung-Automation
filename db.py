@@ -1,6 +1,7 @@
 """
 Database helpers — schema, WAL mode, monitor status tracking.
 """
+import os
 from datetime import datetime
 
 from sqlalchemy import (
@@ -41,6 +42,16 @@ monitor_runs = Table(
     Column("status", String(20)),
 )
 
+rpa_runs = Table(
+    "rpa_runs", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("rpa_id", String(64)),
+    Column("upload_file", String(500)),
+    Column("status", String(20)),
+    Column("message", Text),
+    Column("ran_at", DateTime),
+)
+
 
 def init_db():
     metadata.create_all(engine)
@@ -79,6 +90,18 @@ def record_monitor_run(summary, job_id=None):
             errors=len(errors),
             error_detail=detail,
             status="error" if errors else "ok",
+        ))
+
+
+def record_rpa_run(rpa_id, status, message=None, upload_file=None):
+    init_db()
+    with engine.begin() as conn:
+        conn.execute(rpa_runs.insert().values(
+            rpa_id=rpa_id,
+            upload_file=os.path.basename(upload_file) if upload_file else None,
+            status=status,
+            message=(message or "")[:2000],
+            ran_at=datetime.now(),
         ))
 
 

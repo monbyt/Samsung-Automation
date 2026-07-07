@@ -21,6 +21,10 @@ from db import init_db
 from mail.jobs_db import (
     add_job, delete_job, get_job, list_jobs, seed_from_config, update_job,
 )
+from rpa.jobs_db import (
+    get_rpa_job, list_rpa_jobs, rpa_by_mail_job, seed_from_config as seed_rpa,
+    update_rpa_job,
+)
 from parse_to_db import ingest_download, parse_file
 from sqlalchemy import create_engine, inspect, text
 
@@ -148,6 +152,7 @@ def _layout(title, active, body, **ctx):
   <nav>
     <a href="/" class="{{{{ 'active' if active=='home' else '' }}}}">Overview</a>
     <a href="/jobs" class="{{{{ 'active' if active=='jobs' else '' }}}}">Mail Jobs</a>
+    <a href="/rpa" class="{{{{ 'active' if active=='rpa' else '' }}}}">RPA Tools</a>
     <a href="/data" class="{{{{ 'active' if active=='data' else '' }}}}">Data Explorer</a>
     <a href="/query" class="{{{{ 'active' if active=='query' else '' }}}}">SQL Query</a>
     <a href="/api/docs" class="{{{{ 'active' if active=='api' else '' }}}}">API</a>
@@ -223,7 +228,9 @@ def index():
 @app.route("/jobs")
 def jobs_list():
     seed_from_config()
+    seed_rpa()
     jobs = list_jobs()
+    rpa_map = rpa_by_mail_job()
     msg = request.args.get("msg")
     err = request.args.get("err")
     runs_df, _ = _read_sql(
@@ -243,12 +250,13 @@ def jobs_list():
   </div>
   <div class="panel"><h2>Scheduled jobs</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Folder</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Mailbox</th><th>Subject</th><th>Table</th><th>Folder</th><th>RPA</th><th>Every</th><th>Next run</th><th>Last</th><th>Status</th><th>Actions</th></tr>
     {% for j in jobs %}<tr>
       <td><span class="pill">{{ j.job_id }}</span><br><span class="muted">{{ j.name }}</span></td>
       <td>{{ j.mailbox }}</td><td><code>{{ j.subject_pattern }}</code></td>
       <td>{{ j.target_table }}</td>
       <td><span class="pill">{{ j.download_folder or '—' }}</span></td>
+      <td>{% if rpa_map.get(j.job_id) %}{% for n in rpa_map[j.job_id] %}<span class="pill">{{ n }}</span> {% endfor %}{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{{ j.interval_hours }}h</td>
       <td>{{ j.next_run or '—' }}</td>
       <td>{{ j.last_run or '—' }}</td>
@@ -286,7 +294,7 @@ def jobs_list():
     </tr>{% endfor %}</table>{% else %}<p class="muted">No runs yet.</p>{% endif %}
   </div></div>
 """
-    return _layout("Mail Jobs", "jobs", body, jobs=jobs, runs=runs, tick=config.SCHEDULER_TICK_SECONDS, msg=msg, err=err)
+    return _layout("Mail Jobs", "jobs", body, jobs=jobs, runs=runs, rpa_map=rpa_map, tick=config.SCHEDULER_TICK_SECONDS, msg=msg, err=err)
 
 
 @app.route("/jobs/new", methods=["GET", "POST"])
@@ -785,6 +793,134 @@ def api_query():
         return jsonify({"error": str(e)}), 400
 
 
+@app.route("/rpa")
+def rpa_list():
+    seed_rpa()
+    jobs = list_rpa_jobs()
+    mail_jobs = list_jobs()
+    msg = request.args.get("msg")
+    err = request.args.get("err")
+    runs_df, _ = _read_sql(
+        "SELECT ran_at, rpa_id, upload_file, status, message "
+        "FROM rpa_runs ORDER BY id DESC LIMIT 20"
+    )
+    runs = runs_df.to_dict("records") if not runs_df.empty else []
+
+    body = """
+  <h1>RPA Tools</h1>
+  <div class="sub">Automation that runs after mail extraction or on demand. NERP uses its own Chrome profile.</div>
+  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+  <div class="panel"><h2>Registered tools</h2><div class="scroll">
+    {% if jobs %}<table>
+    <tr><th>Name</th><th>Tool</th><th>Trigger after mail job</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
+    {% for r in jobs %}<tr>
+      <td><span class="pill">{{ r.rpa_id }}</span><br><span class="muted">{{ r.name }}</span></td>
+      <td>{{ r.tool }}</td>
+      <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual only</span>{% endif %}</td>
+      <td>{{ r.last_run or '—' }}</td>
+      <td class="{{ 'ok' if r.last_status=='ok' else 'err' if r.last_status else '' }}">{{ r.last_status or '—' }}</td>
+      <td style="white-space:nowrap">
+        <form method="post" action="/rpa/{{ r.rpa_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run now</button></form>
+        <a href="/rpa/{{ r.rpa_id }}/edit"><button type="button" class="btn-sm">Edit</button></a>
+        <form method="post" action="/rpa/{{ r.rpa_id }}/toggle" style="display:inline"><button class="btn-sm">{{ 'Disable' if r.enabled else 'Enable' }}</button></form>
+      </td>
+    </tr>{% endfor %}</table>
+    {% else %}<p class="muted">No RPA tools registered.</p>{% endif %}
+  </div></div>
+  <div class="panel"><h2>How triggering works</h2>
+    <p class="muted" style="line-height:1.6">
+      1. Edit an RPA tool and set <b>Trigger after mail job</b> (e.g. order_extract)<br>
+      2. Enable the RPA tool<br>
+      3. When that mail job finishes and downloads a file, NERP runs automatically<br>
+      4. The downloaded Excel is copied to the NERP upload path before upload<br>
+      Or use <b>Run now</b> to test manually (uses latest mail file or data/Book1.xlsx).
+    </p>
+  </div>
+  <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
+    {% if runs %}<table>
+    <tr><th>Time</th><th>Tool</th><th>File</th><th>Status</th><th>Detail</th></tr>
+    {% for r in runs %}<tr>
+      <td>{{ r.ran_at }}</td><td>{{ r.rpa_id }}</td><td>{{ r.upload_file or '—' }}</td>
+      <td class="{{ 'ok' if r.status=='ok' else 'err' }}">{{ r.status }}</td>
+      <td class="muted">{{ r.message or '' }}</td>
+    </tr>{% endfor %}</table>{% else %}<p class="muted">No RPA runs yet.</p>{% endif %}
+  </div></div>
+"""
+    return _layout("RPA Tools", "rpa", body, jobs=jobs, runs=runs, msg=msg, err=err)
+
+
+@app.route("/rpa/<rpa_id>/edit", methods=["GET", "POST"])
+def rpa_edit(rpa_id):
+    seed_rpa()
+    job = get_rpa_job(rpa_id)
+    if not job:
+        return redirect(url_for("rpa_list", err="RPA tool not found"))
+    mail_jobs = list_jobs()
+    error = None
+    if request.method == "POST":
+        try:
+            update_rpa_job(
+                rpa_id,
+                name=request.form["name"].strip(),
+                description=request.form.get("description", "").strip(),
+                trigger_mail_job=request.form.get("trigger_mail_job", "").strip(),
+                enabled=request.form.get("enabled") == "on",
+            )
+            return redirect(url_for("rpa_list", msg=f"RPA '{rpa_id}' updated"))
+        except Exception as e:
+            error = str(e)
+
+    body = """
+  <h1>Edit RPA: {{ job.rpa_id }}</h1>
+  <p class="muted">{{ job.description }}</p>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="panel">
+    <div class="form-row"><label>Display name</label>
+      <input type="text" name="name" value="{{ job.name }}" required></div>
+    <div class="form-row"><label>Trigger after mail job</label>
+      <select name="trigger_mail_job">
+        <option value="">— Manual only —</option>
+        {% for m in mail_jobs %}<option value="{{ m.job_id }}" {{ 'selected' if job.trigger_mail_job==m.job_id else '' }}>{{ m.job_id }} — {{ m.name }}</option>{% endfor %}
+      </select></div>
+    <div class="form-row"><label>Notes</label>
+      <input type="text" name="description" value="{{ job.description }}"></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
+    <button type="submit">Save</button>
+    <a href="/rpa"><button type="button">Back</button></a>
+  </form>
+"""
+    return _layout("Edit RPA", "rpa", body, job=job, mail_jobs=mail_jobs, error=error)
+
+
+@app.route("/rpa/<rpa_id>/run", methods=["POST"])
+def rpa_run(rpa_id):
+    import threading
+    from rpa.runner import run_rpa
+
+    if not get_rpa_job(rpa_id):
+        return redirect(url_for("rpa_list", err="RPA tool not found"))
+
+    def _bg():
+        try:
+            run_rpa(rpa_id)
+        except Exception as e:
+            print(f"RPA run failed: {e}")
+
+    threading.Thread(target=_bg, daemon=True, name=f"rpa-{rpa_id}").start()
+    return redirect(url_for("rpa_list", msg=f"Started '{rpa_id}' — check back in a few minutes"))
+
+
+@app.route("/rpa/<rpa_id>/toggle", methods=["POST"])
+def rpa_toggle(rpa_id):
+    job = get_rpa_job(rpa_id)
+    if not job:
+        return redirect(url_for("rpa_list", err="RPA tool not found"))
+    update_rpa_job(rpa_id, enabled=not job["enabled"])
+    state = "disabled" if job["enabled"] else "enabled"
+    return redirect(url_for("rpa_list", msg=f"RPA '{rpa_id}' {state}"))
+
+
 @app.route("/api/ingestions")
 def api_ingestions():
     if err := _api_guard():
@@ -795,6 +931,7 @@ def api_ingestions():
 
 if __name__ == "__main__":
     seed_from_config()
+    seed_rpa()
     if config.DASHBOARD_RUNS_SCHEDULER:
         from mail.cron import start_background
         start_background()
@@ -803,4 +940,5 @@ if __name__ == "__main__":
     print(f"Dashboard: http://{ip}:{config.DASHBOARD_PORT}  (LAN)")
     print(f"           http://127.0.0.1:{config.DASHBOARD_PORT}  (local)")
     print("Manage mail cron jobs at /jobs")
+    print("Manage RPA tools at /rpa")
     app.run(host=config.DASHBOARD_HOST, port=config.DASHBOARD_PORT, debug=False, threaded=True)

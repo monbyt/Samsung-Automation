@@ -92,11 +92,10 @@ def _create_and_print_pi(shell) -> None:
         pass
 
 
-def run() -> None:
-    if not os.path.isfile(config.NERP_UPLOAD_FILE):
-        raise FileNotFoundError(
-            f"Upload file not found: {config.NERP_UPLOAD_FILE}"
-        )
+def run(upload_file=None) -> None:
+    path = upload_file or config.NERP_UPLOAD_FILE
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Upload file not found: {path}")
 
     os.makedirs(config.NERP_PROFILE_DIR, exist_ok=True)
 
@@ -123,7 +122,7 @@ def run() -> None:
 
         print(f"Running upload program {config.NERP_PROGRAM_UPLOAD}...")
         _open_program(page, config.NERP_PROGRAM_UPLOAD)
-        _upload_file(_shell(page), config.NERP_UPLOAD_FILE)
+        _upload_file(_shell(page), path)
 
         print(f"Running P/I program {config.NERP_PROGRAM_PI}...")
         _open_program(page, config.NERP_PROGRAM_PI)

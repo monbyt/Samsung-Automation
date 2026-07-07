@@ -26,6 +26,8 @@ def run(upload_file=None) -> None:
             headless=config.NERP_HEADLESS,
         )
         context = browser.new_context()
+        context.set_default_timeout(0)
+        context.set_default_navigation_timeout(0)
         page = context.new_page()
 
         page.goto(config.NERP_URL)

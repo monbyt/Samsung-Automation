@@ -1,8 +1,7 @@
 """
 Windows-only helper: navigate the native Save As dialog and confirm save.
 
-W1/Office opens a modal Save As that Playwright can't see. We activate it,
-jump to the job folder (Alt+D → path → Enter), then press Enter to save.
+Uses clipboard paste into the folder bar (Alt+D) or file name field, then Enter.
 """
 import os
 import shutil
@@ -54,47 +53,71 @@ def _ps_escape(s: str) -> str:
     return s.replace("'", "''")
 
 
-def _confirm_save_as_wscript(title: str, directory: Optional[str]) -> bool:
+def _run_powershell(ps: str) -> bool:
     import subprocess
 
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if result.returncode != 0 and result.stderr:
+        print(f"  Save As helper: {result.stderr.strip()[:200]}")
+    return result.returncode == 0
+
+
+def _navigate_and_save(title: str, directory: Optional[str]) -> bool:
     safe_title = _ps_escape(title)
     lines = [
         "$w = New-Object -ComObject WScript.Shell",
         f"if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}",
-        "Start-Sleep -Milliseconds 500",
+        "Start-Sleep -Milliseconds 800",
     ]
 
     if directory:
         folder = _ps_escape(os.path.normpath(directory))
         os.makedirs(directory, exist_ok=True)
         lines += [
-            # Address bar in the Windows file dialog
+            f"Set-Clipboard -Value '{folder}'",
+            # Address bar (modern Windows file dialog)
             "$w.SendKeys('%d')",
-            "Start-Sleep -Milliseconds 400",
-            f"$w.SendKeys('{folder}')",
+            "Start-Sleep -Milliseconds 500",
+            "$w.SendKeys('^a')",
+            "$w.SendKeys('^v')",
             "$w.SendKeys('{ENTER}')",
-            "Start-Sleep -Milliseconds 600",
+            "Start-Sleep -Milliseconds 900",
         ]
 
     lines += [
         "$w.SendKeys('{ENTER}')",
         "exit 0",
     ]
+    if _run_powershell("\n".join(lines)):
+        return True
 
-    ps = "\n".join(lines)
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    return result.returncode == 0
+    if not directory:
+        return False
+
+    # Fallback: paste folder path into the file name field (classic dialogs).
+    folder = _ps_escape(os.path.normpath(directory))
+    fallback = f"""
+$w = New-Object -ComObject WScript.Shell
+if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
+Start-Sleep -Milliseconds 800
+Set-Clipboard -Value '{folder}'
+$w.SendKeys('^a')
+$w.SendKeys('^v')
+$w.SendKeys('{{ENTER}}')
+Start-Sleep -Milliseconds 900
+$w.SendKeys('{{ENTER}}')
+exit 0
+"""
+    return _run_powershell(fallback)
 
 
 def dismiss_save_as_dialog(timeout=60, directory=None):
-    """
-    Find Save As, optionally navigate to *directory*, then confirm save.
-    """
+    """Find Save As, navigate to *directory*, then confirm save."""
     if sys.platform != "win32":
         print("Save As helper only runs on Windows.")
         return False
@@ -108,8 +131,7 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
         if titles:
             title = titles[0]
             print(f"Found: '{title}'")
-
-            if _confirm_save_as_wscript(title, directory):
+            if _navigate_and_save(title, directory):
                 print("Save As confirmed.")
                 return True
             print("Save As confirm failed, retrying...")
@@ -121,7 +143,7 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
 
 
 def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv", ".zip")):
-    """Wait for a new spreadsheet in *directory* (or move from a fallback folder)."""
+    """Wait for a new file in *directory* (or move from a fallback folder)."""
     os.makedirs(directory, exist_ok=True)
     watch = [directory] + [d for d in _extra_watch_dirs() if d and os.path.isdir(d)]
 
@@ -152,4 +174,4 @@ def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv"
                     return dest
                 return path
 
-    raise TimeoutError(f"No new spreadsheet in {watch} within {timeout}s")
+    raise TimeoutError(f"No new file in {watch} within {timeout}s")

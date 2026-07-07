@@ -302,6 +302,7 @@ def jobs_new():
         "interval_hours": "2",
         "ingest_mode": "replace",
         "enabled": True,
+        "extract_zip": False,
     }
 
     if request.method == "POST":
@@ -315,6 +316,7 @@ def jobs_new():
             "interval_hours": request.form.get("interval_hours", "2"),
             "ingest_mode": request.form.get("ingest_mode", "replace"),
             "enabled": request.form.get("enabled") == "on",
+            "extract_zip": request.form.get("extract_zip") == "on",
         }
         try:
             if not form["name"].strip():
@@ -333,6 +335,7 @@ def jobs_new():
                 interval_hours=int(form["interval_hours"] or 2),
                 enabled=form["enabled"],
                 ingest_mode=form["ingest_mode"],
+                extract_zip=form["extract_zip"],
             )
             from mail.jobs_db import _normalize_job_id
             slug = _normalize_job_id(form["job_id"])
@@ -369,6 +372,7 @@ def jobs_new():
         <option value="replace" {{ 'selected' if form.ingest_mode=='replace' else '' }}>Replace — swap old rows (recommended)</option>
         <option value="append" {{ 'selected' if form.ingest_mode=='append' else '' }}>Append — keep history</option>
       </select></div>
+    <div class="form-row"><label><input type="checkbox" name="extract_zip" {{ 'checked' if form.extract_zip else '' }}> Extract Excel from .zip before parsing</label></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
     <button type="submit">Create job</button>
     <a href="/jobs"><button type="button">Cancel</button></a>
@@ -398,6 +402,7 @@ def jobs_parse():
                 path, table=table, filter_id=filter_id,
                 ingest_mode=request.form.get("ingest_mode", "replace"),
                 force=force,
+                extract_zip=request.form.get("extract_zip") == "on",
             )
             return redirect(url_for("jobs_parse", msg=f"Parsed {os.path.basename(path)} → {table}"))
         except Exception as e:
@@ -430,6 +435,7 @@ def jobs_parse():
         <option value="replace">Replace old rows for this job</option>
         <option value="append">Append rows</option>
       </select></div>
+    <div class="form-row"><label><input type="checkbox" name="extract_zip"> Extract Excel from .zip before parsing</label></div>
     <div class="form-row"><label><input type="checkbox" name="force"> Force re-parse (even if file unchanged)</label></div>
     <button type="submit" {{ 'disabled' if not files else '' }}>Parse to SQL</button>
     <a href="/jobs"><button type="button">Back</button></a>
@@ -461,6 +467,7 @@ def jobs_edit(job_id):
                 interval_hours=int(request.form.get("interval_hours", 2)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
+                extract_zip=request.form.get("extract_zip") == "on",
             )
             return redirect(url_for("jobs_list", msg=f"Job '{job_id}' updated"))
         except Exception as e:
@@ -487,6 +494,7 @@ def jobs_edit(job_id):
         <option value="replace" {{ 'selected' if job.ingest_mode=='replace' else '' }}>Replace old rows</option>
         <option value="append" {{ 'selected' if job.ingest_mode=='append' else '' }}>Append rows</option>
       </select></div>
+    <div class="form-row"><label><input type="checkbox" name="extract_zip" {{ 'checked' if job.extract_zip else '' }}> Extract Excel from .zip before parsing</label></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
     <button type="submit">Save</button>
     <a href="/jobs"><button type="button">Cancel</button></a>

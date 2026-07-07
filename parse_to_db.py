@@ -82,9 +82,9 @@ def _clean_columns(df):
     return df
 
 
-def extract_zip_if_needed(path: str) -> str:
-    """If *path* is a .zip, extract the Excel inside and return its path."""
-    if not path.lower().endswith(".zip"):
+def extract_zip_if_needed(path: str, extract_zip: bool = False) -> str:
+    """Extract Excel from a .zip when *extract_zip* is enabled for the job."""
+    if not extract_zip or not path.lower().endswith(".zip"):
         return path
 
     dest_dir = os.path.dirname(path) or "."
@@ -120,7 +120,7 @@ def _log(batch_id, path, file_hash_value, rows, status, message,
 
 
 def parse_file(path, table=None, filter_id=None, mail_subject=None,
-               ingest_mode="replace", force=False):
+               ingest_mode="replace", force=False, extract_zip=False):
     """
     Load Excel into SQL.
 
@@ -140,7 +140,7 @@ def parse_file(path, table=None, filter_id=None, mail_subject=None,
     mode = (ingest_mode or "replace").lower()
 
     try:
-        spreadsheet = extract_zip_if_needed(path)
+        spreadsheet = extract_zip_if_needed(path, extract_zip=extract_zip)
         readable = prepare_for_reading(spreadsheet)
         df = pd.read_excel(readable)
         df = _clean_columns(df)
@@ -167,11 +167,11 @@ def parse_file(path, table=None, filter_id=None, mail_subject=None,
 
 
 def ingest_download(path, table=None, filter_id=None, mail_subject=None,
-                    ingest_mode="replace", force=False):
+                    ingest_mode="replace", force=False, extract_zip=False):
     """Decrypt (if needed) and load one downloaded attachment."""
     return parse_file(
         path, table=table, filter_id=filter_id, mail_subject=mail_subject,
-        ingest_mode=ingest_mode, force=force,
+        ingest_mode=ingest_mode, force=force, extract_zip=extract_zip,
     )
 
 

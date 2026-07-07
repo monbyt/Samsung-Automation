@@ -4,6 +4,7 @@ W1 mail reader — navigate mailboxes, find matching emails, download Excel atta
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 os.environ.setdefault("NO_PROXY", "*")
@@ -86,6 +87,7 @@ def _download_attachment(mail, download_dir):
 
     print("  Clicking Save As...")
     mail.get_by_role("button", name="Save As", exact=True).first.click(timeout=10_000)
+    time.sleep(1.5)
 
     print(f"  Confirming Windows Save As → {download_dir}")
     dismiss_save_as_dialog(timeout=60, directory=download_dir)
@@ -131,6 +133,7 @@ def check_filter(page, mail_filter, processed_subjects):
         "table": mail_filter["table"],
         "subject": subject,
         "ingest_mode": mail_filter.get("ingest_mode", "replace"),
+        "extract_zip": mail_filter.get("extract_zip", False),
     })
     print(f"[{filter_id}] Saved to {save_path}")
     return downloaded

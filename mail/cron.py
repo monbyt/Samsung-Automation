@@ -39,6 +39,7 @@ def _ingest_item(item):
         filter_id=fid,
         mail_subject=item["subject"],
         ingest_mode=item.get("ingest_mode", "replace"),
+        extract_zip=item.get("extract_zip", False),
     )
 
 

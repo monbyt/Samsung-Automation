@@ -6,6 +6,29 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _load_dotenv():
+    """Load .env from project root (optional — for W1_PASSWORD etc.)."""
+    path = os.path.join(BASE_DIR, ".env")
+    if not os.path.isfile(path):
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(path)
+    except ImportError:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+
+
+_load_dotenv()
+
 # ── W1 / Order Extract ─────────────────────────────────────────
 DESKTOP_DIR = r"C:\Users\m.tasoglu\Desktop"
 DOWNLOAD_DIR = os.path.join(DESKTOP_DIR, "Order-Extract")
@@ -18,9 +41,12 @@ W1_URL = "http://w1.samsung.net/portalapp/home"
 # Set True to hide the browser window on scheduled W1 runs.
 HEADLESS = False
 
-# W1 login — set via env vars (reuses NERP_* if W1_* not set).
-W1_USERNAME = os.environ.get("W1_USERNAME", os.environ.get("NERP_USERNAME", ""))
-W1_PASSWORD = os.environ.get("W1_PASSWORD", os.environ.get("NERP_PASSWORD", ""))
+# W1 login — set in .env or env vars (reuses NERP_* if W1_* not set).
+NERP_USERNAME = os.environ.get("NERP_USERNAME", "m.tasoglu")
+NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "")
+
+W1_USERNAME = os.environ.get("W1_USERNAME") or NERP_USERNAME
+W1_PASSWORD = os.environ.get("W1_PASSWORD") or NERP_PASSWORD
 # Seconds to wait for manual login when no password is configured.
 W1_LOGIN_WAIT_SECONDS = 120
 
@@ -63,9 +89,6 @@ MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 NERP_SSO_URL = "https://sts.secsso.net/adfs/ls/"
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
-
-NERP_USERNAME = os.environ.get("NERP_USERNAME", "m.tasoglu")
-NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "")
 
 NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"

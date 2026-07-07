@@ -71,8 +71,10 @@ def _has_expired_session(page) -> bool:
 
 
 def _dismiss_ok_popups(page, rounds=6):
-    """Click OK / Allow / Confirm on W1 modals (Knox, session, etc.)."""
+    """Click OK / Allow on Knox-style modals — skip when session-expired (needs re-login)."""
     for _ in range(rounds):
+        if _has_expired_session(page):
+            return
         clicked = False
         for label in ("OK", "Ok", "Allow", "Accept", "Confirm", "Close", "Yes"):
             if _click_first(page.get_by_role("button", name=label, exact=True)):
@@ -94,16 +96,20 @@ def _dismiss_ok_popups(page, rounds=6):
             break
 
 
-def _dismiss_expired_session(page):
+def _acknowledge_expired_session(page):
+    """Dismiss the expired-session dialog so the login form appears."""
     if not _has_expired_session(page):
         return False
-    print("  W1 expired-session popup — clicking OK...")
-    _dismiss_ok_popups(page)
-    if _has_expired_session(page):
-        _click_first(page.get_by_text(re.compile(r"expired\s+session", re.I)))
-        _dismiss_ok_popups(page)
-    time.sleep(1)
-    return True
+    print("  W1 session expired — acknowledging dialog...")
+    for locator in (
+        page.get_by_role("dialog").get_by_role("button", name="OK"),
+        page.locator('[role="alertdialog"]').get_by_role("button", name="OK"),
+        page.get_by_role("button", name="OK", exact=True),
+    ):
+        if _click_first(locator):
+            time.sleep(1)
+            return True
+    return False
 
 
 def _mail_button_visible(page) -> bool:
@@ -117,8 +123,6 @@ def _mail_button_visible(page) -> bool:
 
 
 def _needs_w1_login(page) -> bool:
-    if _has_expired_session(page):
-        return True
     if _mail_button_visible(page):
         return False
     text = _page_text(page)
@@ -135,52 +139,64 @@ def _needs_w1_login(page) -> bool:
     return not _mail_button_visible(page)
 
 
-def _w1_login(page):
-    for label in ("Sign in", "Sign In", "Log in", "Login"):
-        _click_first(page.get_by_role("button", name=label))
-        time.sleep(0.5)
+def _sso_form_visible(page) -> bool:
+    try:
+        page.get_by_role("textbox", name="User Account").wait_for(
+            state="visible", timeout=3_000
+        )
+        return True
+    except PlaywrightTimeout:
+        return False
 
+
+def _w1_login(page):
     user = config.W1_USERNAME
     pwd = config.W1_PASSWORD
     if user and pwd:
-        print("  W1 login — submitting credentials...")
-        for name in ("User Account", "User ID", "Username", "User name", "Email", "ID"):
-            try:
-                page.get_by_role("textbox", name=name).fill(user, timeout=2_000)
-                break
-            except PlaywrightTimeout:
-                continue
-        else:
-            try:
-                page.locator('input[type="text"], input[type="email"]').first.fill(user, timeout=2_000)
-            except Exception:
-                pass
-
-        for name in ("Password",):
-            try:
-                page.get_by_role("textbox", name=name).fill(pwd, timeout=2_000)
-                break
-            except PlaywrightTimeout:
-                pass
-        else:
-            try:
-                page.locator('input[type="password"]').first.fill(pwd, timeout=2_000)
-            except Exception:
-                pass
-
-        for label in ("Sign in", "Sign In", "Log in", "Login", "Submit"):
-            if _click_first(page.get_by_role("button", name=label), timeout=2_000):
-                break
-        else:
-            try:
-                page.locator('input[type="password"]').press("Enter")
-            except Exception:
-                pass
+        print(f"  W1 auto-login enabled for user '{user}'")
     else:
         print(
-            f"  W1 login required — sign in manually in Chrome "
-            f"(waiting up to {config.W1_LOGIN_WAIT_SECONDS}s)..."
+            f"  W1 auto-login OFF (no password set) — sign in manually in Chrome "
+            f"(waiting up to {config.W1_LOGIN_WAIT_SECONDS}s).\n"
+            f"  Add NERP_PASSWORD=... to a .env file in the project folder."
         )
+
+    # Portal may show Sign in before redirecting to Samsung SSO.
+    for label in ("Sign in", "Sign In", "Log in", "Login"):
+        _click_first(page.get_by_role("button", name=label))
+        _click_first(page.get_by_role("link", name=label))
+        time.sleep(0.5)
+
+    if user and pwd:
+        # Wait for SSO form (same page NERP uses: sts.secsso.net).
+        deadline = time.time() + 20
+        while time.time() < deadline and not _sso_form_visible(page):
+            time.sleep(0.5)
+
+        if _sso_form_visible(page):
+            print("  Filling Samsung SSO form...")
+            page.get_by_role("textbox", name="User Account").fill(user)
+            page.get_by_role("textbox", name="Password").fill(pwd)
+            page.get_by_role("textbox", name="Password").press("Enter")
+            page.wait_for_load_state("domcontentloaded")
+            time.sleep(2)
+        else:
+            print(f"  SSO form not found (url: {page.url}) — trying generic fields...")
+            for name in ("User Account", "User ID", "Username", "Email"):
+                try:
+                    page.get_by_role("textbox", name=name).fill(user, timeout=2_000)
+                    break
+                except PlaywrightTimeout:
+                    continue
+            try:
+                page.get_by_role("textbox", name="Password").fill(pwd, timeout=2_000)
+            except PlaywrightTimeout:
+                page.locator('input[type="password"]').first.fill(pwd, timeout=2_000)
+            for label in ("Sign in", "Sign In", "Log in", "Login", "Submit"):
+                if _click_first(page.get_by_role("button", name=label), timeout=2_000):
+                    break
+            else:
+                page.locator('input[type="password"]').press("Enter")
 
     page.get_by_role("button", name="Mail", exact=True).wait_for(
         state="visible", timeout=config.W1_LOGIN_WAIT_SECONDS * 1_000
@@ -189,19 +205,26 @@ def _w1_login(page):
 
 
 def _ensure_w1_ready(page):
-    """Navigate to W1, dismiss session popups, and log in if needed."""
+    """Navigate to W1, dismiss Knox popups, and log in if needed."""
     page.goto(config.W1_URL)
     page.wait_for_load_state("domcontentloaded")
     time.sleep(1)
 
-    if _dismiss_expired_session(page):
+    # Happy path — profile still has a valid session.
+    if _mail_button_visible(page):
+        _dismiss_ok_popups(page)
+        return
+
+    # Session expired or first run — re-authenticate (don't just click OK and stop).
+    if _has_expired_session(page):
+        print("W1 session expired — signing in again...")
+        _acknowledge_expired_session(page)
         page.wait_for_load_state("domcontentloaded")
         time.sleep(1)
+    elif _needs_w1_login(page):
+        print("W1 not logged in — recovering...")
 
-    _dismiss_ok_popups(page)
-
-    if _needs_w1_login(page):
-        print("W1 session expired or not logged in — recovering...")
+    if not _mail_button_visible(page):
         _w1_login(page)
         page.wait_for_load_state("domcontentloaded")
         time.sleep(1)
@@ -211,7 +234,7 @@ def _ensure_w1_ready(page):
     if not _mail_button_visible(page):
         raise RuntimeError(
             "W1 is not ready — Mail button not found after login recovery. "
-            "Run python download.py once and log in manually."
+            "Run python download.py once and sign in manually in the Chrome window."
         )
 
 

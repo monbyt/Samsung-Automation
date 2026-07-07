@@ -77,7 +77,9 @@ MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
 MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 
 # ── NERP RPA ───────────────────────────────────────────────────
-NERP_SSO_URL = "https://sts.secsso.net/adfs/ls/"
+# NERP Fiori launchpad — SSO redirect happens automatically if not logged in.
+NERP_URL = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home"
+NERP_SSO_URL = NERP_URL  # backward-compatible alias
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 

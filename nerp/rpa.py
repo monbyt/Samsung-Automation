@@ -108,17 +108,28 @@ def run(upload_file=None) -> None:
         )
 
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config.NERP_SSO_URL)
+        print(f"Opening NERP: {config.NERP_URL}")
+        page.goto(config.NERP_URL)
         page.wait_for_load_state("domcontentloaded")
+        print(f"  Browser at: {page.url}")
 
         if _needs_login(page):
-            print("Logging into NERP SSO...")
+            print("Logging into Samsung SSO...")
             _login(page)
             page.wait_for_load_state("networkidle")
+            print(f"  After login: {page.url}")
         else:
             print("Using saved NERP session.")
 
-        _open_home(page)
+        if "flp" not in page.url:
+            print(f"  Navigating to NERP home...")
+            page.goto(config.NERP_URL)
+            page.wait_for_load_state("domcontentloaded")
+
+        try:
+            _open_home(page)
+        except Exception:
+            pass  # already on Utility-home
 
         print(f"Running upload program {config.NERP_PROGRAM_UPLOAD}...")
         _open_program(page, config.NERP_PROGRAM_UPLOAD)

@@ -35,10 +35,12 @@ def _needs_login(page) -> bool:
 def _login(page) -> None:
     if not config.NERP_USERNAME or not config.NERP_PASSWORD:
         raise RuntimeError(
-            "Set NERP_USERNAME and NERP_PASSWORD in config.py or as env vars."
+            "Set NERP_USERNAME and NERP_PASSWORD in .env or as env vars."
         )
 
+    page.get_by_role("textbox", name="User Account").click()
     page.get_by_role("textbox", name="User Account").fill(config.NERP_USERNAME)
+    page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill(config.NERP_PASSWORD)
     page.get_by_role("textbox", name="Password").press("Enter")
 
@@ -81,7 +83,6 @@ def _create_and_print_pi(shell) -> None:
     shell.get_by_role("button", name="Cancel", exact=True).click()
     shell.get_by_role("button", name="Print", description="Print (Ctrl+P)").click()
 
-    # Dismiss error/close dialogs if they appear
     try:
         shell.get_by_role("dialog", name="Error").get_by_label("Close").click(timeout=3_000)
     except PlaywrightTimeout:
@@ -108,28 +109,17 @@ def run(upload_file=None) -> None:
         )
 
         page = context.pages[0] if context.pages else context.new_page()
-        print(f"Opening NERP: {config.NERP_URL}")
-        page.goto(config.NERP_URL)
+        page.goto(config.NERP_SSO_URL)
         page.wait_for_load_state("domcontentloaded")
-        print(f"  Browser at: {page.url}")
 
         if _needs_login(page):
-            print("Logging into Samsung SSO...")
+            print("Logging into NERP SSO...")
             _login(page)
             page.wait_for_load_state("networkidle")
-            print(f"  After login: {page.url}")
         else:
             print("Using saved NERP session.")
 
-        if "flp" not in page.url:
-            print(f"  Navigating to NERP home...")
-            page.goto(config.NERP_URL)
-            page.wait_for_load_state("domcontentloaded")
-
-        try:
-            _open_home(page)
-        except Exception:
-            pass  # already on Utility-home
+        _open_home(page)
 
         print(f"Running upload program {config.NERP_PROGRAM_UPLOAD}...")
         _open_program(page, config.NERP_PROGRAM_UPLOAD)

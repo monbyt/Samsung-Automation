@@ -7,6 +7,7 @@ First run opens Chrome so you can complete SSO login; the session is kept
 in chrome-profile-nerp/ for later runs.
 """
 import os
+import time
 
 os.environ.setdefault("NO_PROXY", "*")
 os.environ.setdefault("no_proxy", "*")
@@ -20,6 +21,16 @@ SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 
 def _shell(page):
     return page.locator(SHELL_IFRAME).content_frame
+
+
+def _live_page(context, page=None):
+    """SSO redirects often close the tab Playwright started on — use an open one."""
+    if page is not None and not page.is_closed():
+        return page
+    for candidate in reversed(context.pages):
+        if not candidate.is_closed():
+            return candidate
+    return context.new_page()
 
 
 def _needs_login(page) -> bool:
@@ -43,6 +54,27 @@ def _login(page) -> None:
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill(config.NERP_PASSWORD)
     page.get_by_role("textbox", name="Password").press("Enter")
+
+
+def _wait_for_nerp_ready(context, page, timeout_ms: int = 120_000):
+    """Wait until Fiori shell is visible after SSO redirect."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        page = _live_page(context, page)
+        try:
+            page.locator("#canvas").wait_for(state="visible", timeout=2_000)
+            return page
+        except PlaywrightTimeout:
+            pass
+        try:
+            page.get_by_role("textbox", name="Search Program").wait_for(
+                state="visible", timeout=2_000
+            )
+            return page
+        except PlaywrightTimeout:
+            pass
+        page.wait_for_timeout(500)
+    raise RuntimeError("NERP did not load after SSO login (timed out).")
 
 
 def _open_home(page) -> None:
@@ -108,16 +140,17 @@ def run(upload_file=None) -> None:
             args=["--disable-popup-blocking", "--no-first-run"],
         )
 
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config.NERP_URL)
-        page.wait_for_load_state("domcontentloaded")
+        page = _live_page(context)
+        page.goto(config.NERP_SSO_URL, wait_until="domcontentloaded")
 
         if _needs_login(page):
             print("Logging into NERP SSO...")
             _login(page)
-            page.wait_for_load_state("networkidle")
         else:
             print("Using saved NERP session.")
+
+        print("Waiting for NERP to load...")
+        page = _wait_for_nerp_ready(context, page)
 
         _open_home(page)
 

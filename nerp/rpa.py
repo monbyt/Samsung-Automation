@@ -35,7 +35,7 @@ def _needs_login(page) -> bool:
 def _login(page) -> None:
     if not config.NERP_USERNAME or not config.NERP_PASSWORD:
         raise RuntimeError(
-            "Set NERP_USERNAME and NERP_PASSWORD in .env or as env vars."
+            "Set NERP_USERNAME and NERP_PASSWORD in config.py."
         )
 
     page.get_by_role("textbox", name="User Account").click()

@@ -83,8 +83,9 @@ NERP_SSO_URL = NERP_URL
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 
+# Samsung SSO — edit here; env vars / .env still override if set.
 NERP_USERNAME = os.environ.get("NERP_USERNAME", "m.tasoglu")
-NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "")
+NERP_PASSWORD = os.environ.get("NERP_PASSWORD", "Pass2002?")
 
 NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"

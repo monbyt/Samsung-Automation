@@ -79,6 +79,26 @@ def _subject_pattern(subject: str):
     return re.compile(rf"^{re.escape(subject)}$")
 
 
+def _download_attachment(mail, download_dir):
+    """Download once → Save As in mail UI → confirm Windows Save As dialog."""
+    print("  Clicking Download...")
+    mail.get_by_role("button", name="Download").first.click(timeout=10_000)
+
+    print("  Clicking Save As...")
+    mail.get_by_role("button", name="Save As", exact=True).first.click(timeout=10_000)
+
+    print("  Confirming Windows Save As dialog...")
+    dismiss_save_as_dialog(timeout=60)
+    save_path = wait_for_new_file(download_dir, timeout=60)
+
+    try:
+        mail.get_by_role("button", name="OK").first.click(timeout=3_000)
+    except PlaywrightTimeout:
+        pass
+
+    return save_path
+
+
 def check_filter(page, mail_filter, processed_subjects):
     """Open mailbox, click matching email, download attachment."""
     filter_id = mail_filter["id"]
@@ -102,16 +122,7 @@ def check_filter(page, mail_filter, processed_subjects):
     mail.get_by_role("button", name=mailbox, exact=True).click()
     mail.locator("div").filter(has_text=_subject_pattern(subject)).first.click()
 
-    try:
-        with page.expect_download(timeout=8_000) as download_info:
-            mail.get_by_role("button", name="Download").first.click()
-        download = download_info.value
-        save_path = os.path.join(download_dir, download.suggested_filename)
-        download.save_as(save_path)
-    except PlaywrightTimeout:
-        print("  Save As dialog — pressing Enter...")
-        dismiss_save_as_dialog(timeout=60)
-        save_path = wait_for_new_file(download_dir, timeout=60)
+    save_path = _download_attachment(mail, download_dir)
 
     processed_subjects.add(key)
     downloaded.append({

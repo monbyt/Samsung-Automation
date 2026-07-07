@@ -4,6 +4,8 @@ __pycache__/
 .env
 chrome-profile/
 chrome-profile-nerp/
+rpa/scripts/*
+!rpa/scripts/.gitkeep
 Order-Extract/
 data/
 *.xlsx

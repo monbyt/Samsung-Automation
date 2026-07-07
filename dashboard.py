@@ -22,8 +22,8 @@ from mail.jobs_db import (
     add_job, delete_job, get_job, list_jobs, seed_from_config, update_job,
 )
 from rpa.jobs_db import (
-    get_rpa_job, list_rpa_jobs, rpa_by_mail_job, seed_from_config as seed_rpa,
-    update_rpa_job,
+    add_rpa_job, delete_rpa_job, get_rpa_job, list_rpa_jobs, rpa_by_mail_job,
+    seed_from_config as seed_rpa, update_rpa_job,
 )
 from parse_to_db import ingest_download, parse_file
 from sqlalchemy import create_engine, inspect, text
@@ -796,7 +796,11 @@ def api_query():
 @app.route("/rpa")
 def rpa_list():
     seed_rpa()
+    from rpa.codegen import has_script
+
     jobs = list_rpa_jobs()
+    for j in jobs:
+        j["has_script"] = has_script(j["rpa_id"]) if j["tool"] == "codegen" else True
     mail_jobs = list_jobs()
     msg = request.args.get("msg")
     err = request.args.get("err")
@@ -808,33 +812,39 @@ def rpa_list():
 
     body = """
   <h1>RPA Tools</h1>
-  <div class="sub">Automation that runs after mail extraction or on demand. NERP uses its own Chrome profile.</div>
+  <div class="sub">Record Playwright codegen scripts with a start URL, or use the built-in NERP flow.</div>
+  <p><a href="/rpa/new"><button type="button">+ New recorded script</button></a></p>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
   <div class="panel"><h2>Registered tools</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Tool</th><th>Trigger after mail job</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Type</th><th>Start URL</th><th>Trigger</th><th>Script</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
     {% for r in jobs %}<tr>
       <td><span class="pill">{{ r.rpa_id }}</span><br><span class="muted">{{ r.name }}</span></td>
       <td>{{ r.tool }}</td>
-      <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual only</span>{% endif %}</td>
+      <td class="muted" style="max-width:220px;word-break:break-all">{{ r.start_url or '—' }}</td>
+      <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual</span>{% endif %}</td>
+      <td>{% if r.tool == 'codegen' %}{% if r.has_script %}<span class="ok">saved</span>{% else %}<span class="err">not recorded</span>{% endif %}{% else %}<span class="muted">built-in</span>{% endif %}</td>
       <td>{{ r.last_run or '—' }}</td>
       <td class="{{ 'ok' if r.last_status=='ok' else 'err' if r.last_status else '' }}">{{ r.last_status or '—' }}</td>
       <td style="white-space:nowrap">
-        <form method="post" action="/rpa/{{ r.rpa_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run now</button></form>
+        <form method="post" action="/rpa/{{ r.rpa_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run</button></form>
         <a href="/rpa/{{ r.rpa_id }}/edit"><button type="button" class="btn-sm">Edit</button></a>
-        <form method="post" action="/rpa/{{ r.rpa_id }}/toggle" style="display:inline"><button class="btn-sm">{{ 'Disable' if r.enabled else 'Enable' }}</button></form>
+        {% if r.tool == 'codegen' %}
+        <form method="post" action="/rpa/{{ r.rpa_id }}/record" style="display:inline"><button class="btn-sm">Record</button></form>
+        {% endif %}
+        <form method="post" action="/rpa/{{ r.rpa_id }}/toggle" style="display:inline"><button class="btn-sm">{{ 'Off' if r.enabled else 'On' }}</button></form>
       </td>
     </tr>{% endfor %}</table>
     {% else %}<p class="muted">No RPA tools registered.</p>{% endif %}
   </div></div>
-  <div class="panel"><h2>How triggering works</h2>
+  <div class="panel"><h2>Recording your own script</h2>
     <p class="muted" style="line-height:1.6">
-      1. Edit an RPA tool and set <b>Trigger after mail job</b> (e.g. order_extract)<br>
-      2. Enable the RPA tool<br>
-      3. When that mail job finishes and downloads a file, NERP runs automatically<br>
-      4. The downloaded Excel is copied to the NERP upload path before upload<br>
-      Or use <b>Run now</b> to test manually (uses latest mail file or data/Book1.xlsx).
+      1. Click <b>+ New recorded script</b> and set the <b>start URL</b><br>
+      2. Click <b>Record</b> — Playwright codegen opens in a new window<br>
+      3. Perform your steps, then close the codegen window (script auto-saves)<br>
+      4. Or paste/edit the Python script on the Edit page<br>
+      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download
     </p>
   </div>
   <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
@@ -850,34 +860,120 @@ def rpa_list():
     return _layout("RPA Tools", "rpa", body, jobs=jobs, runs=runs, msg=msg, err=err)
 
 
+@app.route("/rpa/new", methods=["GET", "POST"])
+def rpa_new():
+    seed_rpa()
+    error = None
+    form = {
+        "rpa_id": "",
+        "name": "",
+        "start_url": config.NERP_URL,
+        "description": "",
+        "trigger_mail_job": "",
+        "enabled": False,
+    }
+    mail_jobs = list_jobs()
+
+    if request.method == "POST":
+        form = {
+            "rpa_id": request.form.get("rpa_id", ""),
+            "name": request.form.get("name", ""),
+            "start_url": request.form.get("start_url", ""),
+            "description": request.form.get("description", ""),
+            "trigger_mail_job": request.form.get("trigger_mail_job", ""),
+            "enabled": request.form.get("enabled") == "on",
+        }
+        try:
+            slug = add_rpa_job(
+                rpa_id=form["rpa_id"],
+                name=form["name"],
+                start_url=form["start_url"],
+                description=form["description"],
+                trigger_mail_job=form["trigger_mail_job"],
+                enabled=form["enabled"],
+            )
+            return redirect(url_for("rpa_edit", rpa_id=slug, msg="Created — click Record to capture steps"))
+        except Exception as e:
+            error = str(e)
+
+    body = """
+  <h1>New recorded RPA script</h1>
+  <div class="sub">Creates a custom tool you record with Playwright codegen.</div>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="panel">
+    <div class="form-row"><label>RPA id (e.g. my_upload_flow)</label>
+      <input type="text" name="rpa_id" required value="{{ form.rpa_id }}" placeholder="my_upload_flow"></div>
+    <div class="form-row"><label>Display name</label>
+      <input type="text" name="name" required value="{{ form.name }}" placeholder="My upload flow"></div>
+    <div class="form-row"><label>Start URL (codegen opens this page)</label>
+      <input type="url" name="start_url" required value="{{ form.start_url }}" style="width:100%"></div>
+    <div class="form-row"><label>Trigger after mail job</label>
+      <select name="trigger_mail_job">
+        <option value="">— Manual only —</option>
+        {% for m in mail_jobs %}<option value="{{ m.job_id }}" {{ 'selected' if form.trigger_mail_job==m.job_id else '' }}>{{ m.job_id }} — {{ m.name }}</option>{% endfor %}
+      </select></div>
+    <div class="form-row"><label>Notes</label>
+      <input type="text" name="description" value="{{ form.description }}"></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
+    <button type="submit">Create</button>
+    <a href="/rpa"><button type="button">Cancel</button></a>
+  </form>
+"""
+    return _layout("New RPA", "rpa", body, form=form, mail_jobs=mail_jobs, error=error)
+
+
 @app.route("/rpa/<rpa_id>/edit", methods=["GET", "POST"])
 def rpa_edit(rpa_id):
     seed_rpa()
+    from rpa.codegen import has_script, read_script, save_script
+
     job = get_rpa_job(rpa_id)
     if not job:
         return redirect(url_for("rpa_list", err="RPA tool not found"))
     mail_jobs = list_jobs()
     error = None
+    msg = request.args.get("msg")
+    script_text = read_script(rpa_id) if job["tool"] == "codegen" else ""
+    script_saved = has_script(rpa_id) if job["tool"] == "codegen" else True
+
     if request.method == "POST":
         try:
-            update_rpa_job(
-                rpa_id,
+            fields = dict(
                 name=request.form["name"].strip(),
                 description=request.form.get("description", "").strip(),
                 trigger_mail_job=request.form.get("trigger_mail_job", "").strip(),
                 enabled=request.form.get("enabled") == "on",
             )
+            if job["tool"] == "codegen":
+                fields["start_url"] = request.form.get("start_url", "").strip()
+            update_rpa_job(rpa_id, **fields)
+            if job["tool"] == "codegen" and "script" in request.form:
+                body = request.form.get("script", "")
+                if body.strip():
+                    save_script(rpa_id, body)
+                    script_saved = True
             return redirect(url_for("rpa_list", msg=f"RPA '{rpa_id}' updated"))
         except Exception as e:
             error = str(e)
+            script_text = request.form.get("script", script_text)
 
     body = """
   <h1>Edit RPA: {{ job.rpa_id }}</h1>
   <p class="muted">{{ job.description }}</p>
+  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
   <form method="post" class="panel">
     <div class="form-row"><label>Display name</label>
       <input type="text" name="name" value="{{ job.name }}" required></div>
+    <div class="form-row"><label>Start URL</label>
+      <input type="url" name="start_url" value="{{ job.start_url }}" style="width:100%" {{ 'readonly' if job.tool != 'codegen' else '' }}></div>
+    {% if job.tool == 'codegen' %}
+    <div class="form-row">
+      <label>Recorded script {% if script_saved %}<span class="ok">(saved)</span>{% else %}<span class="err">(not recorded yet)</span>{% endif %}</label>
+      <textarea name="script" rows="18" style="width:100%;font-family:monospace;font-size:12px" placeholder="Paste Playwright codegen output here, or click Record below.">{{ script_text }}</textarea>
+    </div>
+    <p class="muted">File: rpa/scripts/{{ job.rpa_id }}.py</p>
+    {% endif %}
     <div class="form-row"><label>Trigger after mail job</label>
       <select name="trigger_mail_job">
         <option value="">— Manual only —</option>
@@ -887,10 +983,55 @@ def rpa_edit(rpa_id):
       <input type="text" name="description" value="{{ job.description }}"></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
     <button type="submit">Save</button>
+    {% if job.tool == 'codegen' %}
+    <button type="submit" formaction="/rpa/{{ job.rpa_id }}/record" formmethod="post">Open recorder</button>
+    {% endif %}
     <a href="/rpa"><button type="button">Back</button></a>
+    {% if job.tool == 'codegen' %}
+    <button type="submit" formaction="/rpa/{{ job.rpa_id }}/delete" formmethod="post" style="float:right;background:#5a2020" onclick="return confirm('Delete this RPA script?')">Delete</button>
+    {% endif %}
   </form>
 """
-    return _layout("Edit RPA", "rpa", body, job=job, mail_jobs=mail_jobs, error=error)
+    return _layout(
+        "Edit RPA", "rpa", body,
+        job=job, mail_jobs=mail_jobs, error=error, msg=msg,
+        script_text=script_text, script_saved=script_saved,
+    )
+
+
+@app.route("/rpa/<rpa_id>/record", methods=["POST"])
+def rpa_record(rpa_id):
+    from rpa.codegen import launch_recorder
+
+    job = get_rpa_job(rpa_id)
+    if not job:
+        return redirect(url_for("rpa_list", err="RPA tool not found"))
+    if job["tool"] != "codegen":
+        return redirect(url_for("rpa_edit", rpa_id=rpa_id, err="Only custom scripts can be recorded"))
+
+    start_url = request.form.get("start_url", "").strip() or job.get("start_url", "")
+    if request.form.get("start_url"):
+        update_rpa_job(rpa_id, start_url=start_url)
+
+    try:
+        path = launch_recorder(rpa_id, start_url)
+        return redirect(
+            url_for(
+                "rpa_list",
+                msg=f"Recorder opened for '{rpa_id}'. Perform steps, close codegen when done. Saves to {os.path.basename(path)}",
+            )
+        )
+    except Exception as e:
+        return redirect(url_for("rpa_edit", rpa_id=rpa_id, err=str(e)))
+
+
+@app.route("/rpa/<rpa_id>/delete", methods=["POST"])
+def rpa_delete(rpa_id):
+    try:
+        delete_rpa_job(rpa_id)
+        return redirect(url_for("rpa_list", msg=f"Deleted RPA '{rpa_id}'"))
+    except Exception as e:
+        return redirect(url_for("rpa_edit", rpa_id=rpa_id, err=str(e)))
 
 
 @app.route("/rpa/<rpa_id>/run", methods=["POST"])

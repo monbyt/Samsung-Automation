@@ -118,6 +118,10 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
                 shutil.copy2(path, config.NERP_UPLOAD_FILE)
                 print(f"  Copied to {config.NERP_UPLOAD_FILE}")
             nerp_run(upload_file=config.NERP_UPLOAD_FILE)
+        elif job["tool"] == "codegen":
+            from rpa.codegen import run_recorded_script
+
+            run_recorded_script(rpa_id)
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 

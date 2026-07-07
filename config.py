@@ -89,6 +89,9 @@ NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"
 NERP_PROGRAM_PI = "ZSDM31520"
 
+# Recorded Playwright codegen scripts (one .py per custom RPA job).
+RPA_SCRIPTS_DIR = os.path.join(BASE_DIR, "rpa", "scripts")
+
 # ── Database ───────────────────────────────────────────────────
 # SQLite by default (WAL mode enabled for concurrent dashboard reads).
 # For heavy LAN querying, switch to MySQL on a small server:

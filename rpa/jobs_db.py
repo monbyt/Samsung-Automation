@@ -1,9 +1,11 @@
 """
 RPA tool definitions — managed from the dashboard, triggered after mail jobs.
 """
+import os
+import re
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text, select, update
+from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text, delete, select, update
 
 import config
 from db import engine, init_db
@@ -16,6 +18,7 @@ rpa_jobs = Table(
     Column("rpa_id", String(64), unique=True, nullable=False),
     Column("name", String(200), nullable=False),
     Column("tool", String(50), nullable=False),
+    Column("start_url", Text),
     Column("description", Text),
     Column("trigger_mail_job", String(64)),
     Column("enabled", Integer, default=1),
@@ -25,10 +28,40 @@ rpa_jobs = Table(
     Column("created_at", DateTime),
 )
 
+_BUILTIN_IDS = frozenset({"nerp_upload_pi"})
+
 
 def _ensure_tables():
     init_db()
     metadata.create_all(engine)
+    _migrate_rpa_columns()
+
+
+def _migrate_rpa_columns():
+    if not config.DB_URL.startswith("sqlite"):
+        return
+    from sqlalchemy import text as sqltext
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(sqltext("PRAGMA table_info(rpa_jobs)"))}
+        if "start_url" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN start_url TEXT"))
+        conn.execute(
+            sqltext(
+                "UPDATE rpa_jobs SET start_url = :url "
+                "WHERE rpa_id = 'nerp_upload_pi' AND (start_url IS NULL OR start_url = '')"
+            ),
+            {"url": config.NERP_URL},
+        )
+
+
+def _normalize_rpa_id(raw: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", (raw or "").strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    if not slug:
+        raise ValueError("RPA id is required (letters, numbers, underscores).")
+    if slug in _BUILTIN_IDS:
+        raise ValueError(f"RPA id '{slug}' is reserved.")
+    return slug
 
 
 def _row_to_dict(row):
@@ -37,6 +70,7 @@ def _row_to_dict(row):
         "rpa_id": row.rpa_id,
         "name": row.name,
         "tool": row.tool,
+        "start_url": row.start_url or "",
         "description": row.description or "",
         "trigger_mail_job": row.trigger_mail_job or "",
         "enabled": bool(row.enabled),
@@ -60,6 +94,7 @@ def seed_from_config():
             rpa_id="nerp_upload_pi",
             name="NERP Upload + P/I",
             tool="nerp",
+            start_url=config.NERP_URL,
             description=(
                 f"Upload {config.NERP_PROGRAM_UPLOAD} then run "
                 f"{config.NERP_PROGRAM_PI} (P/I print). Uses file from mail job or "
@@ -87,6 +122,39 @@ def get_rpa_job(rpa_id: str):
     return _row_to_dict(row) if row else None
 
 
+def add_rpa_job(
+    rpa_id: str,
+    name: str,
+    start_url: str,
+    *,
+    description: str = "",
+    trigger_mail_job: str = "",
+    enabled: bool = False,
+) -> str:
+    slug = _normalize_rpa_id(rpa_id)
+    if get_rpa_job(slug):
+        raise ValueError(f"RPA id '{slug}' already exists.")
+    if not name.strip():
+        raise ValueError("Display name is required.")
+    if not start_url.strip():
+        raise ValueError("Start URL is required for recording.")
+
+    now = datetime.now()
+    _ensure_tables()
+    with engine.begin() as conn:
+        conn.execute(rpa_jobs.insert().values(
+            rpa_id=slug,
+            name=name.strip(),
+            tool="codegen",
+            start_url=start_url.strip(),
+            description=description.strip(),
+            trigger_mail_job=(trigger_mail_job or "").strip(),
+            enabled=1 if enabled else 0,
+            created_at=now,
+        ))
+    return slug
+
+
 def list_for_mail_job(mail_job_id: str):
     if not mail_job_id:
         return []
@@ -107,7 +175,7 @@ def rpa_by_mail_job():
 
 
 def update_rpa_job(rpa_id: str, **fields):
-    allowed = {"name", "description", "trigger_mail_job", "enabled"}
+    allowed = {"name", "description", "trigger_mail_job", "enabled", "start_url"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
@@ -115,11 +183,25 @@ def update_rpa_job(rpa_id: str, **fields):
         updates["enabled"] = 1 if updates["enabled"] else 0
     if "trigger_mail_job" in updates and updates["trigger_mail_job"] is None:
         updates["trigger_mail_job"] = ""
+    if "start_url" in updates and updates["start_url"] is not None:
+        updates["start_url"] = updates["start_url"].strip()
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
             update(rpa_jobs).where(rpa_jobs.c.rpa_id == rpa_id).values(**updates)
         )
+
+
+def delete_rpa_job(rpa_id: str):
+    if rpa_id in _BUILTIN_IDS:
+        raise ValueError("Cannot delete built-in RPA tools.")
+    _ensure_tables()
+    with engine.begin() as conn:
+        conn.execute(rpa_jobs.delete().where(rpa_jobs.c.rpa_id == rpa_id))
+    from rpa.codegen import script_path
+    path = script_path(rpa_id)
+    if os.path.isfile(path):
+        os.remove(path)
 
 
 def mark_rpa_finished(rpa_id: str, status: str, message: str = ""):

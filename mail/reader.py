@@ -1,11 +1,9 @@
 """
 W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
-Matches Playwright codegen flow exactly.
 """
 import json
 import os
 import re
-import time
 from datetime import datetime
 
 os.environ.setdefault("NO_PROXY", "*")
@@ -53,23 +51,60 @@ def _set_cdp_download(page, download_dir):
         pass
 
 
-def _mail_frame(page):
+def _click_ok_popups(page):
+    for _ in range(4):
+        try:
+            page.get_by_role("button", name="OK", exact=True).first.click(timeout=1_000)
+        except PlaywrightTimeout:
+            break
+
+
+def _mail(page):
     return page.locator(MAIL_IFRAME).content_frame
 
 
-def _run_codegen_flow(page, mailbox, subject, download_dir):
-    """Exact Playwright codegen steps."""
+def _goto_w1(page):
+    if "abnormal-logout" in page.url or "loginapp" in page.url:
+        _click_ok_popups(page)
     page.goto(config.W1_URL)
+    _click_ok_popups(page)
+
+
+def _open_mail(page):
+    _goto_w1(page)
     page.get_by_role("button", name="Mail", exact=True).click()
-    _mail_frame(page).get_by_role("button", name=mailbox, exact=True).click()
-    _mail_frame(page).locator("div").filter(
-        has_text=re.compile(rf"^{re.escape(subject)}$")
-    ).first.click()
+
+
+def _subject_pattern(subject: str):
+    return re.compile(rf"^{re.escape(subject)}$")
+
+
+def check_filter(page, mail_filter, processed_subjects):
+    """Open mailbox, click matching email, download attachment."""
+    filter_id = mail_filter["id"]
+    mailbox = mail_filter["mailbox"]
+    subject = mail_filter["subject"]
+    download_dir = mail_filter.get("download_dir") or config.DOWNLOAD_DIR
 
     os.makedirs(download_dir, exist_ok=True)
+    _configure_downloads(config.PROFILE_DIR, download_dir)
+    _set_cdp_download(page, download_dir)
+
+    downloaded = []
+    print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}'")
+
+    key = f"{filter_id}::{subject}"
+    if key in processed_subjects:
+        print(f"[{filter_id}] Already handled this session")
+        return downloaded
+
+    mail = _mail(page)
+    mail.get_by_role("button", name=mailbox, exact=True).click()
+    mail.locator("div").filter(has_text=_subject_pattern(subject)).first.click()
+
     try:
         with page.expect_download(timeout=8_000) as download_info:
-            _mail_frame(page).get_by_role("button", name="Download").click()
+            mail.get_by_role("button", name="Download").first.click()
         download = download_info.value
         save_path = os.path.join(download_dir, download.suggested_filename)
         download.save_as(save_path)
@@ -78,36 +113,15 @@ def _run_codegen_flow(page, mailbox, subject, download_dir):
         dismiss_save_as_dialog(timeout=60)
         save_path = wait_for_new_file(download_dir, timeout=60)
 
-    return save_path
-
-
-def check_filter(page, mail_filter, processed_subjects):
-    filter_id = mail_filter["id"]
-    mailbox = mail_filter["mailbox"]
-    subject = mail_filter["subject"]
-    download_dir = mail_filter.get("download_dir") or config.DOWNLOAD_DIR
-
-    _configure_downloads(config.PROFILE_DIR, download_dir)
-    _set_cdp_download(page, download_dir)
-
-    downloaded = []
-    print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}' → folder {download_dir}")
-
-    key = f"{filter_id}::{subject}"
-    if key in processed_subjects:
-        print(f"[{filter_id}] Already handled this session")
-        return downloaded
-
-    path = _run_codegen_flow(page, mailbox, subject, download_dir)
+    processed_subjects.add(key)
     downloaded.append({
-        "path": path,
+        "path": save_path,
         "filter_id": filter_id,
         "table": mail_filter["table"],
         "subject": subject,
         "ingest_mode": mail_filter.get("ingest_mode", "replace"),
     })
-    processed_subjects.add(key)
-    print(f"[{filter_id}] Saved to {path}")
+    print(f"[{filter_id}] Saved to {save_path}")
     return downloaded
 
 
@@ -136,6 +150,7 @@ def run_mail_check(filters=None, on_download=None):
             args=["--disable-popup-blocking", "--no-first-run"],
         )
         page = context.pages[0] if context.pages else context.new_page()
+        _open_mail(page)
 
         for mail_filter in filters:
             try:

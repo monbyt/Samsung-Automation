@@ -36,7 +36,7 @@ DOWNLOAD_DIR = os.path.join(DESKTOP_DIR, "Order-Extract")
 # Chrome profile that stays logged into W1 (created on first run)
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile")
 
-W1_URL = "http://w1.samsung.net/portalapp/home"
+W1_URL = "http://w1.samsung.net"
 
 # Set True to hide the browser window on scheduled W1 runs.
 HEADLESS = False

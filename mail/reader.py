@@ -102,7 +102,7 @@ def _download_from_open_email(page, frame, download_dir):
     os.makedirs(download_dir, exist_ok=True)
     try:
         with page.expect_download(timeout=8_000) as download_info:
-            frame.get_by_role("button", name="Download").click()
+            frame.get_by_role("button", name="Download").first.click()
         download = download_info.value
         save_path = os.path.join(download_dir, download.suggested_filename)
         download.save_as(save_path)
@@ -112,7 +112,7 @@ def _download_from_open_email(page, frame, download_dir):
         save_path = wait_for_new_file(download_dir, timeout=60)
 
     try:
-        frame.get_by_role("button", name="OK").click(timeout=3_000)
+        frame.get_by_role("button", name="OK").first.click(timeout=3_000)
     except Exception:
         pass
 
@@ -132,12 +132,6 @@ def check_filter(page, frame, mail_filter, processed_subjects):
 
     downloaded = []
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}' → folder {download_dir}")
-
-    try:
-        frame.get_by_role("button", name=mailbox, exact=True).click(timeout=3_000)
-        time.sleep(0.5)
-    except Exception:
-        frame = _open_mail_frame(page)
 
     _open_mailbox(frame, mailbox)
     opened_subject = _click_matching_email(frame, subject)

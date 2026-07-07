@@ -96,7 +96,7 @@ def _list_excel_files():
             continue
         label = os.path.basename(folder)
         for f in os.listdir(folder):
-            if not f.lower().endswith((".xlsx", ".xls")):
+            if not f.lower().endswith((".xlsx", ".xls", ".zip")):
                 continue
             path = os.path.join(folder, f)
             entries.append({"label": f"{label}/{f}", "path": path})

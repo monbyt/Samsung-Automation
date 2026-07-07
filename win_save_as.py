@@ -120,7 +120,7 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
     return False
 
 
-def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv")):
+def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv", ".zip")):
     """Wait for a new spreadsheet in *directory* (or move from a fallback folder)."""
     os.makedirs(directory, exist_ok=True)
     watch = [directory] + [d for d in _extra_watch_dirs() if d and os.path.isdir(d)]

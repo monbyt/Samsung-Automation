@@ -10,14 +10,90 @@ import config
 from db import record_rpa_run
 from rpa.jobs_db import get_rpa_job, list_for_mail_job, mark_rpa_finished
 
+_SPREADSHEET_EXT = (".xlsx", ".xls")
 
-def _prepare_upload_file(upload_file: Optional[str]) -> str:
-    if upload_file and os.path.isfile(upload_file):
-        return upload_file
+
+def _dirs_for_mail_job(mail_job_id: Optional[str]):
+    from mail.jobs_db import get_job, list_jobs, resolve_download_dir
+
+    dirs = []
+    if mail_job_id:
+        job = get_job(mail_job_id)
+        if job:
+            dirs.append(job.get("download_dir") or resolve_download_dir(job))
+    else:
+        for j in list_jobs():
+            d = j.get("download_dir") or resolve_download_dir(j)
+            if d:
+                dirs.append(d)
+    dirs.append(config.DOWNLOAD_DIR)
+    # unique, preserve order
+    seen = set()
+    out = []
+    for d in dirs:
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]:
+    """Newest Excel on Desktop job folders (optionally scoped to one mail job)."""
+    candidates = []
+    for folder in _dirs_for_mail_job(mail_job_id):
+        if not os.path.isdir(folder):
+            continue
+        for name in os.listdir(folder):
+            if not name.lower().endswith(_SPREADSHEET_EXT):
+                continue
+            path = os.path.join(folder, name)
+            if os.path.isfile(path):
+                candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def _resolve_spreadsheet(path: str) -> str:
+    """Turn a download path (.xlsx or .zip) into a readable Excel file."""
+    if path.lower().endswith(_SPREADSHEET_EXT):
+        return path
+    if path.lower().endswith(".zip"):
+        from parse_to_db import extract_zip_if_needed
+        return extract_zip_if_needed(path, extract_zip=True)
+    raise FileNotFoundError(f"Not an Excel or zip file: {path}")
+
+
+def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
+  """Pick the Excel file for NERP — explicit path, linked mail folder, or data/Book1.xlsx."""
+    mail_job_id = rpa_job.get("trigger_mail_job") or None
+
+    if upload_file:
+        if os.path.isfile(upload_file):
+            try:
+                return _resolve_spreadsheet(upload_file)
+            except Exception:
+                pass
+        print(f"  Warning: upload path missing or unusable: {upload_file!r}")
+
+    latest = _find_latest_spreadsheet(mail_job_id)
+    if latest:
+        print(f"  Using latest file from mail folder: {os.path.basename(latest)}")
+        return latest
+
+    if not mail_job_id:
+        latest = _find_latest_spreadsheet()
+        if latest:
+            print(f"  Using latest file from any mail folder: {os.path.basename(latest)}")
+            return latest
+
     if os.path.isfile(config.NERP_UPLOAD_FILE):
         return config.NERP_UPLOAD_FILE
+
+    folders = ", ".join(_dirs_for_mail_job(mail_job_id))
     raise FileNotFoundError(
-        "No upload file — run a mail job first or set NERP_UPLOAD_FILE in config."
+        f"No Excel file found for NERP. Run the linked mail job first "
+        f"(checked: {folders}) or place a file at {config.NERP_UPLOAD_FILE}"
     )
 
 
@@ -29,29 +105,31 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
 
     print(f"\n[RPA] Running {job['name']} ({rpa_id})...")
     result = {"rpa_id": rpa_id, "status": "ok", "message": ""}
+    used_path = None
 
     try:
         if job["tool"] == "nerp":
             from nerp.rpa import run as nerp_run
 
-            path = _prepare_upload_file(upload_file)
-            if path != config.NERP_UPLOAD_FILE:
-                os.makedirs(os.path.dirname(config.NERP_UPLOAD_FILE), exist_ok=True)
+            path = _prepare_upload_file(upload_file, job)
+            used_path = path
+            os.makedirs(os.path.dirname(config.NERP_UPLOAD_FILE), exist_ok=True)
+            if os.path.abspath(path) != os.path.abspath(config.NERP_UPLOAD_FILE):
                 shutil.copy2(path, config.NERP_UPLOAD_FILE)
-                print(f"  Using mail file: {os.path.basename(path)}")
+                print(f"  Copied to {config.NERP_UPLOAD_FILE}")
             nerp_run(upload_file=config.NERP_UPLOAD_FILE)
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 
         mark_rpa_finished(rpa_id, "ok")
-        record_rpa_run(rpa_id, "ok", upload_file=upload_file)
+        record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
     except Exception as e:
         err = traceback.format_exc()[-500:]
         result["status"] = "error"
         result["message"] = str(e)
         mark_rpa_finished(rpa_id, "error", err)
-        record_rpa_run(rpa_id, "error", message=err, upload_file=upload_file)
+        record_rpa_run(rpa_id, "error", message=err, upload_file=used_path or upload_file)
         print(f"[RPA] {job['name']} failed: {e}")
         raise
 

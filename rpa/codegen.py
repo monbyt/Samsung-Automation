@@ -96,6 +96,11 @@ def _inject_post_upload_lines(indent: str) -> list[str]:
     ]
 
 
+def _is_set_input_files_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return ".set_input_files(" in stripped and not stripped.startswith("print(")
+
+
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
     SAP upload via Chrome file picker: wrap the OK click (after help button) with
@@ -118,7 +123,7 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             and "page." in line
         ):
             ahead = "\n".join(lines[i + 1 : i + 8])
-            if "set_input_files" in ahead:
+            if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
                 indent = line[: len(line) - len(stripped)]
                 inner = indent + "    "
                 out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
@@ -128,10 +133,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
                 out.extend(_inject_post_upload_lines(indent))
                 used_chooser = True
                 i += 1
-                while i < len(lines) and "set_input_files" not in lines[i]:
-                    out.append(lines[i])
-                    i += 1
-                if i < len(lines) and "set_input_files" in lines[i]:
+                while i < len(lines):
+                    if _is_set_input_files_line(lines[i]):
+                        i += 1
+                        break
                     i += 1
                 continue
 
@@ -401,8 +406,7 @@ def _patch_playwright_logging() -> None:
                 if any(k in snippet for k in ("Upload file", "ls-inputfieldhelpbutton", "webgui_filebrowser", "OK")):
                     debug_log("H3", "codegen.py:click", "upload-related click", {"locator": snippet})
                 # endregion
-                if _upload_file_path() and 'get_by_role("button", name="OK")' in snippet:
-                    _start_win_open_fallback()
+                # Do not call win_open on OK — races with expect_file_chooser and corrupts SAP upload.
             return original(self, *args, **kwargs)
 
         setattr(cls, name, wrapper)
@@ -457,25 +461,37 @@ def _resolve_recorded_path(recorded: str) -> str:
     return os.path.normpath(os.path.join(config.BASE_DIR, recorded))
 
 
-def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
-    """Also copy mail file to recorded filename(s) as a fallback."""
+def prepare_sap_upload_file(
+    rpa_id: str,
+    upload_path: str,
+    upload_dir: Optional[str] = None,
+) -> str:
+    """
+    Copy the upload into the recorded SAP filename (e.g. sample_bulk.XLSX)
+    inside the upload folder — same path you would pick manually.
+    """
     script = script_path(rpa_id)
     with open(script, encoding="utf-8") as f:
         content = f.read()
 
-    targets = {_resolve_recorded_path(m.group(1)) for m in _INPUT_FILES_RE.finditer(content)}
-    if not targets:
-        return []
+    basenames = [
+        os.path.basename(m.group(1).replace("\\", "/"))
+        for m in _INPUT_FILES_RE.finditer(content)
+    ]
+    if not basenames:
+        return os.path.abspath(upload_path)
 
-    staged = []
-    for dest in sorted(targets):
-        parent = os.path.dirname(dest)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        shutil.copy2(upload_path, dest)
-        staged.append(dest)
-        _log(f"Staged copy → {dest}")
-    return staged
+    basename = basenames[0]
+    dest_dir = (upload_dir or "").strip() or os.path.dirname(os.path.abspath(upload_path)) or config.BASE_DIR
+    dest = os.path.normpath(os.path.join(dest_dir, basename))
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copy2(upload_path, dest)
+    _log(f"Prepared SAP upload: {dest}")
+    return dest
+
+
+def stage_upload_for_script(rpa_id: str, upload_path: str, upload_dir: Optional[str] = None) -> list[str]:
+    return [prepare_sap_upload_file(rpa_id, upload_path, upload_dir=upload_dir)]
 
 
 def run_recorded_script(
@@ -503,12 +519,9 @@ def run_recorded_script(
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
-        staged = stage_upload_for_script(rpa_id, upload_abs)
-        sap_upload = staged[0] if staged else upload_abs
+        sap_upload = prepare_sap_upload_file(rpa_id, upload_abs, upload_dir=upload_dir)
         os.environ["RPA_UPLOAD_FILE"] = sap_upload
         _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")
-        if staged:
-            _log(f"Staged as recorded filename: {os.path.basename(sap_upload)}")
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
         _log("No upload file — set_input_files uses script paths or win_open_file()")

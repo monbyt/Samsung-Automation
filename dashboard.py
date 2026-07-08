@@ -850,9 +850,8 @@ def rpa_list():
   <div class="panel"><h2>Windows files (upload / save)</h2>
     <p class="muted" style="line-height:1.6">
       Set <b>Upload folder</b> and <b>Download folder</b> on Edit (or link a mail job — uses that job's Desktop folder).<br>
-      <b>Upload:</b> latest file from upload folder is auto-selected in Chrome&apos;s file picker
-      (and via <code>set_input_files</code> when SAP uses an in-page control).
-      Native Open dialogs are handled automatically on Windows.<br>
+      <b>Upload:</b> newest file from your upload folder is copied to <code>sample_bulk.XLSX</code>
+      there (SAP&apos;s expected name), then auto-selected in the file picker.<br>
       <b>Save:</b> Playwright downloads are auto-saved to the download folder. For native Save As dialogs use
       <code>win_save_as(RPA_DOWNLOAD_DIR)</code> (same helper as W1 mail).
     </p>

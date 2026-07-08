@@ -81,6 +81,16 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
+def _sap_zoom_lines(indent: str) -> list[str]:
+    return [
+        f"{indent}try:",
+        f"{indent}    page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame.evaluate(\"document.body.style.zoom = '75%'\")",
+        f'{indent}    print("[RPA] SAP iframe zoom → 75%")',
+        f"{indent}except Exception:",
+        f"{indent}    pass",
+    ]
+
+
 def _inject_post_upload_lines(indent: str) -> list[str]:
     """Wait for SAP to accept upload and dismiss error popups before Execute."""
     return [
@@ -94,6 +104,11 @@ def _inject_post_upload_lines(indent: str) -> list[str]:
         f'{indent}_rpa_shell.get_by_role("button", name="Execute  Emphasized").wait_for(state="visible", timeout=60000)',
         f'{indent}print("[RPA] Execute button ready")',
     ]
+
+
+def _is_set_input_files_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return ".set_input_files(" in stripped and not stripped.startswith("print(")
 
 
 def _automate_file_upload(source: str, upload_abs: str) -> str:
@@ -118,9 +133,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             and "page." in line
         ):
             ahead = "\n".join(lines[i + 1 : i + 8])
-            if "set_input_files" in ahead:
+            if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
                 indent = line[: len(line) - len(stripped)]
                 inner = indent + "    "
+                out.extend(_sap_zoom_lines(indent))
                 out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
                 out.append(f"{indent}with page.expect_file_chooser() as _rpa_fc_info:")
                 out.append(inner + stripped)
@@ -128,10 +144,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
                 out.extend(_inject_post_upload_lines(indent))
                 used_chooser = True
                 i += 1
-                while i < len(lines) and "set_input_files" not in lines[i]:
-                    out.append(lines[i])
-                    i += 1
-                if i < len(lines) and "set_input_files" in lines[i]:
+                while i < len(lines):
+                    if _is_set_input_files_line(lines[i]):
+                        i += 1
+                        break
                     i += 1
                 continue
 
@@ -184,12 +200,8 @@ def _automate_download_step(source: str) -> str:
                     f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame"
                 )
                 shell_declared = True
+            out.extend(_sap_zoom_lines(indent))
             out.append(f'{indent}_rpa_dl_btn = _rpa_shell.get_by_role("button", name="Download Result Data")')
-            out.append(f"{indent}try:")
-            out.append(f'{indent}    _rpa_shell.evaluate("document.body.style.zoom = \'75%\'")')
-            out.append(f'{indent}    print("[RPA] SAP iframe zoom → 75%")')
-            out.append(f"{indent}except Exception:")
-            out.append(f"{indent}    pass")
             out.append(f"{indent}_rpa_dl_btn.scroll_into_view_if_needed()")
             out.append(f'{indent}_rpa_dl_btn.wait_for(state="visible", timeout=120000)')
             out.append(f'{indent}print("[RPA] Download Result Data button ready")')
@@ -500,8 +512,7 @@ def _patch_playwright_logging() -> None:
                 if any(k in snippet for k in ("Upload file", "ls-inputfieldhelpbutton", "webgui_filebrowser", "OK")):
                     debug_log("H3", "codegen.py:click", "upload-related click", {"locator": snippet})
                 # endregion
-                if _upload_file_path() and 'get_by_role("button", name="OK")' in snippet:
-                    _start_win_open_fallback()
+                # Do not call win_open on OK — races with expect_file_chooser and corrupts SAP upload.
                 if "Download Result Data" in snippet:
                     _start_win_save_fallback()
             return original(self, *args, **kwargs)
@@ -558,27 +569,37 @@ def _resolve_recorded_path(recorded: str) -> str:
     return os.path.normpath(os.path.join(config.BASE_DIR, recorded))
 
 
-def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
-    """Optional fallback copies for scripts that still call set_input_files on a basename."""
+def prepare_sap_upload_file(
+    rpa_id: str,
+    upload_path: str,
+    upload_dir: Optional[str] = None,
+) -> str:
+    """
+    Copy the latest upload into the recorded SAP filename (e.g. sample_bulk.XLSX)
+    inside the upload folder so SAP sees the expected template name.
+    """
     script = script_path(rpa_id)
     with open(script, encoding="utf-8") as f:
         content = f.read()
 
-    targets = {_resolve_recorded_path(m.group(1)) for m in _INPUT_FILES_RE.finditer(content)}
-    if not targets:
-        return []
+    basenames = []
+    for m in _INPUT_FILES_RE.finditer(content):
+        basenames.append(os.path.basename(m.group(1).replace("\\", "/")))
+    if not basenames:
+        return os.path.abspath(upload_path)
 
-    staged = []
-    for dest in sorted(targets):
-        if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(upload_path)):
-            continue
-        parent = os.path.dirname(dest)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        shutil.copy2(upload_path, dest)
-        staged.append(dest)
-        _log(f"Fallback copy (not used for picker) → {dest}")
-    return staged
+    basename = basenames[0]
+    dest_dir = (upload_dir or "").strip() or os.path.dirname(os.path.abspath(upload_path)) or config.BASE_DIR
+    dest = os.path.normpath(os.path.join(dest_dir, basename))
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copy2(upload_path, dest)
+    _log(f"Prepared SAP upload: {dest}")
+    return dest
+
+
+def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
+    """Deprecated — use prepare_sap_upload_file."""
+    return [prepare_sap_upload_file(rpa_id, upload_path)]
 
 
 def run_recorded_script(
@@ -606,9 +627,9 @@ def run_recorded_script(
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
-        os.environ["RPA_UPLOAD_FILE"] = upload_abs
-        _log(f"Upload file: {upload_abs} ({os.path.getsize(upload_abs)} bytes)")
-        stage_upload_for_script(rpa_id, upload_abs)
+        sap_upload = prepare_sap_upload_file(rpa_id, upload_abs, upload_dir=upload_dir)
+        os.environ["RPA_UPLOAD_FILE"] = sap_upload
+        _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
         _log("No upload file — set_input_files uses script paths or win_open_file()")

@@ -4,13 +4,18 @@ Run RPA tools — manually or after a mail job finishes.
 import os
 import shutil
 import traceback
+from datetime import datetime
 from typing import Optional
 
 import config
 from db import record_rpa_run
 from rpa.jobs_db import get_rpa_job, list_for_mail_job, mark_rpa_finished
 
-_SPREADSHEET_EXT = (".xlsx", ".xls")
+_UPLOAD_EXT = (".xlsx", ".xls", ".xlsm", ".csv")
+
+
+def _log(msg: str) -> None:
+    print(f"[RPA {datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
 def _dirs_for_mail_job(mail_job_id: Optional[str]):
@@ -38,13 +43,13 @@ def _dirs_for_mail_job(mail_job_id: Optional[str]):
 
 
 def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]:
-    """Newest Excel on Desktop job folders (optionally scoped to one mail job)."""
+    """Newest spreadsheet on Desktop job folders (optionally scoped to one mail job)."""
     candidates = []
     for folder in _dirs_for_mail_job(mail_job_id):
         if not os.path.isdir(folder):
             continue
         for name in os.listdir(folder):
-            if not name.lower().endswith(_SPREADSHEET_EXT):
+            if not name.lower().endswith(_UPLOAD_EXT):
                 continue
             path = os.path.join(folder, name)
             if os.path.isfile(path):
@@ -55,8 +60,8 @@ def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]
 
 
 def _resolve_spreadsheet(path: str) -> str:
-    """Turn a download path (.xlsx or .zip) into a readable Excel file."""
-    if path.lower().endswith(_SPREADSHEET_EXT):
+    """Turn a download path (.xlsx, .xls, .zip) into a readable file for upload."""
+    if path.lower().endswith(_UPLOAD_EXT):
         return path
     if path.lower().endswith(".zip"):
         from parse_to_db import extract_zip_if_needed
@@ -104,6 +109,11 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
         raise ValueError(f"Unknown RPA job: {rpa_id}")
 
     print(f"\n[RPA] Running {job['name']} ({rpa_id})...")
+    _log(f"Tool type: {job['tool']}")
+    if job.get("trigger_mail_job"):
+        _log(f"Linked mail job: {job['trigger_mail_job']}")
+    if job.get("start_url"):
+        _log(f"Start URL: {job['start_url']}")
     result = {"rpa_id": rpa_id, "status": "ok", "message": ""}
     used_path = None
 
@@ -124,9 +134,10 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
             try:
                 path = _prepare_upload_file(upload_file, job)
                 used_path = path
-            except FileNotFoundError:
+                _log(f"Resolved upload file: {path}")
+            except FileNotFoundError as e:
                 path = None
-                print("  No mail/download file found — running script without auto-upload")
+                _log(f"No upload file: {e}")
             run_recorded_script(rpa_id, upload_file=path)
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")

@@ -81,16 +81,6 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
-def _sap_zoom_lines(indent: str) -> list[str]:
-    return [
-        f"{indent}try:",
-        f"{indent}    page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame.evaluate(\"document.body.style.zoom = '75%'\")",
-        f'{indent}    print("[RPA] SAP iframe zoom → 75%")',
-        f"{indent}except Exception:",
-        f"{indent}    pass",
-    ]
-
-
 def _inject_post_upload_lines(indent: str) -> list[str]:
     """Wait for SAP to accept upload and dismiss error popups before Execute."""
     return [
@@ -104,11 +94,6 @@ def _inject_post_upload_lines(indent: str) -> list[str]:
         f'{indent}_rpa_shell.get_by_role("button", name="Execute  Emphasized").wait_for(state="visible", timeout=60000)',
         f'{indent}print("[RPA] Execute button ready")',
     ]
-
-
-def _is_set_input_files_line(line: str) -> bool:
-    stripped = line.lstrip()
-    return ".set_input_files(" in stripped and not stripped.startswith("print(")
 
 
 def _automate_file_upload(source: str, upload_abs: str) -> str:
@@ -133,10 +118,9 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             and "page." in line
         ):
             ahead = "\n".join(lines[i + 1 : i + 8])
-            if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
+            if "set_input_files" in ahead:
                 indent = line[: len(line) - len(stripped)]
                 inner = indent + "    "
-                out.extend(_sap_zoom_lines(indent))
                 out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
                 out.append(f"{indent}with page.expect_file_chooser() as _rpa_fc_info:")
                 out.append(inner + stripped)
@@ -144,10 +128,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
                 out.extend(_inject_post_upload_lines(indent))
                 used_chooser = True
                 i += 1
-                while i < len(lines):
-                    if _is_set_input_files_line(lines[i]):
-                        i += 1
-                        break
+                while i < len(lines) and "set_input_files" not in lines[i]:
+                    out.append(lines[i])
+                    i += 1
+                if i < len(lines) and "set_input_files" in lines[i]:
                     i += 1
                 continue
 
@@ -171,67 +155,6 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             out.extend(_inject_post_upload_lines(indent))
         else:
             out.append(line)
-    return "\n".join(out)
-
-
-def _automate_download_step(source: str) -> str:
-    """
-    Fix SAP download step: wait for button, use expect_download with a timeout,
-    and keep the click properly indented inside the with block.
-    """
-    if "expect_download" not in source or "download_info" not in source:
-        return source
-
-    lines = source.splitlines()
-    out: list[str] = []
-    i = 0
-    shell_declared = "_rpa_shell" in source
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.lstrip()
-
-        if "with page.expect_download()" in stripped and "download_info" in stripped:
-            indent = line[: len(line) - len(stripped)]
-            inner = indent + "    "
-            out.append(f'{indent}print("[RPA] Preparing download...")')
-            if not shell_declared:
-                out.append(
-                    f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame"
-                )
-                shell_declared = True
-            out.extend(_sap_zoom_lines(indent))
-            out.append(f'{indent}_rpa_dl_btn = _rpa_shell.get_by_role("button", name="Download Result Data")')
-            out.append(f"{indent}_rpa_dl_btn.scroll_into_view_if_needed()")
-            out.append(f'{indent}_rpa_dl_btn.wait_for(state="visible", timeout=120000)')
-            out.append(f'{indent}print("[RPA] Download Result Data button ready")')
-            out.append(f"{indent}with page.expect_download(timeout=120000) as download_info:")
-            i += 1
-            while i < len(lines):
-                inner_line = lines[i]
-                inner_stripped = inner_line.lstrip()
-                if not inner_stripped:
-                    i += 1
-                    continue
-                if inner_stripped.startswith("print("):
-                    i += 1
-                    continue
-                if ".click()" in inner_stripped and "Download Result Data" in inner_stripped:
-                    out.append(f"{inner}_rpa_dl_btn.click()")
-                    out.append(f'{inner}print("[RPA] Download Result Data clicked")')
-                    i += 1
-                    break
-                if ".click()" in inner_stripped:
-                    out.append(f"{inner}_rpa_dl_btn.click()")
-                    out.append(f'{inner}print("[RPA] Download click")')
-                    i += 1
-                    break
-                i += 1
-            continue
-
-        out.append(line)
-        i += 1
-
     return "\n".join(out)
 
 
@@ -296,13 +219,11 @@ def prepare_script_source(
         },
     )
     # endregion
-    needs_download = "expect_download" in source and "download_info" in source
+    needs_download = bool(download_dir and "download_info.value" in source)
     source = _inject_step_logging(source)
     if needs_upload:
         source = _automate_file_upload(source, upload_file)
     if needs_download:
-        source = _automate_download_step(source)
-    if needs_download and download_dir:
         source = _inject_download_save(source)
     transformed_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln or "Uploading:" in ln or "expect_file_chooser" in ln]
     # region agent log
@@ -326,24 +247,15 @@ def _inject_download_save(source: str) -> str:
 
     out = []
     for line in source.splitlines():
+        out.append(line)
         if re.match(r"\s*download\s*=\s*download_info\.value\s*$", line):
             indent = line[: len(line) - len(line.lstrip())]
-            inner = indent + "    "
-            out.append(f"{indent}try:")
-            out.append(f"{inner}download = download_info.value")
-            out.append(f"{indent}except Exception as _rpa_dl_err:")
-            out.append(f'{inner}print("[RPA] No browser download event:", _rpa_dl_err)')
-            out.append(f"{inner}win_save_as(RPA_DOWNLOAD_DIR)")
-            out.append(f"{inner}download = None")
-            out.append(f"{indent}if download:")
-            out.append(f"{inner}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
+            out.append(f"{indent}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
             out.append(
-                f"{inner}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
+                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
             )
-            out.append(f"{inner}download.save_as(_rpa_dl)")
-            out.append(f'{inner}print("[RPA] Saved download:", _rpa_dl)')
-            continue
-        out.append(line)
+            out.append(f"{indent}download.save_as(_rpa_dl)")
+            out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')
     return "\n".join(out)
 
 
@@ -391,27 +303,6 @@ def _start_win_open_fallback() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _start_win_save_fallback() -> None:
-    """Background fallback when SAP opens native Save As instead of a browser download."""
-    if sys.platform != "win32":
-        return
-    download_dir = os.environ.get("RPA_DOWNLOAD_DIR", "")
-    if not download_dir:
-        return
-
-    import threading
-
-    def _run():
-        import time
-
-        from win_file_dialog import dismiss_save_as_dialog
-
-        time.sleep(0.5)
-        dismiss_save_as_dialog(directory=download_dir, timeout=90)
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 def _patch_file_chooser_upload() -> None:
     global _FILECHOOSER_PATCHED
     if _FILECHOOSER_PATCHED or not _upload_file_path():
@@ -436,7 +327,6 @@ def _patch_playwright_no_timeout() -> None:
     _orig_new_context = Browser.new_context
 
     def new_context(self, *args, **kwargs):
-        kwargs.setdefault("accept_downloads", True)
         return _disable(_orig_new_context(self, *args, **kwargs))
 
     Browser.new_context = new_context
@@ -444,7 +334,6 @@ def _patch_playwright_no_timeout() -> None:
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
-        kwargs.setdefault("accept_downloads", True)
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context
@@ -512,9 +401,8 @@ def _patch_playwright_logging() -> None:
                 if any(k in snippet for k in ("Upload file", "ls-inputfieldhelpbutton", "webgui_filebrowser", "OK")):
                     debug_log("H3", "codegen.py:click", "upload-related click", {"locator": snippet})
                 # endregion
-                # Do not call win_open on OK — races with expect_file_chooser and corrupts SAP upload.
-                if "Download Result Data" in snippet:
-                    _start_win_save_fallback()
+                if _upload_file_path() and 'get_by_role("button", name="OK")' in snippet:
+                    _start_win_open_fallback()
             return original(self, *args, **kwargs)
 
         setattr(cls, name, wrapper)
@@ -569,37 +457,25 @@ def _resolve_recorded_path(recorded: str) -> str:
     return os.path.normpath(os.path.join(config.BASE_DIR, recorded))
 
 
-def prepare_sap_upload_file(
-    rpa_id: str,
-    upload_path: str,
-    upload_dir: Optional[str] = None,
-) -> str:
-    """
-    Copy the latest upload into the recorded SAP filename (e.g. sample_bulk.XLSX)
-    inside the upload folder so SAP sees the expected template name.
-    """
+def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
+    """Also copy mail file to recorded filename(s) as a fallback."""
     script = script_path(rpa_id)
     with open(script, encoding="utf-8") as f:
         content = f.read()
 
-    basenames = []
-    for m in _INPUT_FILES_RE.finditer(content):
-        basenames.append(os.path.basename(m.group(1).replace("\\", "/")))
-    if not basenames:
-        return os.path.abspath(upload_path)
+    targets = {_resolve_recorded_path(m.group(1)) for m in _INPUT_FILES_RE.finditer(content)}
+    if not targets:
+        return []
 
-    basename = basenames[0]
-    dest_dir = (upload_dir or "").strip() or os.path.dirname(os.path.abspath(upload_path)) or config.BASE_DIR
-    dest = os.path.normpath(os.path.join(dest_dir, basename))
-    os.makedirs(dest_dir, exist_ok=True)
-    shutil.copy2(upload_path, dest)
-    _log(f"Prepared SAP upload: {dest}")
-    return dest
-
-
-def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
-    """Deprecated — use prepare_sap_upload_file."""
-    return [prepare_sap_upload_file(rpa_id, upload_path)]
+    staged = []
+    for dest in sorted(targets):
+        parent = os.path.dirname(dest)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.copy2(upload_path, dest)
+        staged.append(dest)
+        _log(f"Staged copy → {dest}")
+    return staged
 
 
 def run_recorded_script(
@@ -627,9 +503,12 @@ def run_recorded_script(
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
-        sap_upload = prepare_sap_upload_file(rpa_id, upload_abs, upload_dir=upload_dir)
+        staged = stage_upload_for_script(rpa_id, upload_abs)
+        sap_upload = staged[0] if staged else upload_abs
         os.environ["RPA_UPLOAD_FILE"] = sap_upload
         _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")
+        if staged:
+            _log(f"Staged as recorded filename: {os.path.basename(sap_upload)}")
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
         _log("No upload file — set_input_files uses script paths or win_open_file()")

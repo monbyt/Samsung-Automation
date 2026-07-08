@@ -141,7 +141,6 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
             latest = _find_latest_in_dir(configured)
             if latest:
                 _log(f"Using latest file from upload folder: {latest}")
-                _log(f"  (newest .xlsx/.xls/.csv in {configured})")
                 # region agent log
                 debug_log("H1", "runner.py:_prepare_upload_file", "resolved latest in folder", {"path": latest, "folder": configured})
                 # endregion

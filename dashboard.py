@@ -990,10 +990,10 @@ def rpa_edit(rpa_id):
     {% if job.tool == 'codegen' %}
     <div class="form-row"><label>Upload folder (Windows path)</label>
       <input type="text" name="upload_folder" value="{{ job.upload_folder }}" style="width:100%"
-        placeholder="e.g. C:\Users\you\Desktop\Order-Extract (or leave blank — uses linked mail job folder)"></div>
+        placeholder="e.g. C:/Users/you/Desktop/Order-Extract (or leave blank — uses linked mail job folder)"></div>
     <div class="form-row"><label>Download folder (Windows path)</label>
       <input type="text" name="download_folder" value="{{ job.download_folder }}" style="width:100%"
-        placeholder="e.g. C:\Users\you\Desktop\Order-Results"></div>
+        placeholder="e.g. C:/Users/you/Desktop/Order-Results"></div>
     <div class="form-row">
       <label>Recorded script {% if script_saved %}<span class="ok">(saved)</span>{% else %}<span class="err">(not recorded yet)</span>{% endif %}</label>
       <textarea name="script" rows="18" style="width:100%;font-family:monospace;font-size:12px" placeholder="Paste Playwright codegen output here, or click Record below.">{{ script_text }}</textarea>

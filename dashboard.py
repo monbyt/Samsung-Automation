@@ -844,7 +844,8 @@ def rpa_list():
       2. Click <b>Record</b> — Playwright codegen opens in a new window<br>
       3. Perform your steps, then close the codegen window (script auto-saves)<br>
       4. Or paste/edit the Python script on the Edit page<br>
-      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download
+      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download<br>
+      6. <b>File upload:</b> if your recording uses <code>set_input_files("Book1.xlsx")</code>, the latest file from the linked mail job (or Desktop download folder) is copied to that path automatically before run — no manual pick needed
     </p>
   </div>
   <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">

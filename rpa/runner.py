@@ -121,7 +121,13 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
         elif job["tool"] == "codegen":
             from rpa.codegen import run_recorded_script
 
-            run_recorded_script(rpa_id)
+            try:
+                path = _prepare_upload_file(upload_file, job)
+                used_path = path
+            except FileNotFoundError:
+                path = None
+                print("  No mail/download file found — running script without auto-upload")
+            run_recorded_script(rpa_id, upload_file=path)
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 

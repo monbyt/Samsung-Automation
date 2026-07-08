@@ -80,7 +80,33 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
-def _fix_strict_mode_locators(source: str) -> str:
+def _fix_iframe_locators(source: str) -> str:
+    """
+    Replace locator(iframe).content_frame with frame_locator — codegen often highlights
+    the whole window when using .content_frame on an ambiguous iframe locator.
+    """
+    iframe_pat = (
+        r'page\.locator\(\s*'
+        r'["\']iframe\[name=\\"application-Shell-startGUI-iframe\\"\]["\']\s*\)'
+        r'\.content_frame'
+    )
+    source = re.sub(
+        iframe_pat,
+        'page.frame_locator(\'iframe[name="application-Shell-startGUI-iframe"]\')',
+        source,
+    )
+    # Alternate quoting from codegen
+    iframe_pat2 = (
+        r"page\.locator\(\s*"
+        r"'iframe\[name=\"application-Shell-startGUI-iframe\"\]'\s*\)"
+        r"\.content_frame"
+    )
+    source = re.sub(
+        iframe_pat2,
+        'page.frame_locator(\'iframe[name="application-Shell-startGUI-iframe"]\')',
+        source,
+    )
+    return source
     """
     Codegen red highlight = locator matched multiple elements.
     Add .first on common SAP iframe chains so clicks hit one target.
@@ -214,18 +240,13 @@ def _inject_step_logging(source: str) -> str:
 
 
 def _inject_runtime_preamble(source: str, needs_upload: bool, needs_download: bool) -> str:
-    """Imports/helpers for injected upload/download lines."""
-    if not needs_upload and not needs_download:
+    """Imports for injected upload/download lines."""
+    uses_rpa_os = "_rpa_os" in source
+    if not needs_upload and not needs_download and not uses_rpa_os:
         return source
-    lines = ["import os as _rpa_os"]
-    if needs_upload:
-        lines.append("# RPA_UPLOAD_FILE, RPA_UPLOAD_DIR, win_open_file provided by runner")
-    if needs_download:
-        lines.append("# RPA_DOWNLOAD_DIR provided by runner")
-    preamble = "\n".join(lines) + "\n\n"
-    if "_rpa_os" in source:
+    if re.search(r"^import os as _rpa_os\s*$", source, re.MULTILINE):
         return source
-    return preamble + source
+    return "import os as _rpa_os\n\n" + source
 
 
 def prepare_script_source(
@@ -235,6 +256,7 @@ def prepare_script_source(
 ) -> str:
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     source = _sanitize_upload_literals(source)
+    source = _fix_iframe_locators(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     needs_download = bool(download_dir and "download_info.value" in source)
     if needs_upload:
@@ -435,6 +457,7 @@ def run_recorded_script(
     run_globals = {
         "__name__": "__main__",
         "__file__": path,
+        "_rpa_os": os,
         "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
         "RPA_UPLOAD_DIR": upload_dir or "",
         "RPA_DOWNLOAD_DIR": download_dir or "",

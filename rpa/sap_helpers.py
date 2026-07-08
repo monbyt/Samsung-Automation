@@ -18,7 +18,7 @@ def sap_upload_file(page, upload_path: str) -> None:
         raise FileNotFoundError(f"Upload file not found: {path!r}")
 
     print(f"[RPA] SAP upload starting: {path}")
-    shell = page.locator(SHELL_IFRAME).content_frame
+    shell = page.frame_locator(SHELL_IFRAME)
 
     shell.get_by_role("textbox", name="Upload file Required").first.click()
     shell.locator("#ls-inputfieldhelpbutton").first.click()

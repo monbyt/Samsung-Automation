@@ -42,6 +42,22 @@ def _dirs_for_mail_job(mail_job_id: Optional[str]):
     return out
 
 
+def _find_latest_in_dir(directory: str) -> Optional[str]:
+    """Newest spreadsheet in one folder."""
+    if not os.path.isdir(directory):
+        return None
+    candidates = []
+    for name in os.listdir(directory):
+        if not name.lower().endswith(_UPLOAD_EXT):
+            continue
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
 def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]:
     """Newest spreadsheet on Desktop job folders (optionally scoped to one mail job)."""
     candidates = []
@@ -94,17 +110,34 @@ def _resolve_rpa_folders(rpa_job: dict) -> Tuple[str, str]:
 
 
 def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
-    """Pick the Excel file for NERP — explicit path, linked mail folder, or data/Book1.xlsx."""
+    """Pick upload file — configured upload folder/path beats linked mail download."""
     mail_job_id = rpa_job.get("trigger_mail_job") or None
+    configured = (rpa_job.get("upload_folder") or "").strip()
 
+    # 1. Upload folder on RPA edit page wins (folder = newest file there, or full file path)
+    if configured:
+        if os.path.isfile(configured):
+            _log(f"Using configured upload file: {configured}")
+            return _resolve_spreadsheet(configured)
+        if os.path.isdir(configured):
+            latest = _find_latest_in_dir(configured)
+            if latest:
+                _log(f"Using latest file from upload folder: {latest}")
+                return latest
+            raise FileNotFoundError(f"No spreadsheet in upload folder: {configured}")
+        raise FileNotFoundError(f"Upload path not found: {configured}")
+
+    # 2. File passed when mail job triggered this RPA
     if upload_file:
         if os.path.isfile(upload_file):
             try:
+                _log(f"Using file from mail trigger: {upload_file}")
                 return _resolve_spreadsheet(upload_file)
             except Exception:
                 pass
         print(f"  Warning: upload path missing or unusable: {upload_file!r}")
 
+    # 3. Latest from linked mail job folder
     latest = _find_latest_spreadsheet(mail_job_id)
     if latest:
         print(f"  Using latest file from mail folder: {os.path.basename(latest)}")

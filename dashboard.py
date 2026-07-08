@@ -990,7 +990,8 @@ def rpa_edit(rpa_id):
     {% if job.tool == 'codegen' %}
     <div class="form-row"><label>Upload folder (Windows path)</label>
       <input type="text" name="upload_folder" value="{{ job.upload_folder }}" style="width:100%"
-        placeholder="e.g. C:/Users/you/Desktop/Order-Extract (or leave blank — uses linked mail job folder)"></div>
+        placeholder="e.g. C:/Users/you/Desktop/My-Uploads — or full path to one .xlsx file"></div>
+    <p class="muted">If set, this overrides the linked mail job file. Uses the newest Excel in that folder, or the exact file if you paste a full path. Does not auto-fill — type your path and Save.</p>
     <div class="form-row"><label>Download folder (Windows path)</label>
       <input type="text" name="download_folder" value="{{ job.download_folder }}" style="width:100%"
         placeholder="e.g. C:/Users/you/Desktop/Order-Results"></div>

@@ -158,6 +158,65 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
     return "\n".join(out)
 
 
+def _automate_download_step(source: str) -> str:
+    """
+    Fix SAP download step: wait for button, use expect_download with a timeout,
+    and keep the click properly indented inside the with block.
+    """
+    if "expect_download" not in source or "download_info" not in source:
+        return source
+
+    lines = source.splitlines()
+    out: list[str] = []
+    i = 0
+    shell_declared = "_rpa_shell" in source
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+
+        if "with page.expect_download()" in stripped and "download_info" in stripped:
+            indent = line[: len(line) - len(stripped)]
+            inner = indent + "    "
+            out.append(f'{indent}print("[RPA] Preparing download...")')
+            if not shell_declared:
+                out.append(
+                    f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame"
+                )
+                shell_declared = True
+            out.append(f'{indent}_rpa_dl_btn = _rpa_shell.get_by_role("button", name="Download Result Data")')
+            out.append(f'{indent}_rpa_dl_btn.wait_for(state="visible", timeout=120000)')
+            out.append(f'{indent}print("[RPA] Download Result Data button ready")')
+            out.append(f"{indent}with page.expect_download(timeout=120000) as download_info:")
+            i += 1
+            while i < len(lines):
+                inner_line = lines[i]
+                inner_stripped = inner_line.lstrip()
+                if not inner_stripped:
+                    i += 1
+                    continue
+                if inner_stripped.startswith("print("):
+                    i += 1
+                    continue
+                if ".click()" in inner_stripped and "Download Result Data" in inner_stripped:
+                    out.append(inner + inner_stripped)
+                    out.append(f'{inner}print("[RPA] Download Result Data clicked")')
+                    i += 1
+                    break
+                if ".click()" in inner_stripped:
+                    out.append(inner + inner_stripped)
+                    out.append(f'{inner}print("[RPA] Download click")')
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        out.append(line)
+        i += 1
+
+    return "\n".join(out)
+
+
 def _inject_step_logging(source: str) -> str:
     """Print a line before each major Playwright action in the recorded script."""
     out = []
@@ -219,11 +278,13 @@ def prepare_script_source(
         },
     )
     # endregion
-    needs_download = bool(download_dir and "download_info.value" in source)
+    needs_download = "expect_download" in source and "download_info" in source
     source = _inject_step_logging(source)
     if needs_upload:
         source = _automate_file_upload(source, upload_file)
     if needs_download:
+        source = _automate_download_step(source)
+    if needs_download and download_dir:
         source = _inject_download_save(source)
     transformed_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln or "Uploading:" in ln or "expect_file_chooser" in ln]
     # region agent log
@@ -247,15 +308,24 @@ def _inject_download_save(source: str) -> str:
 
     out = []
     for line in source.splitlines():
-        out.append(line)
         if re.match(r"\s*download\s*=\s*download_info\.value\s*$", line):
             indent = line[: len(line) - len(line.lstrip())]
-            out.append(f"{indent}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
+            inner = indent + "    "
+            out.append(f"{indent}try:")
+            out.append(f"{inner}download = download_info.value")
+            out.append(f"{indent}except Exception as _rpa_dl_err:")
+            out.append(f'{inner}print("[RPA] No browser download event:", _rpa_dl_err)')
+            out.append(f"{inner}win_save_as(RPA_DOWNLOAD_DIR)")
+            out.append(f"{inner}download = None")
+            out.append(f"{indent}if download:")
+            out.append(f"{inner}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
             out.append(
-                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
+                f"{inner}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
             )
-            out.append(f"{indent}download.save_as(_rpa_dl)")
-            out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')
+            out.append(f"{inner}download.save_as(_rpa_dl)")
+            out.append(f'{inner}print("[RPA] Saved download:", _rpa_dl)')
+            continue
+        out.append(line)
     return "\n".join(out)
 
 
@@ -303,6 +373,27 @@ def _start_win_open_fallback() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _start_win_save_fallback() -> None:
+    """Background fallback when SAP opens native Save As instead of a browser download."""
+    if sys.platform != "win32":
+        return
+    download_dir = os.environ.get("RPA_DOWNLOAD_DIR", "")
+    if not download_dir:
+        return
+
+    import threading
+
+    def _run():
+        import time
+
+        from win_file_dialog import dismiss_save_as_dialog
+
+        time.sleep(0.5)
+        dismiss_save_as_dialog(directory=download_dir, timeout=90)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _patch_file_chooser_upload() -> None:
     global _FILECHOOSER_PATCHED
     if _FILECHOOSER_PATCHED or not _upload_file_path():
@@ -327,6 +418,7 @@ def _patch_playwright_no_timeout() -> None:
     _orig_new_context = Browser.new_context
 
     def new_context(self, *args, **kwargs):
+        kwargs.setdefault("accept_downloads", True)
         return _disable(_orig_new_context(self, *args, **kwargs))
 
     Browser.new_context = new_context
@@ -334,6 +426,7 @@ def _patch_playwright_no_timeout() -> None:
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
+        kwargs.setdefault("accept_downloads", True)
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context
@@ -403,6 +496,8 @@ def _patch_playwright_logging() -> None:
                 # endregion
                 if _upload_file_path() and 'get_by_role("button", name="OK")' in snippet:
                     _start_win_open_fallback()
+                if "Download Result Data" in snippet:
+                    _start_win_save_fallback()
             return original(self, *args, **kwargs)
 
         setattr(cls, name, wrapper)

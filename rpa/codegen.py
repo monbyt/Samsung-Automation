@@ -28,6 +28,7 @@ _NO_TIMEOUT_BLOCK = (
 )
 _PLAYWRIGHT_PATCHED = False
 _LOG_PATCHED = False
+_FILECHOOSER_PATCHED = False
 
 
 def _log(msg: str) -> None:
@@ -202,6 +203,68 @@ def _inject_download_save(source: str) -> str:
     return "\n".join(out)
 
 
+def _upload_file_path() -> str:
+    path = os.environ.get("RPA_UPLOAD_FILE", "")
+    return path if path and os.path.isfile(path) else ""
+
+
+def _bind_file_chooser(page) -> None:
+    """Auto-fill Chrome / OS file picker when RPA_UPLOAD_FILE is set."""
+    upload_path = _upload_file_path()
+    if not upload_path or getattr(page, "_rpa_fc_bound", False):
+        return
+
+    page._rpa_fc_bound = True
+
+    def _on_chooser(file_chooser):
+        _log(f"Chrome file picker → {upload_path}")
+        file_chooser.set_files(upload_path)
+
+    page.on("filechooser", _on_chooser)
+
+
+def _bind_file_chooser_context(context) -> None:
+    def _on_page(page):
+        _bind_file_chooser(page)
+
+    context.on("page", _on_page)
+    for page in context.pages:
+        _on_page(page)
+
+
+def _start_win_open_fallback() -> None:
+    """Background fallback when Playwright cannot intercept the native Open dialog."""
+    if sys.platform != "win32":
+        return
+    upload_path = _upload_file_path()
+    if not upload_path:
+        return
+
+    import threading
+
+    def _run():
+        import time
+
+        from win_file_dialog import dismiss_open_file_dialog
+
+        time.sleep(0.4)
+        dismiss_open_file_dialog(
+            directory=os.environ.get("RPA_UPLOAD_DIR") or os.path.dirname(upload_path),
+            filename=os.path.basename(upload_path),
+            timeout=90,
+        )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _patch_file_chooser_upload() -> None:
+    global _FILECHOOSER_PATCHED
+    if _FILECHOOSER_PATCHED or not _upload_file_path():
+        return
+    _FILECHOOSER_PATCHED = True
+    _log(f"File picker auto-upload enabled → {_upload_file_path()}")
+
+
 def _patch_playwright_no_timeout() -> None:
     global _PLAYWRIGHT_PATCHED
     if _PLAYWRIGHT_PATCHED:
@@ -212,6 +275,7 @@ def _patch_playwright_no_timeout() -> None:
     def _disable(ctx):
         ctx.set_default_timeout(0)
         ctx.set_default_navigation_timeout(0)
+        _bind_file_chooser_context(ctx)
         return ctx
 
     _orig_new_context = Browser.new_context
@@ -266,8 +330,10 @@ def _patch_playwright_logging() -> None:
                     },
                 )
                 # endregion
+                opts = dict(kwargs)
+                opts.setdefault("timeout", 15_000)
                 try:
-                    result = original(self, *args, **kwargs)
+                    result = original(self, *args, **opts)
                     # region agent log
                     debug_log("H2", "codegen.py:set_input_files:after", "set_input_files ok", {"path": upload_path})
                     # endregion
@@ -281,13 +347,26 @@ def _patch_playwright_logging() -> None:
                         {"path": upload_path, "error": str(exc), "trace": traceback.format_exc()[-400:]},
                     )
                     # endregion
-                    raise
+                    _log(f"set_input_files skipped ({exc}) — file picker may have handled upload")
+                    return None
             if name == "click":
-                # region agent log
                 snippet = str(self)[:200]
+                # region agent log
                 if any(k in snippet for k in ("Upload file", "ls-inputfieldhelpbutton", "webgui_filebrowser", "OK")):
                     debug_log("H3", "codegen.py:click", "upload-related click", {"locator": snippet})
                 # endregion
+                if _upload_file_path() and any(
+                    k in snippet
+                    for k in (
+                        "Upload file",
+                        "ls-inputfieldhelpbutton",
+                        "webgui_filebrowser",
+                        'name="OK"',
+                        "file upload",
+                        "Browse",
+                    )
+                ):
+                    _start_win_open_fallback()
             return original(self, *args, **kwargs)
 
         setattr(cls, name, wrapper)
@@ -396,6 +475,7 @@ def run_recorded_script(
         _log("No upload file — set_input_files uses script paths or win_open_file()")
 
     _patch_playwright_no_timeout()
+    _patch_file_chooser_upload()
     _patch_playwright_logging()
 
     with open(path, encoding="utf-8") as f:

@@ -29,6 +29,7 @@ def run(upload_file=None) -> None:
         context.set_default_timeout(0)
         context.set_default_navigation_timeout(0)
         page = context.new_page()
+        page.on("filechooser", lambda fc: fc.set_files(path))
 
         page.goto(config.NERP_URL)
 

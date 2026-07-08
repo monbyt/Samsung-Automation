@@ -31,9 +31,13 @@ def _find_dialog_titles(keywords):
 
 
 def _open_via_powershell(title: str, full_path: str) -> bool:
-  safe_title = _ps_escape(title)
-  safe_path = _ps_escape(os.path.normpath(full_path))
-  ps = f"""
+    safe_title = _ps_escape(title)
+    folder = _ps_escape(os.path.normpath(os.path.dirname(full_path)))
+    filename = _ps_escape(os.path.basename(full_path))
+    safe_path = _ps_escape(os.path.normpath(full_path))
+
+    # 1) Paste full path into file name field (classic dialog).
+    ps_full = f"""
 $w = New-Object -ComObject WScript.Shell
 if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
 Start-Sleep -Milliseconds 800
@@ -46,7 +50,28 @@ Start-Sleep -Milliseconds 400
 $w.SendKeys('{{ENTER}}')
 exit 0
 """
-  return _run_powershell(ps)
+    if _run_powershell(ps_full):
+        return True
+
+    # 2) Navigate folder bar (Alt+D) then type filename (modern Chrome picker).
+    ps_folder = f"""
+$w = New-Object -ComObject WScript.Shell
+if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
+Start-Sleep -Milliseconds 800
+Set-Clipboard -Value '{folder}'
+$w.SendKeys('%d')
+Start-Sleep -Milliseconds 500
+$w.SendKeys('^a')
+$w.SendKeys('^v')
+$w.SendKeys('{{ENTER}}')
+Start-Sleep -Milliseconds 900
+Set-Clipboard -Value '{filename}'
+$w.SendKeys('^a')
+$w.SendKeys('^v')
+$w.SendKeys('{{ENTER}}')
+exit 0
+"""
+    return _run_powershell(ps_folder)
 
 
 def dismiss_open_file_dialog(
@@ -92,7 +117,7 @@ def dismiss_open_file_dialog(
     os.makedirs(directory or os.path.dirname(full_path) or ".", exist_ok=True)
     print(f"Looking for Open dialog → {full_path}")
 
-    keywords = ("open", "choose file", "file upload", "select file", "browse")
+    keywords = ("open", "choose file", "file upload", "select file", "browse", "upload")
     deadline = time.time() + timeout
 
     while time.time() < deadline:

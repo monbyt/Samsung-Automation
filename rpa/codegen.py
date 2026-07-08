@@ -185,6 +185,12 @@ def _automate_download_step(source: str) -> str:
                 )
                 shell_declared = True
             out.append(f'{indent}_rpa_dl_btn = _rpa_shell.get_by_role("button", name="Download Result Data")')
+            out.append(f"{indent}try:")
+            out.append(f'{indent}    _rpa_shell.evaluate("document.body.style.zoom = \'75%\'")')
+            out.append(f'{indent}    print("[RPA] SAP iframe zoom → 75%")')
+            out.append(f"{indent}except Exception:")
+            out.append(f"{indent}    pass")
+            out.append(f"{indent}_rpa_dl_btn.scroll_into_view_if_needed()")
             out.append(f'{indent}_rpa_dl_btn.wait_for(state="visible", timeout=120000)')
             out.append(f'{indent}print("[RPA] Download Result Data button ready")')
             out.append(f"{indent}with page.expect_download(timeout=120000) as download_info:")
@@ -199,12 +205,12 @@ def _automate_download_step(source: str) -> str:
                     i += 1
                     continue
                 if ".click()" in inner_stripped and "Download Result Data" in inner_stripped:
-                    out.append(inner + inner_stripped)
+                    out.append(f"{inner}_rpa_dl_btn.click()")
                     out.append(f'{inner}print("[RPA] Download Result Data clicked")')
                     i += 1
                     break
                 if ".click()" in inner_stripped:
-                    out.append(inner + inner_stripped)
+                    out.append(f"{inner}_rpa_dl_btn.click()")
                     out.append(f'{inner}print("[RPA] Download click")')
                     i += 1
                     break

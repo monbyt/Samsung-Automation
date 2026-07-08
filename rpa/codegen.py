@@ -559,7 +559,7 @@ def _resolve_recorded_path(recorded: str) -> str:
 
 
 def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
-    """Also copy mail file to recorded filename(s) as a fallback."""
+    """Optional fallback copies for scripts that still call set_input_files on a basename."""
     script = script_path(rpa_id)
     with open(script, encoding="utf-8") as f:
         content = f.read()
@@ -570,12 +570,14 @@ def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
 
     staged = []
     for dest in sorted(targets):
+        if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(upload_path)):
+            continue
         parent = os.path.dirname(dest)
         if parent:
             os.makedirs(parent, exist_ok=True)
         shutil.copy2(upload_path, dest)
         staged.append(dest)
-        _log(f"Staged copy → {dest}")
+        _log(f"Fallback copy (not used for picker) → {dest}")
     return staged
 
 
@@ -604,12 +606,9 @@ def run_recorded_script(
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
-        staged = stage_upload_for_script(rpa_id, upload_abs)
-        sap_upload = staged[0] if staged else upload_abs
-        os.environ["RPA_UPLOAD_FILE"] = sap_upload
-        _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")
-        if staged:
-            _log(f"Staged as recorded filename: {os.path.basename(sap_upload)}")
+        os.environ["RPA_UPLOAD_FILE"] = upload_abs
+        _log(f"Upload file: {upload_abs} ({os.path.getsize(upload_abs)} bytes)")
+        stage_upload_for_script(rpa_id, upload_abs)
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
         _log("No upload file — set_input_files uses script paths or win_open_file()")

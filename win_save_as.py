@@ -21,7 +21,12 @@ def _extra_watch_dirs():
     ]
 
 
-def _find_save_as_titles():
+def _ps_escape(s: str) -> str:
+    return s.replace("'", "''")
+
+
+def _enum_visible_window_titles(match_fn) -> list[str]:
+    """Enumerate top-level visible windows; match_fn(title) -> bool."""
     if sys.platform != "win32":
         return []
 
@@ -29,9 +34,22 @@ def _find_save_as_titles():
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
-    titles = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
 
-    def callback(hwnd, _):
+    titles: list[str] = []
+
+    @WNDENUMPROC
+    def callback(hwnd, _lparam):
+        if not hwnd:
+            return True
         if not user32.IsWindowVisible(hwnd):
             return True
         length = user32.GetWindowTextLengthW(hwnd) + 1
@@ -40,17 +58,16 @@ def _find_save_as_titles():
         buf = ctypes.create_unicode_buffer(length)
         user32.GetWindowTextW(hwnd, buf, length)
         title = buf.value.strip()
-        if title and "save as" in title.lower():
+        if title and match_fn(title):
             titles.append(title)
         return True
 
-    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    user32.EnumWindows(callback, 0)
     return titles
 
 
-def _ps_escape(s: str) -> str:
-    return s.replace("'", "''")
+def _find_save_as_titles():
+    return _enum_visible_window_titles(lambda t: "save as" in t.lower())
 
 
 def _run_powershell(ps: str) -> bool:

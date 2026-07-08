@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Optional
 
-from win_save_as import _navigate_and_save, _ps_escape, _run_powershell, dismiss_save_as_dialog
+from win_save_as import _enum_visible_window_titles, _navigate_and_save, _ps_escape, _run_powershell, dismiss_save_as_dialog
 
 __all__ = [
     "dismiss_open_file_dialog",
@@ -21,31 +21,13 @@ __all__ = [
 
 
 def _find_dialog_titles(keywords):
-    if sys.platform != "win32":
-        return []
+    keywords = tuple(k.lower() for k in keywords)
 
-    import ctypes
-    from ctypes import wintypes
+    def match(title: str) -> bool:
+        lower = title.lower()
+        return any(k in lower for k in keywords)
 
-    user32 = ctypes.windll.user32
-    titles = []
-
-    def callback(hwnd, _):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        length = user32.GetWindowTextLengthW(hwnd) + 1
-        if length <= 1:
-            return True
-        buf = ctypes.create_unicode_buffer(length)
-        user32.GetWindowTextW(hwnd, buf, length)
-        title = buf.value.strip().lower()
-        if title and any(k in title for k in keywords):
-            titles.append(buf.value.strip())
-        return True
-
-    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows(WNDENUMPROC(callback), 0)
-    return titles
+    return _enum_visible_window_titles(match)
 
 
 def _open_via_powershell(title: str, full_path: str) -> bool:

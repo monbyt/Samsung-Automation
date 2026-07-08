@@ -58,6 +58,16 @@ def dismiss_open_file_dialog(
     Handle Windows Open / Choose File dialog.
     Pass directory + filename, or a full path via directory alone.
     """
+    from rpa.debug_log import debug_log
+
+    # region agent log
+    debug_log(
+        "H5",
+        "win_file_dialog.py:dismiss_open_file_dialog:entry",
+        "win_open_file called",
+        {"directory": directory, "filename": filename, "timeout": timeout},
+    )
+    # endregion
     if sys.platform != "win32":
         print("Open-file helper only runs on Windows.")
         return False
@@ -90,13 +100,22 @@ def dismiss_open_file_dialog(
         if titles:
             title = titles[0]
             print(f"Found Open dialog: '{title}'")
+            # region agent log
+            debug_log("H5", "win_file_dialog.py:dismiss_open_file_dialog", "dialog found", {"title": title, "full_path": full_path})
+            # endregion
             if _open_via_powershell(title, full_path):
                 print("Open dialog confirmed.")
+                # region agent log
+                debug_log("H5", "win_file_dialog.py:dismiss_open_file_dialog", "dialog confirmed", {"title": title})
+                # endregion
                 return True
             print("Open dialog confirm failed, retrying...")
         time.sleep(0.25)
 
     print("Open dialog not found — is it still open on screen?")
+    # region agent log
+    debug_log("H5", "win_file_dialog.py:dismiss_open_file_dialog", "dialog not found", {"full_path": full_path})
+    # endregion
     return False
 
 

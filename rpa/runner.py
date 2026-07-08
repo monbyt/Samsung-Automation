@@ -111,18 +111,39 @@ def _resolve_rpa_folders(rpa_job: dict) -> Tuple[str, str]:
 
 def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
     """Pick upload file — configured upload folder/path beats linked mail download."""
+    from rpa.debug_log import debug_log
+
     mail_job_id = rpa_job.get("trigger_mail_job") or None
     configured = (rpa_job.get("upload_folder") or "").strip()
+    # region agent log
+    debug_log(
+        "H1",
+        "runner.py:_prepare_upload_file:entry",
+        "upload resolution start",
+        {
+            "rpa_id": rpa_job.get("rpa_id"),
+            "configured_upload_folder": configured,
+            "trigger_upload_file": upload_file,
+        },
+    )
+    # endregion
 
     # 1. Upload folder on RPA edit page wins (folder = newest file there, or full file path)
     if configured:
         if os.path.isfile(configured):
             _log(f"Using configured upload file: {configured}")
-            return _resolve_spreadsheet(configured)
+            resolved = _resolve_spreadsheet(configured)
+            # region agent log
+            debug_log("H1", "runner.py:_prepare_upload_file", "resolved configured file", {"path": resolved, "exists": os.path.isfile(resolved)})
+            # endregion
+            return resolved
         if os.path.isdir(configured):
             latest = _find_latest_in_dir(configured)
             if latest:
                 _log(f"Using latest file from upload folder: {latest}")
+                # region agent log
+                debug_log("H1", "runner.py:_prepare_upload_file", "resolved latest in folder", {"path": latest, "folder": configured})
+                # endregion
                 return latest
             raise FileNotFoundError(f"No spreadsheet in upload folder: {configured}")
         raise FileNotFoundError(f"Upload path not found: {configured}")
@@ -153,6 +174,14 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
         return config.NERP_UPLOAD_FILE
 
     folders = ", ".join(_dirs_for_mail_job(mail_job_id))
+    # region agent log
+    debug_log(
+        "H1",
+        "runner.py:_prepare_upload_file:fail",
+        "no upload file resolved",
+        {"mail_job_id": mail_job_id, "checked_folders": folders},
+    )
+    # endregion
     raise FileNotFoundError(
         f"No Excel file found for NERP. Run the linked mail job first "
         f"(checked: {folders}) or place a file at {config.NERP_UPLOAD_FILE}"

@@ -142,15 +142,44 @@ def prepare_script_source(
     upload_file: Optional[str] = None,
     download_dir: Optional[str] = None,
 ) -> str:
+    from rpa.debug_log import debug_log
+
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     source = _sanitize_upload_literals(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
+    raw_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln]
+    # region agent log
+    debug_log(
+        "H4",
+        "codegen.py:prepare_script_source:before",
+        "upload transform input",
+        {
+            "needs_upload": needs_upload,
+            "upload_file": upload_file,
+            "raw_set_input_files_lines": raw_upload_lines[:5],
+            "has_help_button": "ls-inputfieldhelpbutton" in source,
+            "has_webgui_upload": "webgui_filebrowser_file_upload" in source,
+        },
+    )
+    # endregion
     needs_download = bool(download_dir and "download_info.value" in source)
     if needs_upload:
         source = _automate_file_upload(source, upload_file)
     if needs_download:
         source = _inject_download_save(source)
     source = _inject_step_logging(source)
+    transformed_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln or "Uploading:" in ln]
+    # region agent log
+    debug_log(
+        "H4",
+        "codegen.py:prepare_script_source:after",
+        "upload transform output",
+        {
+            "transformed_upload_lines": transformed_upload_lines[:8],
+            "uses_rpa_upload_file": "RPA_UPLOAD_FILE" in source,
+        },
+    )
+    # endregion
     return _inject_runtime_preamble(source, needs_upload, needs_download)
 
 
@@ -206,7 +235,10 @@ def _patch_playwright_logging() -> None:
     if _LOG_PATCHED:
         return
 
+    import traceback
+
     from playwright.sync_api import Locator, Page
+    from rpa.debug_log import debug_log
 
     def _wrap(cls, name):
         original = getattr(cls, name)
@@ -220,6 +252,42 @@ def _patch_playwright_logging() -> None:
             elif name == "set_input_files" and args:
                 label = f"set_input_files {args[0]!r}"
             _log(f"{cls.__name__}.{label}")
+            if name == "set_input_files":
+                upload_path = args[0] if args else ""
+                # region agent log
+                debug_log(
+                    "H2",
+                    "codegen.py:set_input_files:before",
+                    "set_input_files call",
+                    {
+                        "path": upload_path,
+                        "path_exists": bool(upload_path and os.path.isfile(str(upload_path))),
+                        "locator": str(self)[:200],
+                    },
+                )
+                # endregion
+                try:
+                    result = original(self, *args, **kwargs)
+                    # region agent log
+                    debug_log("H2", "codegen.py:set_input_files:after", "set_input_files ok", {"path": upload_path})
+                    # endregion
+                    return result
+                except Exception as exc:
+                    # region agent log
+                    debug_log(
+                        "H2",
+                        "codegen.py:set_input_files:error",
+                        "set_input_files failed",
+                        {"path": upload_path, "error": str(exc), "trace": traceback.format_exc()[-400:]},
+                    )
+                    # endregion
+                    raise
+            if name == "click":
+                # region agent log
+                snippet = str(self)[:200]
+                if any(k in snippet for k in ("Upload file", "ls-inputfieldhelpbutton", "webgui_filebrowser", "OK")):
+                    debug_log("H3", "codegen.py:click", "upload-related click", {"locator": snippet})
+                # endregion
             return original(self, *args, **kwargs)
 
         setattr(cls, name, wrapper)
@@ -351,7 +419,39 @@ def run_recorded_script(
         "win_save_as": dismiss_save_as_dialog,
     }
 
+    from rpa.debug_log import debug_log
+
+    # region agent log
+    debug_log(
+        "H1",
+        "codegen.py:run_recorded_script",
+        "exec start",
+        {
+            "rpa_id": rpa_id,
+            "RPA_UPLOAD_FILE": run_globals["RPA_UPLOAD_FILE"],
+            "RPA_UPLOAD_DIR": run_globals["RPA_UPLOAD_DIR"],
+            "upload_file_exists": bool(run_globals["RPA_UPLOAD_FILE"] and os.path.isfile(run_globals["RPA_UPLOAD_FILE"])),
+        },
+    )
+    # endregion
+
     _log("Launching browser...")
     code = compile(source, f"<rpa:{rpa_id}>", "exec")
-    exec(code, run_globals)
+    try:
+        exec(code, run_globals)
+    except Exception as exc:
+        import traceback
+
+        # region agent log
+        debug_log(
+            "H5",
+            "codegen.py:run_recorded_script:error",
+            "script exec failed",
+            {"rpa_id": rpa_id, "error": str(exc), "trace": traceback.format_exc()[-600:]},
+        )
+        # endregion
+        raise
+    # region agent log
+    debug_log("H5", "codegen.py:run_recorded_script", "exec finished", {"rpa_id": rpa_id})
+    # endregion
     _log(f"Script finished: {rpa_id}")

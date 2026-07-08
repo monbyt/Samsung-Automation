@@ -69,17 +69,27 @@ def _inject_no_timeout_setup(source: str) -> str:
     return source
 
 
+def _sanitize_upload_literals(source: str) -> str:
+    """Fix saved scripts that embed Windows paths like C:\\Users (breaks compile)."""
+    def fix(m):
+        inner = m.group(1)
+        if re.match(r"[A-Za-z]:", inner) or inner.startswith("\\\\"):
+            inner = os.path.basename(inner.replace("\\", "/"))
+        return f".set_input_files({inner!r})"
+
+    return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
+
+
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    SAP webgui upload: skip native file-browser dialog clicks and inject the real file path.
-    Recorded flows often hang on #ls-inputfieldhelpbutton + OK waiting for a manual pick.
+    SAP webgui upload: skip native file-browser dialog clicks; use RPA_UPLOAD_FILE at runtime.
+    Avoids embedding Windows paths in source (C:\\Users breaks as \\U unicode escape).
     """
     upload_abs = os.path.abspath(upload_abs)
-    upload_literal = repr(upload_abs)
 
     source = re.sub(
         r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
-        f".set_input_files({upload_literal})",
+        ".set_input_files(RPA_UPLOAD_FILE)",
         source,
     )
 
@@ -98,8 +108,22 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
                 i += 1
                 continue
 
-        if "set_input_files" in line:
-            filtered.append(f'{line[: len(line) - len(line.lstrip())]}print("[RPA] Uploading:", {upload_literal})')
+        if "set_input_files(RPA_UPLOAD_FILE)" in line:
+            indent = line[: len(line) - len(line.lstrip())]
+            filtered.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
+            filtered.append(f"{indent}try:")
+            filtered.append(f"{indent}    {line.lstrip()}")
+            filtered.append(f"{indent}except Exception as _rpa_upload_err:")
+            filtered.append(
+                f'{indent}    print("[RPA] set_input_files failed, trying Windows Open dialog:", _rpa_upload_err)'
+            )
+            filtered.append(
+                f"{indent}    win_open_file("
+                f"RPA_UPLOAD_DIR or _rpa_os.path.dirname(RPA_UPLOAD_FILE), "
+                f"_rpa_os.path.basename(RPA_UPLOAD_FILE))"
+            )
+            i += 1
+            continue
 
         filtered.append(line)
         i += 1
@@ -133,22 +157,40 @@ def _inject_step_logging(source: str) -> str:
     return "\n".join(out)
 
 
+def _inject_runtime_preamble(source: str, needs_upload: bool, needs_download: bool) -> str:
+    """Imports/helpers for injected upload/download lines."""
+    if not needs_upload and not needs_download:
+        return source
+    lines = ["import os as _rpa_os"]
+    if needs_upload:
+        lines.append("# RPA_UPLOAD_FILE, RPA_UPLOAD_DIR, win_open_file provided by runner")
+    if needs_download:
+        lines.append("# RPA_DOWNLOAD_DIR provided by runner")
+    preamble = "\n".join(lines) + "\n\n"
+    if "_rpa_os" in source:
+        return source
+    return preamble + source
+
+
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
     download_dir: Optional[str] = None,
 ) -> str:
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
-    if upload_file and os.path.isfile(upload_file):
+    source = _sanitize_upload_literals(source)
+    needs_upload = bool(upload_file and os.path.isfile(upload_file))
+    needs_download = bool(download_dir and "download_info.value" in source)
+    if needs_upload:
         source = _automate_file_upload(source, upload_file)
-    if download_dir:
-        source = _inject_download_save(source, download_dir)
+    if needs_download:
+        source = _inject_download_save(source)
     source = _inject_step_logging(source)
-    return source
+    return _inject_runtime_preamble(source, needs_upload, needs_download)
 
 
-def _inject_download_save(source: str, download_dir: str) -> str:
-    """Auto-save Playwright downloads to the configured Windows folder."""
+def _inject_download_save(source: str) -> str:
+    """Auto-save Playwright downloads to RPA_DOWNLOAD_DIR (no path literals in source)."""
     if "download_info.value" not in source:
         return source
 
@@ -157,10 +199,9 @@ def _inject_download_save(source: str, download_dir: str) -> str:
         out.append(line)
         if re.match(r"\s*download\s*=\s*download_info\.value\s*$", line):
             indent = line[: len(line) - len(line.lstrip())]
-            out.append(f"{indent}import os as _rpa_os")
-            out.append(f"{indent}_rpa_os.makedirs({download_dir!r}, exist_ok=True)")
+            out.append(f"{indent}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
             out.append(
-                f"{indent}_rpa_dl = _rpa_os.path.join({download_dir!r}, download.suggested_filename)"
+                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
             )
             out.append(f"{indent}download.save_as(_rpa_dl)")
             out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')
@@ -230,7 +271,7 @@ def save_script(rpa_id: str, content: str) -> str:
     path = script_path(rpa_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(_inject_no_timeout_setup(_strip_action_timeouts(content)))
+        f.write(_sanitize_upload_literals(_inject_no_timeout_setup(_strip_action_timeouts(content))))
     return path
 
 
@@ -334,18 +375,17 @@ def run_recorded_script(
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
 
+    run_globals = {
+        "__name__": "__main__",
+        "__file__": path,
+        "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
+        "RPA_UPLOAD_DIR": upload_dir or "",
+        "RPA_DOWNLOAD_DIR": download_dir or "",
+        "win_open_file": dismiss_open_file_dialog,
+        "win_save_as": dismiss_save_as_dialog,
+    }
+
     _log("Launching browser...")
-    code = compile(source, path, "exec")
-    exec(
-        code,
-        {
-            "__name__": "__main__",
-            "__file__": path,
-            "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
-            "RPA_UPLOAD_DIR": upload_dir or "",
-            "RPA_DOWNLOAD_DIR": download_dir or "",
-            "win_open_file": dismiss_open_file_dialog,
-            "win_save_as": dismiss_save_as_dialog,
-        },
-    )
+    code = compile(source, f"<rpa:{rpa_id}>", "exec")
+    exec(code, run_globals)
     _log(f"Script finished: {rpa_id}")

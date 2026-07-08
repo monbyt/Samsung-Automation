@@ -82,53 +82,23 @@ def _sanitize_upload_literals(source: str) -> str:
 
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    SAP webgui upload: skip native file-browser dialog clicks; use RPA_UPLOAD_FILE at runtime.
-    Avoids embedding Windows paths in source (C:\\Users breaks as \\U unicode escape).
+    Swap recorded filename for RPA_UPLOAD_FILE at runtime.
+    Keeps SAP help+OK clicks from codegen — they open the in-page file browser
+    (not Windows). Removing them made set_input_files hang forever.
     """
-    upload_abs = os.path.abspath(upload_abs)
-
     source = re.sub(
         r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
         ".set_input_files(RPA_UPLOAD_FILE)",
         source,
     )
 
-    lines = source.splitlines()
-    filtered = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if "#ls-inputfieldhelpbutton" in line:
-            i += 1
-            continue
-
-        if 'get_by_role("button", name="OK")' in line:
-            lookahead = "\n".join(lines[i + 1 : i + 5])
-            if "set_input_files" in lookahead or "#webgui_filebrowser" in lookahead:
-                i += 1
-                continue
-
+    out = []
+    for line in source.splitlines():
         if "set_input_files(RPA_UPLOAD_FILE)" in line:
             indent = line[: len(line) - len(line.lstrip())]
-            filtered.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
-            filtered.append(f"{indent}try:")
-            filtered.append(f"{indent}    {line.lstrip()}")
-            filtered.append(f"{indent}except Exception as _rpa_upload_err:")
-            filtered.append(
-                f'{indent}    print("[RPA] set_input_files failed, trying Windows Open dialog:", _rpa_upload_err)'
-            )
-            filtered.append(
-                f"{indent}    win_open_file("
-                f"RPA_UPLOAD_DIR or _rpa_os.path.dirname(RPA_UPLOAD_FILE), "
-                f"_rpa_os.path.basename(RPA_UPLOAD_FILE))"
-            )
-            i += 1
-            continue
-
-        filtered.append(line)
-        i += 1
-
-    return "\n".join(filtered)
+            out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
+        out.append(line)
+    return "\n".join(out)
 
 
 def _inject_step_logging(source: str) -> str:

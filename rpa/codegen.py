@@ -3,7 +3,6 @@ Playwright codegen — record, save, and run custom RPA scripts.
 """
 import os
 import re
-import runpy
 import shutil
 import subprocess
 import sys
@@ -13,6 +12,20 @@ import config
 
 _RPA_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _INPUT_FILES_RE = re.compile(r'\.set_input_files\(\s*["\']([^"\']+)["\']\s*\)')
+_ACTION_TIMEOUT_RE = re.compile(r",?\s*timeout=\d+")
+_NEW_CONTEXT_RE = re.compile(
+    r"(context\s*=\s*browser\.new_context\([^)]*\)\s*\n)",
+    re.MULTILINE,
+)
+_PERSISTENT_CONTEXT_RE = re.compile(
+    r"(context\s*=\s*\w+\.chromium\.launch_persistent_context\([^)]*\)\s*\n)",
+    re.MULTILINE,
+)
+_NO_TIMEOUT_BLOCK = (
+    "    context.set_default_timeout(0)\n"
+    "    context.set_default_navigation_timeout(0)\n"
+)
+_PLAYWRIGHT_PATCHED = False
 
 
 def _validate_rpa_id(rpa_id: str) -> str:
@@ -38,11 +51,59 @@ def read_script(rpa_id: str) -> str:
         return f.read()
 
 
+def _strip_action_timeouts(source: str) -> str:
+    """Remove per-action timeout=... from recorded Playwright calls."""
+    return _ACTION_TIMEOUT_RE.sub("", source)
+
+
+def _inject_no_timeout_setup(source: str) -> str:
+    """Insert context.set_default_timeout(0) after browser context creation."""
+    if "set_default_timeout(0)" in source:
+        return source
+    source = _NEW_CONTEXT_RE.sub(r"\1" + _NO_TIMEOUT_BLOCK, source, count=1)
+    source = _PERSISTENT_CONTEXT_RE.sub(r"\1" + _NO_TIMEOUT_BLOCK, source, count=1)
+    return source
+
+
+def prepare_script_source(source: str) -> str:
+    """Normalize recorded scripts — no Playwright timeouts."""
+    return _inject_no_timeout_setup(_strip_action_timeouts(source))
+
+
+def _patch_playwright_no_timeout() -> None:
+    """Patch Playwright so recorded scripts never hit the 30s default."""
+    global _PLAYWRIGHT_PATCHED
+    if _PLAYWRIGHT_PATCHED:
+        return
+
+    from playwright.sync_api import Browser, BrowserType
+
+    def _disable(ctx):
+        ctx.set_default_timeout(0)
+        ctx.set_default_navigation_timeout(0)
+        return ctx
+
+    _orig_new_context = Browser.new_context
+
+    def new_context(self, *args, **kwargs):
+        return _disable(_orig_new_context(self, *args, **kwargs))
+
+    Browser.new_context = new_context
+
+    _orig_persistent = BrowserType.launch_persistent_context
+
+    def launch_persistent_context(self, *args, **kwargs):
+        return _disable(_orig_persistent(self, *args, **kwargs))
+
+    BrowserType.launch_persistent_context = launch_persistent_context
+    _PLAYWRIGHT_PATCHED = True
+
+
 def save_script(rpa_id: str, content: str) -> str:
     path = script_path(rpa_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
+        f.write(prepare_script_source(content))
     return path
 
 
@@ -140,4 +201,8 @@ def run_recorded_script(rpa_id: str, upload_file: Optional[str] = None) -> None:
         os.environ.pop("RPA_UPLOAD_FILE", None)
 
     print(f"  Running recorded script: {path}")
-    runpy.run_path(path, run_name="__main__")
+    _patch_playwright_no_timeout()
+    with open(path, encoding="utf-8") as f:
+        source = prepare_script_source(f.read())
+    code = compile(source, path, "exec")
+    exec(code, {"__name__": "__main__", "__file__": path})

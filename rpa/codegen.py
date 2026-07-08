@@ -80,105 +80,13 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
-def _fix_iframe_locators(source: str) -> str:
-    """
-    Replace locator(iframe).content_frame with frame_locator — codegen often highlights
-    the whole window when using .content_frame on an ambiguous iframe locator.
-    """
-    iframe_pat = (
-        r'page\.locator\(\s*'
-        r'["\']iframe\[name=\\"application-Shell-startGUI-iframe\\"\]["\']\s*\)'
-        r'\.content_frame'
-    )
-    source = re.sub(
-        iframe_pat,
-        'page.frame_locator(\'iframe[name="application-Shell-startGUI-iframe"]\')',
-        source,
-    )
-    # Alternate quoting from codegen
-    iframe_pat2 = (
-        r"page\.locator\(\s*"
-        r"'iframe\[name=\"application-Shell-startGUI-iframe\"\]'\s*\)"
-        r"\.content_frame"
-    )
-    source = re.sub(
-        iframe_pat2,
-        'page.frame_locator(\'iframe[name="application-Shell-startGUI-iframe"]\')',
-        source,
-    )
-    return source
-    """
-    Codegen red highlight = locator matched multiple elements.
-    Add .first on common SAP iframe chains so clicks hit one target.
-    """
-    if ".first" in source:
-        pass  # still fix lines missing .first below
-
-    def add_first(m):
-        return f"{m.group(1)}.first{m.group(2)}"
-
-    source = re.sub(
-        r"(content_frame\.get_by_role\([^)]+\))(\.(?:click|fill|press)\()",
-        add_first,
-        source,
-    )
-    source = re.sub(
-        r'(content_frame\.locator\("#ls-inputfieldhelpbutton"\))(\.click\(\))',
-        r"\1.first\2",
-        source,
-    )
-    source = re.sub(
-        r'(content_frame\.get_by_role\("button", name="OK"\))(\.click\(\))',
-        r"\1.first\2",
-        source,
-    )
-    return source
-
-
-def _replace_sap_upload_block(source: str) -> str:
-    """
-    Replace fragile recorded upload clicks with one proven SAP upload helper.
-    Fixes codegen locators that highlighted the whole window (ambiguous match).
-    """
-    if "Upload file Required" not in source:
-        return source
-    if "sap_upload_file(" in source:
-        return source
-
-    lines = source.splitlines()
-    start = end = None
-    for i, line in enumerate(lines):
-        if start is None and "Upload file Required" in line:
-            start = i
-        if start is not None and (
-            "set_input_files" in line or "webgui_filebrowser_file_upload" in line
-        ):
-            end = i
-            break
-
-    if start is None or end is None:
-        return source
-
-    indent = lines[start][: len(lines[start]) - len(lines[start].lstrip())]
-    block = [
-        f'{indent}print("[RPA] SAP file upload (using fixed helper — avoids ambiguous codegen locators)")',
-        f"{indent}sap_upload_file(page, RPA_UPLOAD_FILE)",
-    ]
-    return "\n".join(lines[:start] + block + lines[end + 1 :])
-
-
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    SAP webgui upload: use sap_upload_file() helper instead of ambiguous recorded clicks.
+    SAP webgui upload: skip native file-browser dialog clicks; use RPA_UPLOAD_FILE at runtime.
+    Avoids embedding Windows paths in source (C:\\Users breaks as \\U unicode escape).
     """
     upload_abs = os.path.abspath(upload_abs)
-    source = _fix_strict_mode_locators(source)
-    source = _replace_sap_upload_block(source)
 
-    if "sap_upload_file(" in source:
-        return source
-
-    # Fallback: only swap filename for RPA_UPLOAD_FILE on set_input_files lines
     source = re.sub(
         r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
         ".set_input_files(RPA_UPLOAD_FILE)",
@@ -190,6 +98,16 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
     i = 0
     while i < len(lines):
         line = lines[i]
+        if "#ls-inputfieldhelpbutton" in line:
+            i += 1
+            continue
+
+        if 'get_by_role("button", name="OK")' in line:
+            lookahead = "\n".join(lines[i + 1 : i + 5])
+            if "set_input_files" in lookahead or "#webgui_filebrowser" in lookahead:
+                i += 1
+                continue
+
         if "set_input_files(RPA_UPLOAD_FILE)" in line:
             indent = line[: len(line) - len(line.lstrip())]
             filtered.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
@@ -256,7 +174,6 @@ def prepare_script_source(
 ) -> str:
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     source = _sanitize_upload_literals(source)
-    source = _fix_iframe_locators(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     needs_download = bool(download_dir and "download_info.value" in source)
     if needs_upload:
@@ -452,7 +369,6 @@ def run_recorded_script(
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
-    from rpa.sap_helpers import sap_upload_file
 
     run_globals = {
         "__name__": "__main__",
@@ -461,7 +377,6 @@ def run_recorded_script(
         "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
         "RPA_UPLOAD_DIR": upload_dir or "",
         "RPA_DOWNLOAD_DIR": download_dir or "",
-        "sap_upload_file": sap_upload_file,
         "win_open_file": dismiss_open_file_dialog,
         "win_save_as": dismiss_save_as_dialog,
     }

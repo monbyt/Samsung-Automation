@@ -133,12 +133,38 @@ def _inject_step_logging(source: str) -> str:
     return "\n".join(out)
 
 
-def prepare_script_source(source: str, upload_file: Optional[str] = None) -> str:
+def prepare_script_source(
+    source: str,
+    upload_file: Optional[str] = None,
+    download_dir: Optional[str] = None,
+) -> str:
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     if upload_file and os.path.isfile(upload_file):
         source = _automate_file_upload(source, upload_file)
+    if download_dir:
+        source = _inject_download_save(source, download_dir)
     source = _inject_step_logging(source)
     return source
+
+
+def _inject_download_save(source: str, download_dir: str) -> str:
+    """Auto-save Playwright downloads to the configured Windows folder."""
+    if "download_info.value" not in source:
+        return source
+
+    out = []
+    for line in source.splitlines():
+        out.append(line)
+        if re.match(r"\s*download\s*=\s*download_info\.value\s*$", line):
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f"{indent}import os as _rpa_os")
+            out.append(f"{indent}_rpa_os.makedirs({download_dir!r}, exist_ok=True)")
+            out.append(
+                f"{indent}_rpa_dl = _rpa_os.path.join({download_dir!r}, download.suggested_filename)"
+            )
+            out.append(f"{indent}download.save_as(_rpa_dl)")
+            out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')
+    return "\n".join(out)
 
 
 def _patch_playwright_no_timeout() -> None:
@@ -263,7 +289,12 @@ def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
     return staged
 
 
-def run_recorded_script(rpa_id: str, upload_file: Optional[str] = None) -> None:
+def run_recorded_script(
+    rpa_id: str,
+    upload_file: Optional[str] = None,
+    upload_dir: Optional[str] = None,
+    download_dir: Optional[str] = None,
+) -> None:
     os.environ.setdefault("NO_PROXY", "*")
     os.environ.setdefault("no_proxy", "*")
 
@@ -274,6 +305,12 @@ def run_recorded_script(rpa_id: str, upload_file: Optional[str] = None) -> None:
         )
 
     _log(f"Starting script: {rpa_id}")
+    if upload_dir:
+        _log(f"Upload folder: {upload_dir}")
+        os.environ["RPA_UPLOAD_DIR"] = upload_dir
+    if download_dir:
+        _log(f"Download folder: {download_dir}")
+        os.environ["RPA_DOWNLOAD_DIR"] = download_dir
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
@@ -282,16 +319,33 @@ def run_recorded_script(rpa_id: str, upload_file: Optional[str] = None) -> None:
         stage_upload_for_script(rpa_id, upload_abs)
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
-        _log("No upload file — set_input_files will use paths from the script as-is")
+        _log("No upload file — set_input_files uses script paths or win_open_file()")
 
     _patch_playwright_no_timeout()
     _patch_playwright_logging()
 
     with open(path, encoding="utf-8") as f:
         raw = f.read()
-    source = prepare_script_source(raw, upload_file=upload_file)
+    source = prepare_script_source(
+        raw,
+        upload_file=upload_file,
+        download_dir=download_dir,
+    )
+
+    from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
 
     _log("Launching browser...")
     code = compile(source, path, "exec")
-    exec(code, {"__name__": "__main__", "__file__": path})
+    exec(
+        code,
+        {
+            "__name__": "__main__",
+            "__file__": path,
+            "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
+            "RPA_UPLOAD_DIR": upload_dir or "",
+            "RPA_DOWNLOAD_DIR": download_dir or "",
+            "win_open_file": dismiss_open_file_dialog,
+            "win_save_as": dismiss_save_as_dialog,
+        },
+    )
     _log(f"Script finished: {rpa_id}")

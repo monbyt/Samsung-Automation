@@ -5,7 +5,7 @@ import os
 import shutil
 import traceback
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import config
 from db import record_rpa_run
@@ -67,6 +67,30 @@ def _resolve_spreadsheet(path: str) -> str:
         from parse_to_db import extract_zip_if_needed
         return extract_zip_if_needed(path, extract_zip=True)
     raise FileNotFoundError(f"Not an Excel or zip file: {path}")
+
+
+def _resolve_rpa_folders(rpa_job: dict) -> Tuple[str, str]:
+    """Upload/download Windows folders for an RPA job."""
+    from mail.jobs_db import get_job, resolve_download_dir
+
+    upload = (rpa_job.get("upload_folder") or "").strip()
+    download = (rpa_job.get("download_folder") or "").strip()
+    mail_id = rpa_job.get("trigger_mail_job") or ""
+
+    if mail_id:
+        mail_job = get_job(mail_id)
+        if mail_job:
+            mail_dir = mail_job.get("download_dir") or resolve_download_dir(mail_job)
+            if not upload:
+                upload = mail_dir
+            if not download:
+                download = mail_dir
+
+    if not upload:
+        upload = config.DOWNLOAD_DIR
+    if not download:
+        download = upload
+    return os.path.normpath(upload), os.path.normpath(download)
 
 
 def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
@@ -131,6 +155,9 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
         elif job["tool"] == "codegen":
             from rpa.codegen import run_recorded_script
 
+            upload_dir, download_dir = _resolve_rpa_folders(job)
+            _log(f"Upload folder: {upload_dir}")
+            _log(f"Download folder: {download_dir}")
             try:
                 path = _prepare_upload_file(upload_file, job)
                 used_path = path
@@ -138,7 +165,12 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
             except FileNotFoundError as e:
                 path = None
                 _log(f"No upload file: {e}")
-            run_recorded_script(rpa_id, upload_file=path)
+            run_recorded_script(
+                rpa_id,
+                upload_file=path,
+                upload_dir=upload_dir,
+                download_dir=download_dir,
+            )
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 

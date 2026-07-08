@@ -838,14 +838,31 @@ def rpa_list():
     </tr>{% endfor %}</table>
     {% else %}<p class="muted">No RPA tools registered.</p>{% endif %}
   </div></div>
+  <div class="panel"><h2>Which tool is which?</h2>
+    <p class="muted" style="line-height:1.6">
+      <b>nerp_upload_pi</b> — built-in NERP Upload + P/I (hardcoded in code)<br>
+      <b>Everything else</b> — your recorded scripts. The grey <b>pill</b> in the first column is the real id
+      (e.g. <code>order_creation</code> or <code>order_creation_2</code>). The line below is the display name you typed.<br>
+      Your ZLSDF50270 + Sales Org flow is a <b>custom</b> script — check the pill to see if it is
+      <code>order_creation</code> or <code>order_creation_2</code>.
+    </p>
+  </div>
+  <div class="panel"><h2>Windows files (upload / save)</h2>
+    <p class="muted" style="line-height:1.6">
+      Set <b>Upload folder</b> and <b>Download folder</b> on Edit (or link a mail job — uses that job's Desktop folder).<br>
+      <b>Upload:</b> latest file from upload folder is injected into <code>set_input_files</code> automatically.
+      If a native Open dialog still appears, scripts can call <code>win_open_file(RPA_UPLOAD_DIR, "file.xlsx")</code>.<br>
+      <b>Save:</b> Playwright downloads are auto-saved to the download folder. For native Save As dialogs use
+      <code>win_save_as(RPA_DOWNLOAD_DIR)</code> (same helper as W1 mail).
+    </p>
+  </div>
   <div class="panel"><h2>Recording your own script</h2>
     <p class="muted" style="line-height:1.6">
       1. Click <b>+ New recorded script</b> and set the <b>start URL</b><br>
       2. Click <b>Record</b> — Playwright codegen opens in a new window<br>
       3. Perform your steps, then close the codegen window (script auto-saves)<br>
       4. Or paste/edit the Python script on the Edit page<br>
-      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download<br>
-      6. <b>File upload:</b> if your recording uses <code>set_input_files("Book1.xlsx")</code>, the latest file from the linked mail job (or Desktop download folder) is copied to that path automatically before run — no manual pick needed
+      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download
     </p>
   </div>
   <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
@@ -947,6 +964,8 @@ def rpa_edit(rpa_id):
             )
             if job["tool"] == "codegen":
                 fields["start_url"] = request.form.get("start_url", "").strip()
+                fields["upload_folder"] = request.form.get("upload_folder", "").strip()
+                fields["download_folder"] = request.form.get("download_folder", "").strip()
             update_rpa_job(rpa_id, **fields)
             if job["tool"] == "codegen" and "script" in request.form:
                 body = request.form.get("script", "")
@@ -969,6 +988,12 @@ def rpa_edit(rpa_id):
     <div class="form-row"><label>Start URL</label>
       <input type="url" name="start_url" value="{{ job.start_url }}" style="width:100%" {{ 'readonly' if job.tool != 'codegen' else '' }}></div>
     {% if job.tool == 'codegen' %}
+    <div class="form-row"><label>Upload folder (Windows path)</label>
+      <input type="text" name="upload_folder" value="{{ job.upload_folder }}" style="width:100%"
+        placeholder="e.g. C:\Users\you\Desktop\Order-Extract (or leave blank — uses linked mail job folder)"></div>
+    <div class="form-row"><label>Download folder (Windows path)</label>
+      <input type="text" name="download_folder" value="{{ job.download_folder }}" style="width:100%"
+        placeholder="e.g. C:\Users\you\Desktop\Order-Results"></div>
     <div class="form-row">
       <label>Recorded script {% if script_saved %}<span class="ok">(saved)</span>{% else %}<span class="err">(not recorded yet)</span>{% endif %}</label>
       <textarea name="script" rows="18" style="width:100%;font-family:monospace;font-size:12px" placeholder="Paste Playwright codegen output here, or click Record below.">{{ script_text }}</textarea>

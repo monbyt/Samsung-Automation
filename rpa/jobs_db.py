@@ -19,6 +19,8 @@ rpa_jobs = Table(
     Column("name", String(200), nullable=False),
     Column("tool", String(50), nullable=False),
     Column("start_url", Text),
+    Column("upload_folder", String(500)),
+    Column("download_folder", String(500)),
     Column("description", Text),
     Column("trigger_mail_job", String(64)),
     Column("enabled", Integer, default=1),
@@ -45,6 +47,10 @@ def _migrate_rpa_columns():
         cols = {row[1] for row in conn.execute(sqltext("PRAGMA table_info(rpa_jobs)"))}
         if "start_url" not in cols:
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN start_url TEXT"))
+        if "upload_folder" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN upload_folder VARCHAR(500)"))
+        if "download_folder" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN download_folder VARCHAR(500)"))
         conn.execute(
             sqltext(
                 "UPDATE rpa_jobs SET start_url = :url "
@@ -71,6 +77,8 @@ def _row_to_dict(row):
         "name": row.name,
         "tool": row.tool,
         "start_url": row.start_url or "",
+        "upload_folder": row.upload_folder or "",
+        "download_folder": row.download_folder or "",
         "description": row.description or "",
         "trigger_mail_job": row.trigger_mail_job or "",
         "enabled": bool(row.enabled),
@@ -175,7 +183,10 @@ def rpa_by_mail_job():
 
 
 def update_rpa_job(rpa_id: str, **fields):
-    allowed = {"name", "description", "trigger_mail_job", "enabled", "start_url"}
+    allowed = {
+        "name", "description", "trigger_mail_job", "enabled", "start_url",
+        "upload_folder", "download_folder",
+    }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return

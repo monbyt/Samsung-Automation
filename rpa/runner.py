@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 import config
 from db import record_rpa_run
-from rpa.jobs_db import get_rpa_job, list_for_mail_job, mark_rpa_finished
+from rpa.jobs_db import get_rpa_job, list_for_mail_job, mark_rpa_finished, get_next_rpa
 
 _UPLOAD_EXT = (".xlsx", ".xls", ".xlsm", ".csv")
 
@@ -230,8 +230,15 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
     )
 
 
-def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
-    """Run one RPA tool by id."""
+def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[set] = None) -> dict:
+    """Run one RPA tool by id. Chains to next_rpa on success."""
+    if _visited is None:
+        _visited = set()
+    if rpa_id in _visited:
+        _log(f"Cycle detected — skipping already-visited job: {rpa_id}")
+        return {"rpa_id": rpa_id, "status": "skipped", "message": "cycle detected"}
+    _visited.add(rpa_id)
+
     job = get_rpa_job(rpa_id)
     if not job:
         raise ValueError(f"Unknown RPA job: {rpa_id}")
@@ -281,6 +288,17 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None) -> dict:
         mark_rpa_finished(rpa_id, "ok")
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
+
+        # Chain to next step if configured
+        next_id = job.get("next_rpa") or ""
+        if next_id:
+            _log(f"Chaining to next step: {next_id}")
+            try:
+                run_rpa(next_id, upload_file=used_path, _visited=_visited)
+            except Exception as chain_err:
+                _log(f"Chained step {next_id!r} failed: {chain_err}")
+                result["chain_error"] = str(chain_err)
+
     except Exception as e:
         err = traceback.format_exc()[-500:]
         result["status"] = "error"

@@ -799,8 +799,10 @@ def rpa_list():
     from rpa.codegen import has_script
 
     jobs = list_rpa_jobs()
+    rpa_name_map = {j["rpa_id"]: j["name"] for j in jobs}
     for j in jobs:
         j["has_script"] = has_script(j["rpa_id"]) if j["tool"] == "codegen" else True
+        j["next_rpa_name"] = rpa_name_map.get(j.get("next_rpa") or "", "")
     mail_jobs = list_jobs()
     msg = request.args.get("msg")
     err = request.args.get("err")
@@ -818,12 +820,13 @@ def rpa_list():
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
   <div class="panel"><h2>Registered tools</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Type</th><th>Start URL</th><th>Trigger</th><th>Script</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Type</th><th>Start URL</th><th>Trigger</th><th>Next</th><th>Script</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
     {% for r in jobs %}<tr>
       <td><span class="pill">{{ r.rpa_id }}</span><br><span class="muted">{{ r.name }}</span></td>
       <td>{{ r.tool }}</td>
       <td class="muted" style="max-width:220px;word-break:break-all">{{ r.start_url or '—' }}</td>
       <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual</span>{% endif %}</td>
+      <td>{% if r.next_rpa %}<span class="pill" title="{{ r.next_rpa }}">→ {{ r.next_rpa_name or r.next_rpa }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{% if r.tool == 'codegen' %}{% if r.has_script %}<span class="ok">saved</span>{% else %}<span class="err">not recorded</span>{% endif %}{% else %}<span class="muted">built-in</span>{% endif %}</td>
       <td>{{ r.last_run or '—' }}</td>
       <td class="{{ 'ok' if r.last_status=='ok' else 'err' if r.last_status else '' }}">{{ r.last_status or '—' }}</td>
@@ -888,6 +891,7 @@ def rpa_new():
         "start_url": config.NERP_URL,
         "description": "",
         "trigger_mail_job": "",
+        "next_rpa": "",
         "enabled": False,
     }
     mail_jobs = list_jobs()
@@ -899,6 +903,7 @@ def rpa_new():
             "start_url": request.form.get("start_url", ""),
             "description": request.form.get("description", ""),
             "trigger_mail_job": request.form.get("trigger_mail_job", ""),
+            "next_rpa": request.form.get("next_rpa", ""),
             "enabled": request.form.get("enabled") == "on",
         }
         try:
@@ -908,6 +913,7 @@ def rpa_new():
                 start_url=form["start_url"],
                 description=form["description"],
                 trigger_mail_job=form["trigger_mail_job"],
+                next_rpa=form["next_rpa"],
                 enabled=form["enabled"],
             )
             return redirect(url_for("rpa_edit", rpa_id=slug, msg="Created — click Record to capture steps"))
@@ -930,6 +936,13 @@ def rpa_new():
         <option value="">— Manual only —</option>
         {% for m in mail_jobs %}<option value="{{ m.job_id }}" {{ 'selected' if form.trigger_mail_job==m.job_id else '' }}>{{ m.job_id }} — {{ m.name }}</option>{% endfor %}
       </select></div>
+    <div class="form-row"><label>On success, run next</label>
+      <select name="next_rpa">
+        <option value="">— none —</option>
+        {% for r in rpa_jobs %}
+          <option value="{{ r.rpa_id }}" {{ 'selected' if form.next_rpa == r.rpa_id else '' }}>{{ r.name }}</option>
+        {% endfor %}
+      </select></div>
     <div class="form-row"><label>Notes</label>
       <input type="text" name="description" value="{{ form.description }}"></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
@@ -937,7 +950,8 @@ def rpa_new():
     <a href="/rpa"><button type="button">Cancel</button></a>
   </form>
 """
-    return _layout("New RPA", "rpa", body, form=form, mail_jobs=mail_jobs, error=error)
+    rpa_jobs_list = list_rpa_jobs()
+    return _layout("New RPA", "rpa", body, form=form, mail_jobs=mail_jobs, error=error, rpa_jobs=rpa_jobs_list)
 
 
 @app.route("/rpa/<rpa_id>/edit", methods=["GET", "POST"])
@@ -960,6 +974,7 @@ def rpa_edit(rpa_id):
                 name=request.form["name"].strip(),
                 description=request.form.get("description", "").strip(),
                 trigger_mail_job=request.form.get("trigger_mail_job", "").strip(),
+                next_rpa=request.form.get("next_rpa", "").strip(),
                 enabled=request.form.get("enabled") == "on",
             )
             if job["tool"] == "codegen":
@@ -1006,6 +1021,15 @@ def rpa_edit(rpa_id):
         <option value="">— Manual only —</option>
         {% for m in mail_jobs %}<option value="{{ m.job_id }}" {{ 'selected' if job.trigger_mail_job==m.job_id else '' }}>{{ m.job_id }} — {{ m.name }}</option>{% endfor %}
       </select></div>
+    <div class="form-row"><label>On success, run next</label>
+      <select name="next_rpa">
+        <option value="">— none —</option>
+        {% for r in rpa_jobs %}
+          {% if r.rpa_id != job.rpa_id %}
+            <option value="{{ r.rpa_id }}" {{ 'selected' if job.next_rpa == r.rpa_id else '' }}>{{ r.name }}</option>
+          {% endif %}
+        {% endfor %}
+      </select></div>
     <div class="form-row"><label>Notes</label>
       <input type="text" name="description" value="{{ job.description }}"></div>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
@@ -1019,10 +1043,12 @@ def rpa_edit(rpa_id):
     {% endif %}
   </form>
 """
+    rpa_jobs_list = list_rpa_jobs()
     return _layout(
         "Edit RPA", "rpa", body,
         job=job, mail_jobs=mail_jobs, error=error, msg=msg,
         script_text=script_text, script_saved=script_saved,
+        rpa_jobs=rpa_jobs_list,
     )
 
 

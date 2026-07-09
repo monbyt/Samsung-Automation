@@ -28,6 +28,7 @@ rpa_jobs = Table(
     Column("last_status", String(20)),
     Column("last_message", Text),
     Column("created_at", DateTime),
+    Column("next_rpa", String(64)),
 )
 
 _BUILTIN_IDS = frozenset({"nerp_upload_pi"})
@@ -51,6 +52,8 @@ def _migrate_rpa_columns():
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN upload_folder VARCHAR(500)"))
         if "download_folder" not in cols:
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN download_folder VARCHAR(500)"))
+        if "next_rpa" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN next_rpa VARCHAR(64)"))
         conn.execute(
             sqltext(
                 "UPDATE rpa_jobs SET start_url = :url "
@@ -81,6 +84,7 @@ def _row_to_dict(row):
         "download_folder": row.download_folder or "",
         "description": row.description or "",
         "trigger_mail_job": row.trigger_mail_job or "",
+        "next_rpa": row.next_rpa or "",
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "last_status": row.last_status,
@@ -137,6 +141,7 @@ def add_rpa_job(
     *,
     description: str = "",
     trigger_mail_job: str = "",
+    next_rpa: str = "",
     enabled: bool = False,
 ) -> str:
     slug = _normalize_rpa_id(rpa_id)
@@ -157,6 +162,7 @@ def add_rpa_job(
             start_url=start_url.strip(),
             description=description.strip(),
             trigger_mail_job=(trigger_mail_job or "").strip(),
+            next_rpa=(next_rpa or "").strip(),
             enabled=1 if enabled else 0,
             created_at=now,
         ))
@@ -185,7 +191,7 @@ def rpa_by_mail_job():
 def update_rpa_job(rpa_id: str, **fields):
     allowed = {
         "name", "description", "trigger_mail_job", "enabled", "start_url",
-        "upload_folder", "download_folder",
+        "upload_folder", "download_folder", "next_rpa",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -213,6 +219,14 @@ def delete_rpa_job(rpa_id: str):
     path = script_path(rpa_id)
     if os.path.isfile(path):
         os.remove(path)
+
+
+def get_next_rpa(rpa_id: str):
+    """Return the next_rpa id for the given job, or None if not set."""
+    job = get_rpa_job(rpa_id)
+    if not job:
+        return None
+    return job.get("next_rpa") or None
 
 
 def mark_rpa_finished(rpa_id: str, status: str, message: str = ""):

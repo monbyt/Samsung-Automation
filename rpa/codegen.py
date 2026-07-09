@@ -503,8 +503,12 @@ def run_recorded_script(
 
     if upload_file and os.path.isfile(upload_file):
         upload_abs = os.path.abspath(upload_file)
-        os.environ["RPA_UPLOAD_FILE"] = upload_abs
-        _log(f"Upload file: {upload_abs} ({os.path.getsize(upload_abs)} bytes)")
+        staged = stage_upload_for_script(rpa_id, upload_abs)
+        sap_upload = staged[0] if staged else upload_abs
+        os.environ["RPA_UPLOAD_FILE"] = sap_upload
+        _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")
+        if staged:
+            _log(f"Staged as recorded filename: {os.path.basename(sap_upload)}")
     else:
         os.environ.pop("RPA_UPLOAD_FILE", None)
         _log("No upload file — set_input_files uses script paths or win_open_file()")

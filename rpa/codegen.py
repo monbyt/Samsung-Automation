@@ -96,56 +96,12 @@ def _inject_post_upload_lines(indent: str) -> list[str]:
     ]
 
 
-def _is_set_input_files_line(line: str) -> bool:
-    stripped = line.lstrip()
-    return ".set_input_files(" in stripped and not stripped.startswith("print(")
-
-
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    SAP upload via Chrome file picker: wrap the OK click (after help button) with
-    expect_file_chooser so the file is selected at the right moment.
-    Skips set_input_files to avoid double-upload / data errors.
+    Keep the recorded SAP flow (help → OK → set_input_files on webgui input).
+    Only swap the recorded filename for the full-path RPA_UPLOAD_FILE variable.
+    expect_file_chooser only filled the filename in SAP, not the file bytes.
     """
-    lines = source.splitlines()
-    out: list[str] = []
-    i = 0
-    used_chooser = False
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.lstrip()
-
-        if (
-            not used_chooser
-            and 'get_by_role("button", name="OK")' in line
-            and ".click()" in line
-            and "page." in line
-        ):
-            ahead = "\n".join(lines[i + 1 : i + 8])
-            if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
-                indent = line[: len(line) - len(stripped)]
-                inner = indent + "    "
-                out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
-                out.append(f"{indent}with page.expect_file_chooser() as _rpa_fc_info:")
-                out.append(inner + stripped)
-                out.append(f"{inner}_rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
-                out.extend(_inject_post_upload_lines(indent))
-                used_chooser = True
-                i += 1
-                while i < len(lines):
-                    if _is_set_input_files_line(lines[i]):
-                        i += 1
-                        break
-                    i += 1
-                continue
-
-        out.append(line)
-        i += 1
-
-    if used_chooser:
-        return "\n".join(out)
-
     source = re.sub(
         r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
         ".set_input_files(RPA_UPLOAD_FILE)",
@@ -153,9 +109,13 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
     )
     out = []
     for line in source.splitlines():
-        if "set_input_files(RPA_UPLOAD_FILE)" in line:
-            indent = line[: len(line) - len(line.lstrip())]
-            out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
+        stripped = line.lstrip()
+        if "set_input_files(RPA_UPLOAD_FILE)" in stripped:
+            indent = line[: len(line) - len(stripped)]
+            out.append(
+                f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
+                f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")'
+            )
             out.append(line)
             out.extend(_inject_post_upload_lines(indent))
         else:
@@ -382,7 +342,7 @@ def _patch_playwright_logging() -> None:
                 )
                 # endregion
                 opts = dict(kwargs)
-                opts.setdefault("timeout", 15_000)
+                opts.setdefault("timeout", 120_000)
                 try:
                     result = original(self, *args, **opts)
                     # region agent log
@@ -398,8 +358,8 @@ def _patch_playwright_logging() -> None:
                         {"path": upload_path, "error": str(exc), "trace": traceback.format_exc()[-400:]},
                     )
                     # endregion
-                    _log(f"set_input_files skipped ({exc}) — file picker may have handled upload")
-                    return None
+                    _log(f"set_input_files failed ({exc})")
+                    raise
             if name == "click":
                 snippet = str(self)[:200]
                 # region agent log
@@ -467,9 +427,14 @@ def prepare_sap_upload_file(
     upload_dir: Optional[str] = None,
 ) -> str:
     """
-    Copy the upload into the recorded SAP filename (e.g. sample_bulk.XLSX)
-    inside the upload folder — same path you would pick manually.
+    Return the real file to upload (full path). Optionally mirror it to the
+    recorded SAP filename in the upload folder so the on-disk name matches
+    what you would pick manually.
     """
+    upload_path = os.path.abspath(upload_path)
+    if not os.path.isfile(upload_path):
+        raise FileNotFoundError(f"Upload file not found: {upload_path}")
+
     script = script_path(rpa_id)
     with open(script, encoding="utf-8") as f:
         content = f.read()
@@ -479,14 +444,20 @@ def prepare_sap_upload_file(
         for m in _INPUT_FILES_RE.finditer(content)
     ]
     if not basenames:
-        return os.path.abspath(upload_path)
+        _log(f"SAP upload source: {upload_path} ({os.path.getsize(upload_path)} bytes)")
+        return upload_path
 
     basename = basenames[0]
-    dest_dir = (upload_dir or "").strip() or os.path.dirname(os.path.abspath(upload_path)) or config.BASE_DIR
+    dest_dir = (upload_dir or "").strip() or os.path.dirname(upload_path) or config.BASE_DIR
     dest = os.path.normpath(os.path.join(dest_dir, basename))
+
+    if os.path.normcase(dest) == os.path.normcase(upload_path):
+        _log(f"SAP upload file: {upload_path} ({os.path.getsize(upload_path)} bytes)")
+        return upload_path
+
     os.makedirs(dest_dir, exist_ok=True)
     shutil.copy2(upload_path, dest)
-    _log(f"Prepared SAP upload: {dest}")
+    _log(f"SAP upload: copied {upload_path} → {dest} ({os.path.getsize(dest)} bytes)")
     return dest
 
 

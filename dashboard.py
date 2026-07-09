@@ -850,8 +850,9 @@ def rpa_list():
   <div class="panel"><h2>Windows files (upload / save)</h2>
     <p class="muted" style="line-height:1.6">
       Set <b>Upload folder</b> and <b>Download folder</b> on Edit (or link a mail job — uses that job's Desktop folder).<br>
-      <b>Upload:</b> after SAP opens the Windows file dialog, automation navigates to your
-      <b>Upload folder</b>, selects the latest spreadsheet, and confirms — same as manual pick.<br>
+      <b>Upload:</b> newest file from upload folder is copied to the name in your script
+      (e.g. <code>sample_bulk.XLSX</code>), then attached at the OK click. We do not decrypt files —
+      use a plain Excel export if NASCA shows an encryption warning.<br>
       <b>Save:</b> Playwright downloads are auto-saved to the download folder. For native Save As dialogs use
       <code>win_save_as(RPA_DOWNLOAD_DIR)</code> (same helper as W1 mail).
     </p>

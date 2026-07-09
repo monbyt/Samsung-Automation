@@ -82,15 +82,10 @@ def _sanitize_upload_literals(source: str) -> str:
 
 
 def _inject_post_upload_lines(indent: str) -> list[str]:
-    """Wait for SAP to accept upload and dismiss error popups before Execute."""
+    """Wait for SAP after upload — do not auto-dismiss errors (user must see data errors)."""
     return [
         f'{indent}print("[RPA] Waiting for SAP after upload...")',
         f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame",
-        f"{indent}try:",
-        f'{indent}    _rpa_shell.get_by_role("dialog", name="Error").get_by_label("Close").click(timeout=5000)',
-        f'{indent}    print("[RPA] Dismissed SAP error dialog")',
-        f"{indent}except Exception:",
-        f"{indent}    pass",
         f'{indent}_rpa_shell.get_by_role("button", name="Execute  Emphasized").wait_for(state="visible", timeout=60000)',
         f'{indent}print("[RPA] Execute button ready")',
     ]
@@ -101,50 +96,77 @@ def _is_set_input_files_line(line: str) -> bool:
     return ".set_input_files(" in stripped and not stripped.startswith("print(")
 
 
-def _inject_win_open_upload_lines(indent: str) -> list[str]:
-    """Drive the native Windows Open dialog — same as picking the file manually."""
-    return [
-        f'{indent}print("[RPA] Waiting for Windows Open dialog...")',
-        f'{indent}__import__("time").sleep(1.5)',
-        f'{indent}print("[RPA] Open dialog → folder:", RPA_UPLOAD_DIR, "file:", _rpa_os.path.basename(RPA_UPLOAD_FILE))',
-        f"{indent}if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):",
-        f'{indent}    raise RuntimeError("Windows Open dialog: could not select upload file")',
-        f'{indent}print("[RPA] Windows Open dialog confirmed")',
-    ]
-
-
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    SAP upload opens a native Windows Open dialog after help → OK.
-    Replace set_input_files with win_open_file (folder + filename), like manual RPA.
+    Upload at OK click — same as when it worked ('letsgooo'):
+      1) expect_file_chooser + set_files(full path)  — real file bytes
+      2) if that fails only: win_open_file (Windows dialog navigation)
+    Never set_input_files on webgui (only fills filename text in SAP).
+  Never win_open in parallel (pastes into SAP field if dialog not focused).
     """
     lines = source.splitlines()
     out: list[str] = []
-    replaced = False
+    i = 0
+    used = False
 
-    for line in lines:
-        if _is_set_input_files_line(line) and not replaced:
-            indent = line[: len(line) - len(line.lstrip())]
-            out.extend(_inject_win_open_upload_lines(indent))
-            out.extend(_inject_post_upload_lines(indent))
-            replaced = True
-            continue
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+
+        if (
+            not used
+            and 'get_by_role("button", name="OK")' in line
+            and ".click()" in line
+            and "page." in line
+        ):
+            ahead = "\n".join(lines[i + 1 : i + 8])
+            if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
+                indent = line[: len(line) - len(stripped)]
+                inner = indent + "    "
+                out.append(
+                    f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
+                    f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")'
+                )
+                out.append(f"{indent}try:")
+                out.append(f"{indent}    with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
+                out.append(inner + stripped)
+                out.append(f"{inner}_rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
+                out.append(f'{indent}    print("[RPA] File chooser upload OK")')
+                out.append(f"{indent}except Exception as _rpa_fc_err:")
+                out.append(
+                    f'{indent}    print("[RPA] File chooser failed, trying Windows Open dialog:", _rpa_fc_err)'
+                )
+                out.append(f"{indent}    __import__('time').sleep(1.5)")
+                out.append(
+                    f"{indent}    if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):"
+                )
+                out.append(
+                    f'{indent}        raise RuntimeError("Upload failed: file chooser and Windows Open dialog")'
+                )
+                out.append(f'{indent}    print("[RPA] Windows Open dialog upload OK")')
+                out.extend(_inject_post_upload_lines(indent))
+                used = True
+                i += 1
+                while i < len(lines):
+                    if _is_set_input_files_line(lines[i]):
+                        i += 1
+                        break
+                    i += 1
+                continue
+
         out.append(line)
+        i += 1
 
-    if replaced:
+    if used:
         return "\n".join(out)
 
-    source = re.sub(
-        r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
-        ".set_input_files(RPA_UPLOAD_FILE)",
-        source,
-    )
     out = []
-    for line in source.splitlines():
-        stripped = line.lstrip()
-        if "set_input_files(RPA_UPLOAD_FILE)" in stripped:
-            indent = line[: len(line) - len(stripped)]
-            out.extend(_inject_win_open_upload_lines(indent))
+    for line in lines:
+        if _is_set_input_files_line(line):
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
+            out.append(f"{indent}with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
+            out.append(f"{indent}    _rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
             out.extend(_inject_post_upload_lines(indent))
         else:
             out.append(line)
@@ -453,10 +475,31 @@ def prepare_sap_upload_file(
     upload_path: str,
     upload_dir: Optional[str] = None,
 ) -> str:
-    """Resolved latest upload file — full path passed to Windows Open dialog automation."""
+    """Copy latest upload into recorded SAP filename inside the upload folder."""
     upload_path = os.path.abspath(upload_path)
     if not os.path.isfile(upload_path):
         raise FileNotFoundError(f"Upload file not found: {upload_path}")
+
+    script = script_path(rpa_id)
+    with open(script, encoding="utf-8") as f:
+        content = f.read()
+
+    basenames = [
+        os.path.basename(m.group(1).replace("\\", "/"))
+        for m in _INPUT_FILES_RE.finditer(content)
+    ]
+    if not basenames:
+        _log(f"SAP upload file: {upload_path} ({os.path.getsize(upload_path)} bytes)")
+        return upload_path
+
+    basename = basenames[0]
+    dest_dir = (upload_dir or "").strip() or os.path.dirname(upload_path) or config.BASE_DIR
+    dest = os.path.normpath(os.path.join(dest_dir, basename))
+    if os.path.normcase(dest) != os.path.normcase(upload_path):
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(upload_path, dest)
+        _log(f"SAP upload: copied → {dest} ({os.path.getsize(dest)} bytes)")
+        return dest
     _log(f"SAP upload file: {upload_path} ({os.path.getsize(upload_path)} bytes)")
     return upload_path
 

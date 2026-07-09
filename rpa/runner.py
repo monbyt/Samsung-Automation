@@ -85,12 +85,23 @@ def _resolve_spreadsheet(path: str) -> str:
     raise FileNotFoundError(f"Not an Excel or zip file: {path}")
 
 
+def _normalize_folder_path(path: str) -> str:
+    """Folder path for Windows dialogs — if user pasted a file path, use its parent."""
+    path = (path or "").strip()
+    if not path:
+        return ""
+    path = os.path.normpath(path)
+    if os.path.isfile(path):
+        return os.path.dirname(path)
+    return path
+
+
 def _resolve_rpa_folders(rpa_job: dict) -> Tuple[str, str]:
     """Upload/download Windows folders for an RPA job."""
     from mail.jobs_db import get_job, resolve_download_dir
 
-    upload = (rpa_job.get("upload_folder") or "").strip()
-    download = (rpa_job.get("download_folder") or "").strip()
+    upload = _normalize_folder_path(rpa_job.get("upload_folder") or "")
+    download = _normalize_folder_path(rpa_job.get("download_folder") or "")
     mail_id = rpa_job.get("trigger_mail_job") or ""
 
     if mail_id:

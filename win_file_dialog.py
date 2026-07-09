@@ -36,7 +36,7 @@ def _open_via_powershell(title: str, full_path: str) -> bool:
     filename = _ps_escape(os.path.basename(full_path))
     safe_path = _ps_escape(os.path.normpath(full_path))
 
-    # 1) Folder bar (Alt+D) → folder → filename (matches manual navigation).
+    # 1) Folder bar (Alt+D) → folder → file name field (Alt+N) → filename.
     ps_folder = f"""
 $w = New-Object -ComObject WScript.Shell
 if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
@@ -48,6 +48,8 @@ $w.SendKeys('^a')
 $w.SendKeys('^v')
 $w.SendKeys('{{ENTER}}')
 Start-Sleep -Milliseconds 1200
+$w.SendKeys('%n')
+Start-Sleep -Milliseconds 400
 Set-Clipboard -Value '{filename}'
 $w.SendKeys('^a')
 $w.SendKeys('^v')
@@ -65,6 +67,8 @@ exit 0
 $w = New-Object -ComObject WScript.Shell
 if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
 Start-Sleep -Milliseconds 1000
+$w.SendKeys('%n')
+Start-Sleep -Milliseconds 400
 Set-Clipboard -Value '{safe_path}'
 $w.SendKeys('^a')
 $w.SendKeys('^v')

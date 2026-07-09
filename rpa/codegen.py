@@ -3,7 +3,6 @@ Playwright codegen — record, save, and run custom RPA scripts.
 """
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -12,7 +11,6 @@ from typing import Optional
 import config
 
 _RPA_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
-_INPUT_FILES_RE = re.compile(r'\.set_input_files\(\s*["\']([^"\']+)["\']\s*\)')
 _ACTION_TIMEOUT_RE = re.compile(r",?\s*timeout=\d+")
 _NEW_CONTEXT_RE = re.compile(
     r"(context\s*=\s*browser\.new_context\([^)]*\)\s*\n)",
@@ -81,6 +79,32 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
+def _inject_sap_upload_wait(indent: str) -> list[str]:
+    """Wait for SAP's hidden file input after help/OK (same as built-in NERP upload)."""
+    shell = (
+        'page.locator(\'iframe[name="application-Shell-startGUI-iframe"]\')'
+        ".content_frame"
+    )
+    return [
+        f'{indent}print("[RPA] Waiting for SAP file input...")',
+        f"{indent}{shell}.locator(\"#webgui_filebrowser_file_upload\")"
+        f'.wait_for(state="attached", timeout=120000)',
+        f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
+        f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")',
+    ]
+
+
+def _replace_set_input_files_path(line: str) -> str:
+    stripped = line.lstrip()
+    indent = line[: len(line) - len(stripped)]
+    replaced = re.sub(
+        r'\.set_input_files\(\s*["\'][^"\']*["\']\s*\)',
+        ".set_input_files(RPA_UPLOAD_FILE)",
+        stripped,
+    )
+    return indent + replaced
+
+
 def _inject_win_open_after_ok(indent: str) -> list[str]:
     """Pick file in the native Windows Open dialog — same as manual upload."""
     return [
@@ -88,32 +112,10 @@ def _inject_win_open_after_ok(indent: str) -> list[str]:
         f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")',
         f'{indent}print("[RPA] Waiting for Windows Open dialog...")',
         f"{indent}__import__('time').sleep(2)",
-        f'{indent}print("[RPA] Open dialog →", RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE))',
-        f"{indent}if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):",
+        f'{indent}print("[RPA] Open dialog →", RPA_UPLOAD_FILE)',
+        f"{indent}if not win_open_file(RPA_UPLOAD_FILE):",
         f'{indent}    raise RuntimeError("Windows Open dialog: could not select the file")',
         f'{indent}print("[RPA] Windows Open dialog confirmed")',
-    ]
-
-
-def _inject_post_upload_lines(indent: str) -> list[str]:
-    """SAP steps after Windows file pick — extra OK + fail on Error dialog."""
-    return [
-        f'{indent}print("[RPA] Waiting for SAP after upload...")',
-        f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame",
-        f"{indent}try:",
-        f'{indent}    _rpa_shell.get_by_role("button", name="OK").click(timeout=10000)',
-        f'{indent}    print("[RPA] SAP OK after file pick")',
-        f"{indent}except Exception:",
-        f"{indent}    pass",
-        f"{indent}try:",
-        f'{indent}    if _rpa_shell.get_by_role("dialog", name="Error").is_visible(timeout=5000):',
-        f'{indent}        raise RuntimeError("SAP rejected the upload — Error dialog is visible")',
-        f"{indent}except RuntimeError:",
-        f"{indent}    raise",
-        f"{indent}except Exception:",
-        f"{indent}    pass",
-        f'{indent}_rpa_shell.get_by_role("button", name="Execute  Emphasized").wait_for(state="visible", timeout=60000)',
-        f'{indent}print("[RPA] Execute button ready")',
     ]
 
 
@@ -124,12 +126,24 @@ def _is_set_input_files_line(line: str) -> bool:
 
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    Manual upload opens the Windows Open dialog after help → OK.
-    Keep OK click, run win_open_file, skip set_input_files / file chooser
-    (chooser can attach bytes but SAP still rejects vs a real dialog pick).
+    SAP bulk upload uses the in-page file browser (#webgui_filebrowser_file_upload),
+    not the Windows Open dialog. Keep help → OK from the recording and attach the
+    resolved file with set_input_files(RPA_UPLOAD_FILE) — same as nerp/rpa.py.
     """
+    if "webgui_filebrowser_file_upload" in source:
+        out: list[str] = []
+        for line in source.splitlines():
+            if _is_set_input_files_line(line):
+                indent = line[: len(line) - len(line.lstrip())]
+                out.extend(_inject_sap_upload_wait(indent))
+                out.append(_replace_set_input_files_path(line))
+            else:
+                out.append(line)
+        return "\n".join(out)
+
+    # Legacy scripts without SAP webgui input — fall back to Windows Open dialog.
     lines = source.splitlines()
-    out: list[str] = []
+    out = []
     i = 0
     used = False
 
@@ -143,12 +157,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             and ".click()" in line
             and "page." in line
         ):
-            ahead = "\n".join(lines[i + 1 : i + 8])
             if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
                 indent = line[: len(line) - len(stripped)]
                 out.append(line)
                 out.extend(_inject_win_open_after_ok(indent))
-                out.extend(_inject_post_upload_lines(indent))
                 used = True
                 i += 1
                 while i < len(lines):
@@ -173,7 +185,6 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
         if _is_set_input_files_line(line):
             indent = line[: len(line) - len(line.lstrip())]
             out.extend(_inject_win_open_after_ok(indent))
-            out.extend(_inject_post_upload_lines(indent))
         else:
             out.append(line)
     return "\n".join(out)
@@ -383,7 +394,9 @@ def _patch_playwright_logging() -> None:
                 label = f"set_input_files {args[0]!r}"
             _log(f"{cls.__name__}.{label}")
             if name == "set_input_files":
-                upload_path = args[0] if args else ""
+                upload_path = os.environ.get("RPA_UPLOAD_FILE") or (args[0] if args else "")
+                if upload_path:
+                    args = (upload_path,)
                 # region agent log
                 debug_log(
                     "H2",
@@ -481,32 +494,15 @@ def prepare_sap_upload_file(
     upload_path: str,
     upload_dir: Optional[str] = None,
 ) -> str:
-    """Copy latest upload into recorded SAP filename inside the upload folder."""
+    """Return the resolved upload file as-is (do not rename to the recorded script name)."""
     upload_path = os.path.abspath(upload_path)
     if not os.path.isfile(upload_path):
         raise FileNotFoundError(f"Upload file not found: {upload_path}")
 
-    script = script_path(rpa_id)
-    with open(script, encoding="utf-8") as f:
-        content = f.read()
-
-    basenames = [
-        os.path.basename(m.group(1).replace("\\", "/"))
-        for m in _INPUT_FILES_RE.finditer(content)
-    ]
-    if not basenames:
-        _log(f"SAP upload file: {upload_path} ({os.path.getsize(upload_path)} bytes)")
-        return upload_path
-
-    basename = basenames[0]
-    dest_dir = (upload_dir or "").strip() or os.path.dirname(upload_path) or config.BASE_DIR
-    dest = os.path.normpath(os.path.join(dest_dir, basename))
-    if os.path.normcase(dest) != os.path.normcase(upload_path):
-        os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy2(upload_path, dest)
-        _log(f"SAP upload: copied → {dest} ({os.path.getsize(dest)} bytes)")
-        return dest
-    _log(f"SAP upload file: {upload_path} ({os.path.getsize(upload_path)} bytes)")
+    _log(
+        f"SAP upload file: {upload_path} "
+        f"({os.path.basename(upload_path)}, {os.path.getsize(upload_path)} bytes)"
+    )
     return upload_path
 
 

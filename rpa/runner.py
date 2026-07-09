@@ -42,8 +42,21 @@ def _dirs_for_mail_job(mail_job_id: Optional[str]):
     return out
 
 
+def _file_recency_key(path: str) -> float:
+    """Return the most recent timestamp for a file.
+
+    On Windows, getctime is the actual creation time (when the file landed on disk),
+    which is more reliable than mtime for downloaded/copied files that can preserve
+    the original modification date from the source server or email attachment.
+    """
+    try:
+        return max(os.path.getmtime(path), os.path.getctime(path))
+    except OSError:
+        return 0.0
+
+
 def _find_latest_in_dir(directory: str) -> Optional[str]:
-    """Newest spreadsheet in one folder."""
+    """Most recently created/modified spreadsheet in one folder."""
     if not os.path.isdir(directory):
         return None
     candidates = []
@@ -55,11 +68,17 @@ def _find_latest_in_dir(directory: str) -> Optional[str]:
             candidates.append(path)
     if not candidates:
         return None
-    return max(candidates, key=os.path.getmtime)
+    best = max(candidates, key=_file_recency_key)
+    _log(
+        f"Latest file in {directory!r}: {os.path.basename(best)}"
+        f" (mtime={os.path.getmtime(best):.0f}"
+        f" ctime={os.path.getctime(best):.0f})"
+    )
+    return best
 
 
 def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]:
-    """Newest spreadsheet on Desktop job folders (optionally scoped to one mail job)."""
+    """Most recently created/modified spreadsheet across job folders."""
     candidates = []
     for folder in _dirs_for_mail_job(mail_job_id):
         if not os.path.isdir(folder):
@@ -72,7 +91,7 @@ def _find_latest_spreadsheet(mail_job_id: Optional[str] = None) -> Optional[str]
                 candidates.append(path)
     if not candidates:
         return None
-    return max(candidates, key=os.path.getmtime)
+    return max(candidates, key=_file_recency_key)
 
 
 def _resolve_spreadsheet(path: str) -> str:
@@ -151,9 +170,21 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
         if os.path.isdir(configured):
             latest = _find_latest_in_dir(configured)
             if latest:
-                _log(f"Using latest file from upload folder: {latest}")
+                import datetime as _dt
+                ctime = os.path.getctime(latest)
+                mtime = os.path.getmtime(latest)
+                _log(
+                    f"Selected file: {os.path.basename(latest)}"
+                    f" | size={os.path.getsize(latest)} bytes"
+                    f" | created={_dt.datetime.fromtimestamp(ctime):%Y-%m-%d %H:%M:%S}"
+                    f" | modified={_dt.datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M:%S}"
+                )
                 # region agent log
-                debug_log("H1", "runner.py:_prepare_upload_file", "resolved latest in folder", {"path": latest, "folder": configured})
+                debug_log("H1", "runner.py:_prepare_upload_file", "resolved latest in folder", {
+                    "path": latest, "folder": configured,
+                    "size": os.path.getsize(latest),
+                    "ctime": ctime, "mtime": mtime,
+                })
                 # endregion
                 return latest
             raise FileNotFoundError(f"No spreadsheet in upload folder: {configured}")

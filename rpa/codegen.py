@@ -81,11 +81,37 @@ def _sanitize_upload_literals(source: str) -> str:
     return re.sub(r'\.set_input_files\(\s*["\']([^"\']*)["\']\s*\)', fix, source)
 
 
+def _inject_win_open_after_ok(indent: str) -> list[str]:
+    """Pick file in the native Windows Open dialog — same as manual upload."""
+    return [
+        f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
+        f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")',
+        f'{indent}print("[RPA] Waiting for Windows Open dialog...")',
+        f"{indent}__import__('time').sleep(2)",
+        f'{indent}print("[RPA] Open dialog →", RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE))',
+        f"{indent}if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):",
+        f'{indent}    raise RuntimeError("Windows Open dialog: could not select the file")',
+        f'{indent}print("[RPA] Windows Open dialog confirmed")',
+    ]
+
+
 def _inject_post_upload_lines(indent: str) -> list[str]:
-    """Wait for SAP after upload — do not auto-dismiss errors (user must see data errors)."""
+    """SAP steps after Windows file pick — extra OK + fail on Error dialog."""
     return [
         f'{indent}print("[RPA] Waiting for SAP after upload...")',
         f"{indent}_rpa_shell = page.locator('iframe[name=\"application-Shell-startGUI-iframe\"]').content_frame",
+        f"{indent}try:",
+        f'{indent}    _rpa_shell.get_by_role("button", name="OK").click(timeout=10000)',
+        f'{indent}    print("[RPA] SAP OK after file pick")',
+        f"{indent}except Exception:",
+        f"{indent}    pass",
+        f"{indent}try:",
+        f'{indent}    if _rpa_shell.get_by_role("dialog", name="Error").is_visible(timeout=5000):',
+        f'{indent}        raise RuntimeError("SAP rejected the upload — Error dialog is visible")',
+        f"{indent}except RuntimeError:",
+        f"{indent}    raise",
+        f"{indent}except Exception:",
+        f"{indent}    pass",
         f'{indent}_rpa_shell.get_by_role("button", name="Execute  Emphasized").wait_for(state="visible", timeout=60000)',
         f'{indent}print("[RPA] Execute button ready")',
     ]
@@ -98,11 +124,9 @@ def _is_set_input_files_line(line: str) -> bool:
 
 def _automate_file_upload(source: str, upload_abs: str) -> str:
     """
-    Upload at OK click — same as when it worked ('letsgooo'):
-      1) expect_file_chooser + set_files(full path)  — real file bytes
-      2) if that fails only: win_open_file (Windows dialog navigation)
-    Never set_input_files on webgui (only fills filename text in SAP).
-  Never win_open in parallel (pastes into SAP field if dialog not focused).
+    Manual upload opens the Windows Open dialog after help → OK.
+    Keep OK click, run win_open_file, skip set_input_files / file chooser
+    (chooser can attach bytes but SAP still rejects vs a real dialog pick).
     """
     lines = source.splitlines()
     out: list[str] = []
@@ -122,29 +146,8 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             ahead = "\n".join(lines[i + 1 : i + 8])
             if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
                 indent = line[: len(line) - len(stripped)]
-                in_try = indent + "    "
-                in_with = indent + "        "
-                out.append(
-                    f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
-                    f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")'
-                )
-                out.append(f"{indent}try:")
-                out.append(f"{in_try}with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
-                out.append(in_with + stripped)
-                out.append(f"{in_with}_rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
-                out.append(f'{in_try}print("[RPA] File chooser upload OK")')
-                out.append(f"{indent}except Exception as _rpa_fc_err:")
-                out.append(
-                    f'{in_try}print("[RPA] File chooser failed, trying Windows Open dialog:", _rpa_fc_err)'
-                )
-                out.append(f"{in_try}__import__('time').sleep(1.5)")
-                out.append(
-                    f"{in_try}if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):"
-                )
-                out.append(
-                    f'{in_try}    raise RuntimeError("Upload failed: file chooser and Windows Open dialog")'
-                )
-                out.append(f'{in_try}print("[RPA] Windows Open dialog upload OK")')
+                out.append(line)
+                out.extend(_inject_win_open_after_ok(indent))
                 out.extend(_inject_post_upload_lines(indent))
                 used = True
                 i += 1
@@ -154,6 +157,10 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
                         break
                     i += 1
                 continue
+
+        if _is_set_input_files_line(line) and used:
+            i += 1
+            continue
 
         out.append(line)
         i += 1
@@ -165,9 +172,7 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
     for line in lines:
         if _is_set_input_files_line(line):
             indent = line[: len(line) - len(line.lstrip())]
-            out.append(f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE)')
-            out.append(f"{indent}with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
-            out.append(f"{indent}    _rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
+            out.extend(_inject_win_open_after_ok(indent))
             out.extend(_inject_post_upload_lines(indent))
         else:
             out.append(line)

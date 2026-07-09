@@ -122,28 +122,29 @@ def _automate_file_upload(source: str, upload_abs: str) -> str:
             ahead = "\n".join(lines[i + 1 : i + 8])
             if any(_is_set_input_files_line(ln) for ln in lines[i + 1 : i + 8]):
                 indent = line[: len(line) - len(stripped)]
-                inner = indent + "    "
+                in_try = indent + "    "
+                in_with = indent + "        "
                 out.append(
                     f'{indent}print("[RPA] Uploading:", RPA_UPLOAD_FILE, '
                     f'"size:", _rpa_os.path.getsize(RPA_UPLOAD_FILE), "bytes")'
                 )
                 out.append(f"{indent}try:")
-                out.append(f"{indent}    with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
-                out.append(inner + stripped)
-                out.append(f"{inner}_rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
-                out.append(f'{indent}    print("[RPA] File chooser upload OK")')
+                out.append(f"{in_try}with page.expect_file_chooser(timeout=60000) as _rpa_fc_info:")
+                out.append(in_with + stripped)
+                out.append(f"{in_with}_rpa_fc_info.value.set_files(RPA_UPLOAD_FILE)")
+                out.append(f'{in_try}print("[RPA] File chooser upload OK")')
                 out.append(f"{indent}except Exception as _rpa_fc_err:")
                 out.append(
-                    f'{indent}    print("[RPA] File chooser failed, trying Windows Open dialog:", _rpa_fc_err)'
+                    f'{in_try}print("[RPA] File chooser failed, trying Windows Open dialog:", _rpa_fc_err)'
                 )
-                out.append(f"{indent}    __import__('time').sleep(1.5)")
+                out.append(f"{in_try}__import__('time').sleep(1.5)")
                 out.append(
-                    f"{indent}    if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):"
+                    f"{in_try}if not win_open_file(RPA_UPLOAD_DIR, _rpa_os.path.basename(RPA_UPLOAD_FILE)):"
                 )
                 out.append(
-                    f'{indent}        raise RuntimeError("Upload failed: file chooser and Windows Open dialog")'
+                    f'{in_try}    raise RuntimeError("Upload failed: file chooser and Windows Open dialog")'
                 )
-                out.append(f'{indent}    print("[RPA] Windows Open dialog upload OK")')
+                out.append(f'{in_try}print("[RPA] Windows Open dialog upload OK")')
                 out.extend(_inject_post_upload_lines(indent))
                 used = True
                 i += 1

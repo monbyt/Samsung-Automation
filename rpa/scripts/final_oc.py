@@ -39,7 +39,14 @@ def run(playwright: Playwright) -> None:
     _search.click()
     _search.press("ControlOrMeta+A")
     _search.fill("ZSDM31520")
-    _search.press("Enter")
+    # Wait until the field actually has the value, then Go twice
+    for _ in range(20):
+        if _search.input_value().strip() == "ZSDM31520":
+            break
+        _search.fill("ZSDM31520")
+        page.wait_for_timeout(200)
+    page.get_by_role("button", name="Go").click()
+    page.get_by_role("button", name="Go").click()
     _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
     _shell.get_by_role("radio", name="Document select").wait_for(state="visible")
     _shell.get_by_role("radio", name="Document select").click()
@@ -52,19 +59,32 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    # Print (Ctrl+P) — Print preview is unreliable in this SAP screen
-    _shell.get_by_role("button", name="Print", description="Print (Ctrl+P)").click()
-    # Viewer iframe name changes every session — wait for Download in nested frames
-    _pdf_dl = (
-        page.frame_locator('iframe[name="application-Shell-startGUI-iframe"]')
-        .frame_locator('iframe[name*="itshtmlvwr"]')
-        .frame_locator("iframe")
-        .first
-        .get_by_role("button", name="Download")
-    )
-    _pdf_dl.wait_for(state="visible")
+    _print_preview = _shell.get_by_role("button", name=re.compile(r"Print\s*preview", re.I))
+    _print_preview.wait_for(state="visible")
+    _print_preview.click()
+    # PDF viewer iframes are session-specific — poll every frame for Download
+    _dl_btn = None
+    for _ in range(60):
+        for _frame in page.frames:
+            for _sel in (
+                _frame.get_by_role("button", name=re.compile(r"Download", re.I)),
+                _frame.get_by_text(re.compile(r"^Download$", re.I)),
+            ):
+                try:
+                    if _sel.count() > 0 and _sel.first.is_visible():
+                        _dl_btn = _sel.first
+                        break
+                except Exception:
+                    continue
+            if _dl_btn:
+                break
+        if _dl_btn:
+            break
+        page.wait_for_timeout(500)
+    if not _dl_btn:
+        raise RuntimeError("PDF Download button not found in any frame")
     with page.expect_download() as download1_info:
-        _pdf_dl.click()
+        _dl_btn.click(force=True)
     download1 = download1_info.value
     page.close()
 

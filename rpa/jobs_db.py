@@ -94,15 +94,19 @@ def _row_to_dict(row):
 
 
 def seed_from_config():
-    """Seed built-in RPA tools (NERP) if table is empty."""
+    """Seed built-in RPA tools and known codegen scripts if missing."""
     _ensure_tables()
-    with engine.connect() as conn:
-        if conn.execute(select(rpa_jobs.c.id).limit(1)).first():
-            return
-
     now = datetime.now()
-    with engine.begin() as conn:
-        conn.execute(rpa_jobs.insert().values(
+
+    with engine.connect() as conn:
+        existing = {
+            row.rpa_id
+            for row in conn.execute(select(rpa_jobs.c.rpa_id)).fetchall()
+        }
+
+    to_insert = []
+    if "nerp_upload_pi" not in existing:
+        to_insert.append(dict(
             rpa_id="nerp_upload_pi",
             name="NERP Upload + P/I",
             tool="nerp",
@@ -116,6 +120,25 @@ def seed_from_config():
             enabled=0,
             created_at=now,
         ))
+    if "final_oc" not in existing:
+        to_insert.append(dict(
+            rpa_id="final_oc",
+            name="Final Order Creation",
+            tool="codegen",
+            start_url=config.NERP_URL,
+            description=(
+                "ZLSDF50270 upload → create sales order → ZSDM31520 zpdf print/download."
+            ),
+            trigger_mail_job="",
+            enabled=1,
+            created_at=now,
+        ))
+
+    if not to_insert:
+        return
+    with engine.begin() as conn:
+        for row in to_insert:
+            conn.execute(rpa_jobs.insert().values(**row))
 
 
 def list_rpa_jobs():

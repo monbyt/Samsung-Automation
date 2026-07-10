@@ -29,27 +29,42 @@ def run(playwright: Playwright) -> None:
         page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Yes").click()
     download = download_info.value
     # SO number changes every run — copy from grid, paste into ZSDM31520 Sales Document
-    _so_cell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("#C111-mrss-cont-none-Row-0").get_by_text(re.compile(r"\d{10,}"))
+    _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
+    _so_cell = _shell.locator("#C111-mrss-cont-none-Row-0").get_by_text(re.compile(r"\d{10,}"))
     _so_number = _so_cell.inner_text().strip()
     _so_cell.click()
     _so_cell.click()
-    page.get_by_role("textbox", name="Search Program").click()
-    page.get_by_role("textbox", name="Search Program").fill("")
-    page.get_by_role("textbox", name="Search Program").fill("ZSDM31520")
-    page.get_by_role("button", name="Go").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("radio", name="Document select").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Document", exact=True).click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Document", exact=True).fill(_so_number)
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Execute  Emphasized").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("gridcell", name="To select a row, press the").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Create P/I").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Print P/I").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Output Device Required").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Output Device Required").fill("zpdf")
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Output Device Required").press("Enter")
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Print preview").click()
+    # Force-clear Search Program so Go opens ZSDM31520, not the previous ZLSDF50270
+    _search = page.get_by_role("textbox", name="Search Program")
+    _search.click()
+    _search.press("ControlOrMeta+A")
+    _search.fill("ZSDM31520")
+    _search.press("Enter")
+    _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
+    _shell.get_by_role("radio", name="Document select").wait_for(state="visible")
+    _shell.get_by_role("radio", name="Document select").click()
+    _shell.get_by_role("textbox", name="Sales Document", exact=True).click()
+    _shell.get_by_role("textbox", name="Sales Document", exact=True).fill(_so_number)
+    _shell.get_by_role("button", name="Execute  Emphasized").click()
+    _shell.get_by_role("gridcell", name="To select a row, press the").click()
+    _shell.get_by_role("button", name="Create P/I").click()
+    _shell.get_by_role("button", name="Print P/I").click()
+    _shell.get_by_role("textbox", name="Output Device Required").click()
+    _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
+    _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
+    # Print (Ctrl+P) — Print preview is unreliable in this SAP screen
+    _shell.get_by_role("button", name="Print", description="Print (Ctrl+P)").click()
+    # Viewer iframe name changes every session — wait for Download in nested frames
+    _pdf_dl = (
+        page.frame_locator('iframe[name="application-Shell-startGUI-iframe"]')
+        .frame_locator('iframe[name*="itshtmlvwr"]')
+        .frame_locator("iframe")
+        .first
+        .get_by_role("button", name="Download")
+    )
+    _pdf_dl.wait_for(state="visible")
     with page.expect_download() as download1_info:
-        page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("iframe[name=\"itshtmlvwrfnC102\"]").content_frame.locator("iframe").first.content_frame.get_by_role("button", name="Download").click()
+        _pdf_dl.click()
     download1 = download1_info.value
     page.close()
 

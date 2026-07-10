@@ -53,28 +53,18 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    # Print preview opens the HTML PDF viewer (Print does not)
-    _shell.get_by_role("button", name=re.compile(r"print\s*preview", re.I)).wait_for(state="visible")
-    _shell.get_by_role("button", name=re.compile(r"print\s*preview", re.I)).click()
+    # Print preview opens in a new tab — capture it
+    _shell.get_by_role("button", name="Print preview").wait_for(state="visible")
+    with page.expect_popup() as _popup_info:
+        _shell.get_by_role("button", name="Print preview").click()
+    _pdf_page = _popup_info.value
+    _pdf_page.wait_for_load_state("load")
 
-    # Download button lives in nested viewer iframes whose names change every session
-    _pdf_btn = None
-    for _ in range(60):
-        for _frame in page.frames:
-            _btn = _frame.get_by_role("button", name="Download")
-            try:
-                if _btn.count() > 0 and _btn.first.is_visible():
-                    _pdf_btn = _btn.first
-                    break
-            except Exception:
-                continue
-        if _pdf_btn is not None:
-            break
-        page.wait_for_timeout(500)
-    if _pdf_btn is None:
-        raise RuntimeError("PDF Download button not found after Print preview")
-    with page.expect_download() as download1_info:
-        _pdf_btn.click(force=True)
+    # PDF viewer: outer iframe name starts with "itshtmlvwr", inner has a random hex name
+    _pdf_frame = _pdf_page.frame_locator('iframe[name^="itshtmlvwr"]').frame_locator("iframe")
+    _pdf_frame.get_by_role("button", name="Download").wait_for(state="visible")
+    with _pdf_page.expect_download() as download1_info:
+        _pdf_frame.get_by_role("button", name="Download").click()
     download1 = download1_info.value
     page.close()
 

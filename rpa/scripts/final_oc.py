@@ -62,11 +62,10 @@ def run(playwright: Playwright) -> None:
     _pdf_page = _popup_info.value
     _pdf_page.wait_for_load_state("load")
 
-    # PDF viewer: outer iframe name starts with "itshtmlvwr", inner has a random hex name
-    _pdf_frame = _pdf_page.frame_locator('iframe[name^="itshtmlvwr"]').frame_locator("iframe")
-    _pdf_frame.locator("#save").wait_for(state="visible")
+    # Chrome PDF viewer renders #save in the popup page directly (Shadow DOM pierced by default)
+    _pdf_page.locator("#save").wait_for(state="visible")
     with _pdf_page.expect_download() as download1_info:
-        _pdf_frame.locator("#save").click()
+        _pdf_page.locator("#save").click()
     download1 = download1_info.value
     page.close()
 

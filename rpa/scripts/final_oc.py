@@ -28,24 +28,18 @@ def run(playwright: Playwright) -> None:
     with page.expect_download() as download_info:
         page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Yes").click()
     download = download_info.value
-    # SO number changes every run — copy from grid, paste into ZSDM31520 Sales Document
+    # SO number changes every run — read from grid before leaving this screen
     _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
     _so_cell = _shell.locator("#C111-mrss-cont-none-Row-0").get_by_text(re.compile(r"\d{10,}"))
     _so_number = _so_cell.inner_text().strip()
-    _so_cell.click()
-    _so_cell.click()
-    # Force-clear Search Program so Go opens ZSDM31520, not the previous ZLSDF50270
+    print(f"[RPA] Captured SO number: {_so_number}")
+
+    # Reset to home so Search Program is fresh (avoids stuck ZLSDF50270)
+    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
+    page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
     _search = page.get_by_role("textbox", name="Search Program")
     _search.click()
-    _search.press("ControlOrMeta+A")
     _search.fill("ZSDM31520")
-    # Wait until the field actually has the value, then Go twice
-    for _ in range(20):
-        if _search.input_value().strip() == "ZSDM31520":
-            break
-        _search.fill("ZSDM31520")
-        page.wait_for_timeout(200)
-    page.get_by_role("button", name="Go").click()
     page.get_by_role("button", name="Go").click()
     _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
     _shell.get_by_role("radio", name="Document select").wait_for(state="visible")
@@ -59,32 +53,28 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    _print_preview = _shell.get_by_role("button", name=re.compile(r"Print\s*preview", re.I))
-    _print_preview.wait_for(state="visible")
-    _print_preview.click()
-    # PDF viewer iframes are session-specific — poll every frame for Download
-    _dl_btn = None
+    # Print preview opens the HTML PDF viewer (Print does not)
+    _shell.get_by_role("button", name=re.compile(r"print\s*preview", re.I)).wait_for(state="visible")
+    _shell.get_by_role("button", name=re.compile(r"print\s*preview", re.I)).click()
+
+    # Download button lives in nested viewer iframes whose names change every session
+    _pdf_btn = None
     for _ in range(60):
         for _frame in page.frames:
-            for _sel in (
-                _frame.get_by_role("button", name=re.compile(r"Download", re.I)),
-                _frame.get_by_text(re.compile(r"^Download$", re.I)),
-            ):
-                try:
-                    if _sel.count() > 0 and _sel.first.is_visible():
-                        _dl_btn = _sel.first
-                        break
-                except Exception:
-                    continue
-            if _dl_btn:
-                break
-        if _dl_btn:
+            _btn = _frame.get_by_role("button", name="Download")
+            try:
+                if _btn.count() > 0 and _btn.first.is_visible():
+                    _pdf_btn = _btn.first
+                    break
+            except Exception:
+                continue
+        if _pdf_btn is not None:
             break
         page.wait_for_timeout(500)
-    if not _dl_btn:
-        raise RuntimeError("PDF Download button not found in any frame")
+    if _pdf_btn is None:
+        raise RuntimeError("PDF Download button not found after Print preview")
     with page.expect_download() as download1_info:
-        _dl_btn.click(force=True)
+        _pdf_btn.click(force=True)
     download1 = download1_info.value
     page.close()
 

@@ -53,12 +53,24 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    # Print preview opens in a new tab — capture it
+    # Wait for SAP to render the print settings screen after Enter
+    page.wait_for_timeout(2000)
+    # Re-reference shell in case iframe reloaded
+    _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
     _shell.get_by_role("button", name="Print preview").wait_for(state="visible")
-    with page.expect_popup() as _popup_info:
+
+    # Print preview may open a popup or navigate within the same page — handle both
+    _pdf_page = None
+    try:
+        with page.expect_popup(timeout=5000) as _popup_info:
+            _shell.get_by_role("button", name="Print preview").click()
+        _pdf_page = _popup_info.value
+        _pdf_page.wait_for_load_state("load")
+    except Exception:
+        # No popup — PDF viewer loaded in the same page
         _shell.get_by_role("button", name="Print preview").click()
-    _pdf_page = _popup_info.value
-    _pdf_page.wait_for_load_state("load")
+        page.wait_for_timeout(2000)
+        _pdf_page = page
 
     # PDF viewer: outer iframe name starts with "itshtmlvwr", inner has a random hex name
     _pdf_frame = _pdf_page.frame_locator('iframe[name^="itshtmlvwr"]').frame_locator("iframe")

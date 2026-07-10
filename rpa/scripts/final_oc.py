@@ -1,11 +1,20 @@
+import os
 import re
-from playwright.sync_api import Playwright, sync_playwright
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+from playwright.sync_api import sync_playwright
 
 
-def run(playwright: Playwright) -> None:
-    browser = playwright.chromium.launch(channel="chrome", headless=False)
-    context = browser.new_context()
-    page = context.new_page()
+def run(playwright) -> None:
+    context = playwright.chromium.launch_persistent_context(
+        config.NERP_PROFILE_DIR,
+        channel="chrome",
+        headless=config.NERP_HEADLESS,
+        accept_downloads=True,
+        args=["--disable-popup-blocking", "--no-first-run"],
+    )
+    page = context.pages[0] if context.pages else context.new_page()
     page.goto("https://sts.secsso.net/adfs/ls/")
     page.get_by_role("textbox", name="User Account").click()
     page.get_by_role("textbox", name="User Account").fill("m.tasoglu")
@@ -62,16 +71,14 @@ def run(playwright: Playwright) -> None:
     _pdf_page = _popup_info.value
     _pdf_page.wait_for_load_state("load")
 
-    # Chrome PDF viewer renders #save in the popup page directly (Shadow DOM pierced by default)
-    _pdf_page.locator("#save").wait_for(state="visible")
+    # cr-icon-button#save is inside Shadow DOM — use aria-label which Playwright pierces
+    _pdf_page.locator("[aria-label='Download']").wait_for(state="visible")
     with _pdf_page.expect_download() as download1_info:
-        _pdf_page.locator("#save").click()
+        _pdf_page.locator("[aria-label='Download']").click()
     download1 = download1_info.value
     page.close()
 
-    # ---------------------
     context.close()
-    browser.close()
 
 
 with sync_playwright() as playwright:

@@ -64,9 +64,9 @@ def run(playwright: Playwright) -> None:
 
     # PDF viewer: outer iframe name starts with "itshtmlvwr", inner has a random hex name
     _pdf_frame = _pdf_page.frame_locator('iframe[name^="itshtmlvwr"]').frame_locator("iframe")
-    _pdf_frame.get_by_role("button", name="Download").wait_for(state="visible")
+    _pdf_frame.locator("#save").wait_for(state="visible")
     with _pdf_page.expect_download() as download1_info:
-        _pdf_frame.get_by_role("button", name="Download").click()
+        _pdf_frame.locator("#save").click()
     download1 = download1_info.value
     page.close()
 

@@ -219,7 +219,9 @@ def prepare_script_source(
         },
     )
     # endregion
-    needs_download = bool(download_dir and "download_info.value" in source)
+    needs_download = bool(
+        download_dir and re.search(r"download\d*_info\.value", source)
+    )
     source = _inject_step_logging(source)
     if needs_upload:
         source = _automate_file_upload(source, upload_file)
@@ -242,19 +244,21 @@ def prepare_script_source(
 
 def _inject_download_save(source: str) -> str:
     """Auto-save Playwright downloads to RPA_DOWNLOAD_DIR (no path literals in source)."""
-    if "download_info.value" not in source:
+    if not re.search(r"download\d*_info\.value", source):
         return source
 
     out = []
     for line in source.splitlines():
         out.append(line)
-        if re.match(r"\s*download\s*=\s*download_info\.value\s*$", line):
+        m = re.match(r"\s*(download\d*)\s*=\s*\1_info\.value\s*$", line)
+        if m:
+            var = m.group(1)
             indent = line[: len(line) - len(line.lstrip())]
             out.append(f"{indent}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
             out.append(
-                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, download.suggested_filename)"
+                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, {var}.suggested_filename)"
             )
-            out.append(f"{indent}download.save_as(_rpa_dl)")
+            out.append(f"{indent}{var}.save_as(_rpa_dl)")
             out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')
     return "\n".join(out)
 

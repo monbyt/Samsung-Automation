@@ -53,36 +53,14 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(1000)
 
-    # SAP renders the print modal in a sub-frame — scan all frames to find Print preview
-    _pp_btn = None
-    for _ in range(20):
-        for _frame in page.frames:
-            try:
-                _btn = _frame.get_by_role("button", name="Print preview")
-                if _btn.count() > 0 and _btn.first.is_visible():
-                    _pp_btn = _btn.first
-                    break
-            except Exception:
-                continue
-        if _pp_btn:
-            break
-        page.wait_for_timeout(500)
-    if not _pp_btn:
-        raise RuntimeError("Print preview button not found in any frame")
-
-    # Print preview may open a popup or stay in same page — handle both
+    # F8 = Print preview shortcut in SAP — opens the PDF viewer popup
     _pdf_page = None
-    try:
-        with page.expect_popup(timeout=5000) as _popup_info:
-            _pp_btn.click()
-        _pdf_page = _popup_info.value
-        _pdf_page.wait_for_load_state("load")
-    except Exception:
-        _pp_btn.click()
-        page.wait_for_timeout(2000)
-        _pdf_page = page
+    with page.expect_popup() as _popup_info:
+        page.keyboard.press("F8")
+    _pdf_page = _popup_info.value
+    _pdf_page.wait_for_load_state("load")
 
     # PDF viewer: outer iframe name starts with "itshtmlvwr", inner has a random hex name
     _pdf_frame = _pdf_page.frame_locator('iframe[name^="itshtmlvwr"]').frame_locator("iframe")

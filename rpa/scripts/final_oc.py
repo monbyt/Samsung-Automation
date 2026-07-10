@@ -53,22 +53,34 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").click()
     _shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    # Wait for SAP to render the print settings screen after Enter
     page.wait_for_timeout(2000)
-    # Re-reference shell in case iframe reloaded
-    _shell = page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame
-    _shell.get_by_role("button", name="Print preview").wait_for(state="visible")
 
-    # Print preview may open a popup or navigate within the same page — handle both
+    # SAP renders the print modal in a sub-frame — scan all frames to find Print preview
+    _pp_btn = None
+    for _ in range(20):
+        for _frame in page.frames:
+            try:
+                _btn = _frame.get_by_role("button", name="Print preview")
+                if _btn.count() > 0 and _btn.first.is_visible():
+                    _pp_btn = _btn.first
+                    break
+            except Exception:
+                continue
+        if _pp_btn:
+            break
+        page.wait_for_timeout(500)
+    if not _pp_btn:
+        raise RuntimeError("Print preview button not found in any frame")
+
+    # Print preview may open a popup or stay in same page — handle both
     _pdf_page = None
     try:
         with page.expect_popup(timeout=5000) as _popup_info:
-            _shell.get_by_role("button", name="Print preview").click()
+            _pp_btn.click()
         _pdf_page = _popup_info.value
         _pdf_page.wait_for_load_state("load")
     except Exception:
-        # No popup — PDF viewer loaded in the same page
-        _shell.get_by_role("button", name="Print preview").click()
+        _pp_btn.click()
         page.wait_for_timeout(2000)
         _pdf_page = page
 

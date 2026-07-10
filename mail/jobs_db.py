@@ -72,11 +72,18 @@ def _migrate_jobs_columns():
 
 
 def resolve_download_dir(job: dict) -> str:
-    """Desktop subfolder for this job's downloads, e.g. Desktop/Product-Extract."""
+    """Return the download directory for a job.
+
+    If download_folder is a full path (e.g. C:/Users/you/Documents/Reports)
+    it is used directly; otherwise it is treated as a Desktop subfolder name.
+    """
     folder = job.get("download_folder") or job.get("folder")
     if not folder:
         jid = job.get("job_id") or job.get("id") or "downloads"
         folder = jid.replace("_", "-").title()
+    # Absolute Windows path (C:\... or C:/...) — use as-is on any OS
+    if len(folder) >= 3 and folder[1] == ":" and folder[2] in ("/", "\\"):
+        return folder
     desktop = getattr(config, "DESKTOP_DIR", os.path.dirname(config.DOWNLOAD_DIR))
     return os.path.join(desktop, folder)
 

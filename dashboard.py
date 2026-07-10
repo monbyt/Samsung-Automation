@@ -369,10 +369,10 @@ def jobs_new():
         placeholder="Order Extract - AE/GCC"></div>
     <div class="form-row"><label>SQL table name</label>
       <input type="text" name="target_table" required value="{{ form.target_table }}"></div>
-    <div class="form-row"><label>Desktop folder name</label>
+    <div class="form-row"><label>Download folder</label>
       <input type="text" name="download_folder" required value="{{ form.download_folder }}"
-        placeholder="Product-Extract"></div>
-    <p class="muted">Files save to Desktop/&lt;folder&gt; — e.g. C:/Users/you/Desktop/Product-Extract</p>
+        placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
+    <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly (e.g. C:/Users/you/Documents/Reports).</p>
     <div class="form-row"><label>Check every (hours)</label>
       <input type="number" name="interval_hours" value="{{ form.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
@@ -493,8 +493,10 @@ def jobs_edit(job_id):
       <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
     <div class="form-row"><label>SQL table</label>
       <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
-    <div class="form-row"><label>Desktop folder</label>
-      <input type="text" name="download_folder" value="{{ job.download_folder }}" required></div>
+    <div class="form-row"><label>Download folder</label>
+      <input type="text" name="download_folder" value="{{ job.download_folder }}" required
+        placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
+    <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly.</p>
     <div class="form-row"><label>Every (hours)</label>
       <input type="number" name="interval_hours" value="{{ job.interval_hours }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>

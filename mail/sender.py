@@ -1,34 +1,63 @@
 """
-Send email via Samsung Knox Mail API (multipart form: JSON `mail` + `attachments`).
+Send email via the Samsung Agent API (agent.sec.samsung.net Langflow style).
 
-Two entry points:
+POST {agent_api_url}
+Headers: Content-Type: application/json, x-api-key: {agent_api_key}
+Body:
+{
+  "input_type": "text",
+  "output_type": "text",
+  "input_value": "...",
+  "component_inputs": {
+    "<mail_component_id>": {
+      "attachments": [...],
+      "cc_target_emails": "...",
+      "content": "...",
+      "target_emails": "...",
+      "title": "..."
+    }
+  }
+}
+
+Entry points:
 - send_email(...)      — send with explicit params
 - send_for_rpa(rpa_id) — look up email job for an RPA, grab latest file, send
 """
+import base64
+import json
 import mimetypes
 import os
 from typing import Iterable, Optional
 
 import requests
 
-from mail.settings_db import get_knox_config, is_knox_configured
+from mail.settings_db import get_agent_config, is_agent_configured
 
 
 class SendError(RuntimeError):
     pass
 
 
-def _is_html(text: str) -> bool:
-    if not text:
-        return False
-    return "<" in text and ">" in text
-
-
-def _split_emails(raw: str) -> list[str]:
+def _normalize_emails(raw: str) -> str:
+    """Return comma-separated, whitespace-trimmed address list."""
     if not raw:
-        return []
+        return ""
     import re
-    return [e for e in re.split(r"[\s,;]+", raw.strip()) if e]
+    parts = [e.strip() for e in re.split(r"[\s,;]+", raw.strip()) if e.strip()]
+    return ", ".join(parts)
+
+
+def _encode_attachment(path: str) -> dict:
+    if not os.path.isfile(path):
+        raise SendError(f"Attachment not found: {path}")
+    with open(path, "rb") as f:
+        data = f.read()
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    return {
+        "filename": os.path.basename(path),
+        "contentType": ctype,
+        "content": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def send_email(
@@ -38,67 +67,45 @@ def send_email(
     files: Optional[Iterable[str]] = None,
     cc: str = "",
 ) -> dict:
-    """Send one email through the Knox Mail API. Returns response JSON.
-
-    `to` / `cc` accept comma/semicolon/space-separated addresses.
-    `files` is an iterable of local paths to attach.
-    """
-    if not is_knox_configured():
+    """Send one email through the Samsung Agent mail API. Returns response JSON."""
+    if not is_agent_configured():
         raise SendError(
-            "Knox Mail API not configured. Open Settings → Email API and fill in "
-            "bearer token, system id, sender email, sender user id."
+            "Agent API not configured. Open Settings and fill in the API URL, "
+            "API key, and mail component ID."
         )
 
-    cfg = get_knox_config()
-    to_list = _split_emails(to)
-    cc_list = _split_emails(cc)
-    if not to_list:
+    cfg = get_agent_config()
+    to_norm = _normalize_emails(to)
+    cc_norm = _normalize_emails(cc)
+    if not to_norm:
         raise SendError("At least one recipient address is required.")
 
-    mail_body = {
-        "subject": subject or "",
-        "contents": body or "",
-        "contentType": "HTML" if _is_html(body) else "TEXT",
-        "docSecuType": "PERSONAL",
-        "sender": {"emailAddress": cfg["knox_mail_sender_email"]},
-        "recipients": (
-            [{"emailAddress": e, "recipientType": "TO"} for e in to_list]
-            + [{"emailAddress": e, "recipientType": "CC"} for e in cc_list]
-        ),
+    attachments = [_encode_attachment(p) for p in (files or []) if p]
+
+    payload = {
+        "input_type": "text",
+        "output_type": "text",
+        "input_value": f"Mail to {to_norm}",
+        "component_inputs": {
+            cfg["agent_mail_component_id"]: {
+                "attachments": attachments,
+                "cc_target_emails": cc_norm,
+                "content": body or "",
+                "target_emails": to_norm,
+                "title": subject or "",
+            }
+        },
     }
 
-    import json
-    data_parts = {"mail": json.dumps(mail_body)}
-    file_parts = []
-    open_handles = []
-    try:
-        for path in (files or []):
-            if not path:
-                continue
-            if not os.path.isfile(path):
-                raise SendError(f"Attachment not found: {path}")
-            ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
-            handle = open(path, "rb")
-            open_handles.append(handle)
-            file_parts.append(("attachments", (os.path.basename(path), handle, ctype)))
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": cfg["agent_api_key"],
+    }
 
-        url = f"{cfg['knox_mail_api_base'].rstrip('/')}/mails/send"
-        headers = {
-            "Authorization": f"Bearer {cfg['knox_mail_bearer_token']}",
-            "System-ID": cfg["knox_mail_system_id"],
-        }
-        params = {"userId": cfg["knox_mail_sender_user_id"]}
-
-        resp = requests.post(
-            url, params=params, headers=headers,
-            data=data_parts, files=file_parts, timeout=60,
-        )
-    finally:
-        for h in open_handles:
-            try:
-                h.close()
-            except Exception:
-                pass
+    resp = requests.post(
+        cfg["agent_api_url"], headers=headers,
+        data=json.dumps(payload), timeout=120,
+    )
 
     if not resp.ok:
         try:
@@ -106,7 +113,7 @@ def send_email(
             msg = err.get("errorMessage") or err.get("errorCode") or resp.text
         except Exception:
             msg = resp.text
-        raise SendError(f"Knox Mail API {resp.status_code}: {msg}")
+        raise SendError(f"Agent API {resp.status_code}: {msg}")
 
     try:
         return resp.json()

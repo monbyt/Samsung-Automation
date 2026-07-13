@@ -12,7 +12,7 @@ from mail.email_jobs_db import (
     mark_send_finished, upsert_email_job,
 )
 from mail.sender import SendError, send_for_rpa
-from mail.settings_db import KNOX_KEYS, get_knox_config, is_knox_configured, set_setting
+from mail.settings_db import AGENT_KEYS, get_agent_config, is_agent_configured, set_setting
 
 email_bp = Blueprint("email_bp", __name__)
 
@@ -89,16 +89,19 @@ def _flash(msg: str, ok: bool = True) -> str:
 
 # ── Settings ──────────────────────────────────────────────────────────────
 
-_KNOX_LABELS = {
-    "knox_mail_api_base": ("Knox Mail API base URL",
-                           "Default: https://openapi.stage.samsung.net/mail/api/v2.0"),
-    "knox_mail_bearer_token": ("Bearer token",
-                               "Sent as Authorization: Bearer <token>"),
-    "knox_mail_system_id": ("System ID", "Sent as the System-ID header"),
-    "knox_mail_sender_user_id": ("Sender user ID",
-                                 "Knox ID passed as userId query param"),
-    "knox_mail_sender_email": ("Sender email address",
-                               "Appears as the From address"),
+_AGENT_LABELS = {
+    "agent_api_url": (
+        "Agent API URL",
+        "e.g. https://agent.sec.samsung.net/api/v1/run/&lt;flow-id&gt;?stream=false",
+    ),
+    "agent_api_key": (
+        "API key",
+        "Sent as the x-api-key header (starts with sk-)",
+    ),
+    "agent_mail_component_id": (
+        "Mail component ID",
+        "Langflow component id inside the flow — default: knox_portal_mail-1irUi",
+    ),
 }
 
 
@@ -108,18 +111,18 @@ def settings_page():
     ok = True
     if request.method == "POST":
         try:
-            for k in KNOX_KEYS:
+            for k in AGENT_KEYS:
                 set_setting(k, request.form.get(k, ""))
             msg = "Saved."
         except Exception as e:
             ok = False
             msg = f"Failed to save: {e}"
 
-    cfg = get_knox_config()
+    cfg = get_agent_config()
     rows = []
-    for key in KNOX_KEYS:
-        label, hint = _KNOX_LABELS[key]
-        is_secret = "token" in key
+    for key in AGENT_KEYS:
+        label, hint = _AGENT_LABELS[key]
+        is_secret = "key" in key
         input_type = "password" if is_secret else "text"
         rows.append(f"""
         <div class="form-row">
@@ -130,15 +133,15 @@ def settings_page():
         </div>
         """)
 
-    status = "Configured ✓" if is_knox_configured() else "Not configured yet."
-    status_cls = "ok" if is_knox_configured() else "err"
+    status = "Configured ✓" if is_agent_configured() else "Not configured yet."
+    status_cls = "ok" if is_agent_configured() else "err"
 
     body = f"""
     <h1>Email API settings</h1>
-    <div class="sub">Credentials for the Knox Mail API used by Email Jobs.</div>
+    <div class="sub">Credentials for the Samsung Agent API used by Email Jobs.</div>
     {_flash(msg, ok)}
     <div class="panel">
-      <h2>Knox Mail API</h2>
+      <h2>Agent (mail) API</h2>
       <p class="{status_cls}">{status}</p>
       <form method="post">
         {''.join(rows)}
@@ -207,9 +210,9 @@ def email_jobs_page():
         """
 
     warn = ""
-    if not is_knox_configured():
+    if not is_agent_configured():
         warn = _flash(
-            'Knox Mail API is not configured. <a href="/settings" style="color:inherit;text-decoration:underline">Open Settings</a> to set credentials.',
+            'Agent API is not configured. <a href="/settings" style="color:inherit;text-decoration:underline">Open Settings</a> to set credentials.',
             ok=False,
         )
 

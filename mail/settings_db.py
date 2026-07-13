@@ -1,5 +1,5 @@
 """
-App-wide key/value settings — used for Knox Mail API credentials.
+App-wide key/value settings — used for the Samsung Agent (mail) API.
 """
 from sqlalchemy import Column, MetaData, String, Table, Text, select
 
@@ -19,16 +19,14 @@ def _ensure_table():
     metadata.create_all(engine)
 
 
-KNOX_KEYS = (
-    "knox_mail_api_base",
-    "knox_mail_bearer_token",
-    "knox_mail_system_id",
-    "knox_mail_sender_user_id",
-    "knox_mail_sender_email",
+AGENT_KEYS = (
+    "agent_api_url",
+    "agent_api_key",
+    "agent_mail_component_id",
 )
 
 DEFAULTS = {
-    "knox_mail_api_base": "https://openapi.stage.samsung.net/mail/api/v2.0",
+    "agent_mail_component_id": "knox_portal_mail-1irUi",
 }
 
 
@@ -52,12 +50,11 @@ def set_setting(key: str, value: str):
             conn.execute(app_settings.insert().values(key=key, value=value))
 
 
-def get_knox_config() -> dict:
-    return {k: get_setting(k) for k in KNOX_KEYS}
+def get_agent_config() -> dict:
+    return {k: get_setting(k) for k in AGENT_KEYS}
 
 
-def is_knox_configured() -> bool:
-    cfg = get_knox_config()
-    required = ("knox_mail_bearer_token", "knox_mail_system_id",
-                "knox_mail_sender_user_id", "knox_mail_sender_email")
+def is_agent_configured() -> bool:
+    cfg = get_agent_config()
+    required = ("agent_api_url", "agent_api_key", "agent_mail_component_id")
     return all(cfg.get(k) for k in required)

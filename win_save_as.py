@@ -107,7 +107,7 @@ def _navigate_and_save(title: str, directory: Optional[str]) -> bool:
         ]
 
     lines += [
-        "$w.SendKeys('{ENTER}')",
+        "$w.SendKeys('%s')",  # Alt+S = Save button (more reliable than Enter)
         "exit 0",
     ]
     if _run_powershell("\n".join(lines)):
@@ -127,7 +127,7 @@ $w.SendKeys('^a')
 $w.SendKeys('^v')
 $w.SendKeys('{{ENTER}}')
 Start-Sleep -Milliseconds 900
-$w.SendKeys('{{ENTER}}')
+$w.SendKeys('%s')
 exit 0
 """
     return _run_powershell(fallback)

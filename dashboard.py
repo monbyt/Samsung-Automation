@@ -305,7 +305,7 @@ def jobs_new():
         "name": "",
         "mailbox": "Extract",
         "subject_pattern": "",
-        "target_table": "orders",
+        "target_table": "",
         "download_folder": "Order-Extract",
         "interval_hours": "2",
         "ingest_mode": "replace",
@@ -367,8 +367,8 @@ def jobs_new():
     <div class="form-row"><label>Subject pattern (regex)</label>
       <input type="text" name="subject_pattern" required value="{{ form.subject_pattern }}"
         placeholder="Order Extract - AE/GCC"></div>
-    <div class="form-row"><label>SQL table name</label>
-      <input type="text" name="target_table" required value="{{ form.target_table }}"></div>
+    <div class="form-row"><label>SQL table name <span class="muted">(optional — leave blank to download only)</span></label>
+      <input type="text" name="target_table" value="{{ form.target_table }}" placeholder="e.g. orders"></div>
     <div class="form-row"><label>Download folder</label>
       <input type="text" name="download_folder" required value="{{ form.download_folder }}"
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
@@ -470,7 +470,7 @@ def jobs_edit(job_id):
                 name=request.form["name"].strip(),
                 mailbox=request.form["mailbox"].strip(),
                 subject_pattern=request.form["subject_pattern"].strip(),
-                target_table=request.form["target_table"].strip().lower(),
+                target_table=request.form.get("target_table", "").strip().lower(),
                 download_folder=request.form.get("download_folder", "").strip(),
                 interval_hours=int(request.form.get("interval_hours", 2)),
                 enabled=request.form.get("enabled") == "on",
@@ -491,8 +491,8 @@ def jobs_edit(job_id):
       <input type="text" name="mailbox" value="{{ job.mailbox }}" required></div>
     <div class="form-row"><label>Subject pattern</label>
       <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
-    <div class="form-row"><label>SQL table</label>
-      <input type="text" name="target_table" value="{{ job.target_table }}" required></div>
+    <div class="form-row"><label>SQL table <span class="muted">(optional — leave blank to download only)</span></label>
+      <input type="text" name="target_table" value="{{ job.target_table }}" placeholder="e.g. orders"></div>
     <div class="form-row"><label>Download folder</label>
       <input type="text" name="download_folder" value="{{ job.download_folder }}" required
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>

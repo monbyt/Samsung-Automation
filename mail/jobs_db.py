@@ -214,9 +214,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
             "Job ID must start with a letter and use only letters, numbers, "
             "underscores (e.g. order_extract)."
         )
-    target_table = _normalize_job_id(target_table)  # table names same rules
-    if not target_table:
-        raise ValueError("SQL table name is required.")
+    target_table = _normalize_job_id(target_table) if target_table else ""
     if not download_folder:
         download_folder = job_id.replace("_", "-").title()
     _ensure_tables()

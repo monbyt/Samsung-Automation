@@ -25,6 +25,10 @@ _running = False
 
 
 def _ingest_item(item):
+    if not item.get("table"):
+        print(f"  No SQL table set for {item['filter_id']} — download only, skipping parse")
+        return
+
     from parse_to_db import file_hash, get_last_ingest_hash_for_filter, ingest_download
 
     h = file_hash(item["path"])

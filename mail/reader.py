@@ -80,15 +80,20 @@ def _subject_pattern(subject: str):
 
 
 def _download_attachment(page, mail, download_dir):
-    """Intercept the browser download directly — no Windows Save As dialog needed."""
-    print(f"  Downloading attachment → {download_dir}")
-    os.makedirs(download_dir, exist_ok=True)
-    with page.expect_download() as dl_info:
-        mail.get_by_role("button", name="Download").first.click(timeout=10_000)
-    dl = dl_info.value
-    save_path = os.path.join(download_dir, dl.suggested_filename)
-    dl.save_as(save_path)
-    print(f"  Saved: {save_path}")
+    """Click Download → Save As in mail UI → handle Windows Save As dialog."""
+    from win_save_as import dismiss_save_as_dialog, wait_for_new_file
+    print("  Clicking Download...")
+    mail.get_by_role("button", name="Download").first.click(timeout=10_000)
+    print("  Clicking Save As...")
+    mail.get_by_role("button", name="Save As", exact=True).first.click(timeout=10_000)
+    time.sleep(1.5)
+    print(f"  Handling Save As dialog → {download_dir}")
+    dismiss_save_as_dialog(timeout=60, directory=download_dir)
+    save_path = wait_for_new_file(download_dir, timeout=60)
+    try:
+        mail.get_by_role("button", name="OK").first.click(timeout=3_000)
+    except PlaywrightTimeout:
+        pass
     return save_path
 
 

@@ -77,10 +77,12 @@ def _run_powershell(ps: str) -> bool:
         ["powershell", "-NoProfile", "-Command", ps],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=30,
     )
-    if result.returncode != 0 and result.stderr:
-        print(f"  Save As helper: {result.stderr.strip()[:200]}")
+    if result.stdout.strip():
+        print(f"  [SaveAs PS] {result.stdout.strip()[:500]}")
+    if result.stderr.strip():
+        print(f"  [SaveAs ERR] {result.stderr.strip()[:300]}")
     return result.returncode == 0
 
 
@@ -158,6 +160,12 @@ exit 1
     return _run_powershell(ps)
 
 
+def _dump_all_window_titles():
+    """Print every visible window title for debugging."""
+    all_titles = _enum_visible_window_titles(lambda t: bool(t))
+    print(f"  [SaveAs DEBUG] Visible windows: {all_titles[:20]}")
+
+
 def dismiss_save_as_dialog(timeout=60, directory=None):
     """Find Save As, navigate to *directory*, then confirm save."""
     if sys.platform != "win32":
@@ -167,6 +175,7 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
     folder_msg = f" → {directory}" if directory else ""
     print(f"Looking for Save As dialog{folder_msg}...")
     deadline = time.time() + timeout
+    dumped = False
 
     while time.time() < deadline:
         titles = _find_save_as_titles()
@@ -177,10 +186,15 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
                 print("Save As confirmed.")
                 return True
             print("Save As confirm failed, retrying...")
+        else:
+            if not dumped:
+                _dump_all_window_titles()
+                dumped = True
 
         time.sleep(0.25)
 
     print("Save As dialog not found — is it still open on screen?")
+    _dump_all_window_titles()
     return False
 
 

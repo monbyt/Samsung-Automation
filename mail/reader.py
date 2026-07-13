@@ -114,6 +114,7 @@ def check_filter(page, mail_filter, processed_subjects):
 
     downloaded = []
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}'")
+    print(f"[{filter_id}] Saving to: {download_dir}")
 
     key = f"{filter_id}::{subject}"
     if key in processed_subjects:

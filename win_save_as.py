@@ -85,33 +85,75 @@ def _run_powershell(ps: str) -> bool:
 
 
 def _navigate_and_save(title: str, directory: Optional[str]) -> bool:
-    safe_title = _ps_escape(title)
-    os.makedirs(directory, exist_ok=True) if directory else None
-
     if directory:
-        # Paste path\ into filename field — Windows navigates to folder on Enter
-        folder = _ps_escape(os.path.normpath(directory) + "\\")
-        ps = f"""
-$w = New-Object -ComObject WScript.Shell
-if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
-Start-Sleep -Milliseconds 800
-Set-Clipboard -Value '{folder}'
-$w.SendKeys('^l')
-Start-Sleep -Milliseconds 400
-$w.SendKeys('^a')
-$w.SendKeys('^v')
-$w.SendKeys('{{ENTER}}')
-Start-Sleep -Milliseconds 1200
-$w.SendKeys('%s')
-exit 0
-"""
-    else:
-        ps = f"""
-$w = New-Object -ComObject WScript.Shell
-if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
-Start-Sleep -Milliseconds 800
-$w.SendKeys('%s')
-exit 0
+        os.makedirs(directory, exist_ok=True)
+
+    folder = _ps_escape(os.path.normpath(directory) + "\\") if directory else ""
+
+    # Use UI Automation to set the filename field directly — no keyboard shortcuts needed
+    ps = f"""
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
+
+$targetPath = '{folder}'
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+
+# Find Save As dialog by title
+$dialog = $null
+for ($i = 0; $i -lt 40; $i++) {{
+    $wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($w in $wins) {{
+        if ($w.Current.Name -match '(?i)save as') {{
+            $dialog = $w; break
+        }}
+    }}
+    if ($dialog) {{ break }}
+    Start-Sleep -Milliseconds 250
+}}
+if (-not $dialog) {{ Write-Host 'Save As dialog not found'; exit 1 }}
+Write-Host "Found dialog: $($dialog.Current.Name)"
+
+if ($targetPath -ne '') {{
+    # Find the filename Edit field and set its value directly
+    $editCond = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Edit
+    )
+    $edits = $dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)
+    $fnEdit = $null
+    foreach ($e in $edits) {{ $fnEdit = $e }}
+    if ($fnEdit) {{
+        $vp = $fnEdit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        $vp.SetValue($targetPath)
+        $fnEdit.SetFocus()
+        Write-Host "Set filename field to: $targetPath"
+        Start-Sleep -Milliseconds 500
+        # Press Enter to navigate to the folder
+        [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
+        Start-Sleep -Milliseconds 1500
+    }}
+}}
+
+# Click Save button via UI Automation (no keyboard needed)
+$btnCond = [System.Windows.Automation.AndCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button
+    ),
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Save'
+    )
+)
+$saveBtn = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
+if ($saveBtn) {{
+    $ip = $saveBtn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $ip.Invoke()
+    Write-Host 'Clicked Save button via UIA'
+    exit 0
+}}
+Write-Host 'Save button not found'
+exit 1
 """
     return _run_powershell(ps)
 

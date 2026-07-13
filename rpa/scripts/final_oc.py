@@ -55,13 +55,12 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
     page.wait_for_timeout(1000)
 
-    # F8 = Print preview shortcut in SAP — opens the PDF viewer popup
-    _pdf_page = None
-    with page.expect_popup() as _popup_info:
+    # F8 opens PDF from inside SAP iframe — use context.expect_page() not page.expect_popup()
+    with context.expect_page() as _pdf_page_info:
         page.keyboard.press("F8")
-    _pdf_page = _popup_info.value
+    _pdf_page = _pdf_page_info.value
     _pdf_page.wait_for_load_state("load")
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(2000)
 
     # Debug: print all open pages so we can find the real PDF page
     for i, p in enumerate(context.pages):

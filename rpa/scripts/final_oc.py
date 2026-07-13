@@ -68,12 +68,13 @@ def run(playwright: Playwright) -> None:
         for j, f in enumerate(p.frames):
             print(f"[RPA DEBUG]   frame[{j}] name={f.name!r} url={f.url}")
 
-    # PDF viewer needs a first click to focus it, then second click actually downloads
-    _pdf_page.locator("[aria-label='Download']").wait_for(state="visible")
-    _pdf_page.locator("[aria-label='Download']").click()
+    # Download button is inside an iframe in the PDF page
+    _pdf_frame = _pdf_page.frame_locator("iframe")
+    _pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
+    _pdf_frame.locator("[aria-label='Download']").click()
     page.wait_for_timeout(500)
     with _pdf_page.expect_download() as download1_info:
-        _pdf_page.locator("[aria-label='Download']").click()
+        _pdf_frame.locator("[aria-label='Download']").click()
     download1 = download1_info.value
     page.close()
 

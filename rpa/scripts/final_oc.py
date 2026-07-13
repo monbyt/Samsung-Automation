@@ -68,8 +68,10 @@ def run(playwright: Playwright) -> None:
         for j, f in enumerate(p.frames):
             print(f"[RPA DEBUG]   frame[{j}] name={f.name!r} url={f.url}")
 
-    # #save is inside Shadow DOM — use aria-label which Playwright pierces automatically
+    # PDF viewer needs a first click to focus it, then second click actually downloads
     _pdf_page.locator("[aria-label='Download']").wait_for(state="visible")
+    _pdf_page.locator("[aria-label='Download']").click()
+    page.wait_for_timeout(500)
     with _pdf_page.expect_download() as download1_info:
         _pdf_page.locator("[aria-label='Download']").click()
     download1 = download1_info.value

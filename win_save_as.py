@@ -86,51 +86,34 @@ def _run_powershell(ps: str) -> bool:
 
 def _navigate_and_save(title: str, directory: Optional[str]) -> bool:
     safe_title = _ps_escape(title)
-    lines = [
-        "$w = New-Object -ComObject WScript.Shell",
-        f"if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}",
-        "Start-Sleep -Milliseconds 800",
-    ]
+    os.makedirs(directory, exist_ok=True) if directory else None
 
     if directory:
-        folder = _ps_escape(os.path.normpath(directory))
-        os.makedirs(directory, exist_ok=True)
-        lines += [
-            f"Set-Clipboard -Value '{folder}'",
-            # Address bar (modern Windows file dialog)
-            "$w.SendKeys('%d')",
-            "Start-Sleep -Milliseconds 500",
-            "$w.SendKeys('^a')",
-            "$w.SendKeys('^v')",
-            "$w.SendKeys('{ENTER}')",
-            "Start-Sleep -Milliseconds 900",
-        ]
-
-    lines += [
-        "$w.SendKeys('%s')",  # Alt+S = Save button (more reliable than Enter)
-        "exit 0",
-    ]
-    if _run_powershell("\n".join(lines)):
-        return True
-
-    if not directory:
-        return False
-
-    # Fallback: paste folder path into the file name field (classic dialogs).
-    folder = _ps_escape(os.path.normpath(directory))
-    fallback = f"""
+        # Paste path\ into filename field — Windows navigates to folder on Enter
+        folder = _ps_escape(os.path.normpath(directory) + "\\")
+        ps = f"""
 $w = New-Object -ComObject WScript.Shell
 if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
 Start-Sleep -Milliseconds 800
 Set-Clipboard -Value '{folder}'
+$w.SendKeys('^l')
+Start-Sleep -Milliseconds 400
 $w.SendKeys('^a')
 $w.SendKeys('^v')
 $w.SendKeys('{{ENTER}}')
-Start-Sleep -Milliseconds 900
+Start-Sleep -Milliseconds 1200
 $w.SendKeys('%s')
 exit 0
 """
-    return _run_powershell(fallback)
+    else:
+        ps = f"""
+$w = New-Object -ComObject WScript.Shell
+if (-not $w.AppActivate('{safe_title}')) {{ exit 1 }}
+Start-Sleep -Milliseconds 800
+$w.SendKeys('%s')
+exit 0
+"""
+    return _run_powershell(ps)
 
 
 def dismiss_save_as_dialog(timeout=60, directory=None):

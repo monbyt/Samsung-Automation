@@ -1,33 +1,21 @@
 """
 Send email via the Samsung Agent API (agent.sec.samsung.net Langflow style).
 
-POST {agent_api_url}
-Headers: Content-Type: application/json, x-api-key: {agent_api_key}
-Body:
-{
-  "input_type": "text",
-  "output_type": "text",
-  "input_value": "...",
-  "component_inputs": {
-    "<mail_component_id>": {
-      "attachments": [...],
-      "cc_target_emails": "...",
-      "content": "...",
-      "target_emails": "...",
-      "title": "..."
-    }
-  }
-}
+Two-step:
+  1. Upload each attachment to {origin}/api/v2/files/ (multipart, field=file,
+     x-api-key header). Response JSON contains a "path" reference.
+  2. POST to {agent_api_url} with the mail component's `attachments` set to the
+     list of returned paths.
 
 Entry points:
 - send_email(...)      — send with explicit params
 - send_for_rpa(rpa_id) — look up email job for an RPA, grab latest file, send
 """
-import base64
 import json
 import mimetypes
 import os
 from typing import Iterable, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -47,17 +35,39 @@ def _normalize_emails(raw: str) -> str:
     return ", ".join(parts)
 
 
-def _encode_attachment(path: str) -> dict:
+def _files_upload_url(agent_url: str) -> str:
+    parsed = urlparse(agent_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise SendError(f"Invalid Agent API URL: {agent_url!r}")
+    return f"{parsed.scheme}://{parsed.netloc}/api/v2/files/"
+
+
+def _upload_attachment(path: str, api_key: str, upload_url: str) -> str:
+    """Upload one file to Langflow /api/v2/files/, return the server path ref."""
     if not os.path.isfile(path):
         raise SendError(f"Attachment not found: {path}")
-    with open(path, "rb") as f:
-        data = f.read()
     ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
-    return {
-        "filename": os.path.basename(path),
-        "contentType": ctype,
-        "content": base64.b64encode(data).decode("ascii"),
-    }
+    with open(path, "rb") as fh:
+        files = {"file": (os.path.basename(path), fh, ctype)}
+        resp = requests.post(
+            upload_url,
+            headers={"x-api-key": api_key},
+            files=files,
+            timeout=120,
+        )
+    if not resp.ok:
+        raise SendError(
+            f"Attachment upload failed for {os.path.basename(path)}: "
+            f"{resp.status_code} {resp.text[:300]}"
+        )
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise SendError(f"Attachment upload returned non-JSON: {e}: {resp.text[:300]}")
+    ref = data.get("path") or data.get("file_path") or data.get("filePath")
+    if not ref:
+        raise SendError(f"Attachment upload response missing 'path': {data!r}")
+    return ref
 
 
 def send_email(
@@ -80,7 +90,13 @@ def send_email(
     if not to_norm:
         raise SendError("At least one recipient address is required.")
 
-    attachments = [_encode_attachment(p) for p in (files or []) if p]
+    upload_url = _files_upload_url(cfg["agent_api_url"])
+    attachment_refs: list[str] = []
+    for p in (files or []):
+        if not p:
+            continue
+        ref = _upload_attachment(p, cfg["agent_api_key"], upload_url)
+        attachment_refs.append(ref)
 
     payload = {
         "input_type": "text",
@@ -88,7 +104,7 @@ def send_email(
         "input_value": f"Mail to {to_norm}",
         "component_inputs": {
             cfg["agent_mail_component_id"]: {
-                "attachments": attachments,
+                "attachments": attachment_refs,
                 "cc_target_emails": cc_norm,
                 "content": body or "",
                 "target_emails": to_norm,

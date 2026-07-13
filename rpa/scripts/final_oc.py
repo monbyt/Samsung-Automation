@@ -61,6 +61,13 @@ def run(playwright: Playwright) -> None:
         page.keyboard.press("F8")
     _pdf_page = _popup_info.value
     _pdf_page.wait_for_load_state("load")
+    page.wait_for_timeout(3000)
+
+    # Debug: print all open pages so we can find the real PDF page
+    for i, p in enumerate(context.pages):
+        print(f"[RPA DEBUG] page[{i}] url={p.url}")
+        for j, f in enumerate(p.frames):
+            print(f"[RPA DEBUG]   frame[{j}] name={f.name!r} url={f.url}")
 
     # #save is inside Shadow DOM — use aria-label which Playwright pierces automatically
     _pdf_page.locator("[aria-label='Download']").wait_for(state="visible")

@@ -55,20 +55,15 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
     page.wait_for_timeout(1000)
 
-    # F8 opens PDF from inside SAP iframe — use context.expect_page() not page.expect_popup()
-    with context.expect_page() as _pdf_page_info:
-        page.keyboard.press("F8")
-    _pdf_page = _pdf_page_info.value
-    _pdf_page.wait_for_load_state("load")
-    page.wait_for_timeout(2000)
+    # F8 opens PDF viewer — wait then grab the newest page in the context
+    page.keyboard.press("F8")
+    page.wait_for_timeout(4000)
+    _pdf_page = context.pages[-1]
+    print(f"[RPA] PDF page url: {_pdf_page.url}")
+    for j, f in enumerate(_pdf_page.frames):
+        print(f"[RPA]   frame[{j}] name={f.name!r} url={f.url}")
 
-    # Debug: print all open pages so we can find the real PDF page
-    for i, p in enumerate(context.pages):
-        print(f"[RPA DEBUG] page[{i}] url={p.url}")
-        for j, f in enumerate(p.frames):
-            print(f"[RPA DEBUG]   frame[{j}] name={f.name!r} url={f.url}")
-
-    # Download button is inside an iframe in the PDF page
+    # Download button is inside an iframe in the PDF page — two clicks needed (focus then download)
     _pdf_frame = _pdf_page.frame_locator("iframe")
     _pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
     _pdf_frame.locator("[aria-label='Download']").click()

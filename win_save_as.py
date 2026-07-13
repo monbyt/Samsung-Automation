@@ -90,9 +90,8 @@ def _navigate_and_save(title: str, directory: Optional[str]) -> bool:
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    folder = _ps_escape(os.path.normpath(directory) + "\\") if directory else ""
+    folder = _ps_escape(os.path.normpath(directory)) if directory else ""
 
-    # Use UI Automation to set the filename field directly — no keyboard shortcuts needed
     ps = f"""
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -116,46 +115,40 @@ for ($i = 0; $i -lt 40; $i++) {{
 if (-not $dialog) {{ Write-Host 'Save As dialog not found'; exit 1 }}
 Write-Host "Found dialog: $($dialog.Current.Name)"
 
+# Focus the dialog window first
+$hwnd = $dialog.Current.NativeWindowHandle
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class WinAPI {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+'@ -ErrorAction SilentlyContinue
+[WinAPI]::SetForegroundWindow([IntPtr]$hwnd) | Out-Null
+Start-Sleep -Milliseconds 300
+
 if ($targetPath -ne '') {{
-    # Find the filename Edit field and set its value directly
-    $editCond = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Edit
-    )
-    $edits = $dialog.FindAll([System.Windows.Automation.TreeScope]::Descendants, $editCond)
-    $fnEdit = $null
-    foreach ($e in $edits) {{ $fnEdit = $e }}
-    if ($fnEdit) {{
-        $vp = $fnEdit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-        $vp.SetValue($targetPath)
-        $fnEdit.SetFocus()
-        Write-Host "Set filename field to: $targetPath"
-        Start-Sleep -Milliseconds 500
-        # Press Enter to navigate to the folder
-        [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
-        Start-Sleep -Milliseconds 1500
-    }}
+    # Alt+D focuses the address bar in the Save As dialog
+    [System.Windows.Forms.SendKeys]::SendWait('%d')
+    Start-Sleep -Milliseconds 400
+
+    # Paste path via clipboard to avoid encoding issues with backslashes
+    [System.Windows.Forms.Clipboard]::SetText($targetPath)
+    [System.Windows.Forms.SendKeys]::SendWait('^v')
+    Start-Sleep -Milliseconds 300
+    Write-Host "Pasted path: $targetPath"
+
+    # Enter to navigate to the folder
+    [System.Windows.Forms.SendKeys]::SendWait('{{ENTER}}')
+    Start-Sleep -Milliseconds 2000
 }}
 
-# Click Save button via UI Automation (no keyboard needed)
-$btnCond = [System.Windows.Automation.AndCondition]::new(
-    [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Button
-    ),
-    [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::NameProperty, 'Save'
-    )
-)
-$saveBtn = $dialog.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
-if ($saveBtn) {{
-    $ip = $saveBtn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-    $ip.Invoke()
-    Write-Host 'Clicked Save button via UIA'
-    exit 0
-}}
-Write-Host 'Save button not found'
-exit 1
+# Alt+S to click Save
+Write-Host 'Pressing Alt+S to save...'
+[System.Windows.Forms.SendKeys]::SendWait('%s')
+Start-Sleep -Milliseconds 500
+Write-Host 'Done'
+exit 0
 """
     return _run_powershell(ps)
 

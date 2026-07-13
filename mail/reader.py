@@ -84,14 +84,35 @@ def _download_attachment(page, mail, download_dir):
     from win_save_as import dismiss_save_as_dialog, wait_for_new_file
     print("  Clicking Download...")
     mail.get_by_role("button", name="Download").first.click(timeout=10_000)
-    print("  Clicking Save As...")
-    mail.get_by_role("button", name="Save As", exact=True).first.click(timeout=10_000)
+    time.sleep(1.0)
+
+    # After clicking Download a floating menu may appear outside the iframe.
+    # Try: page level first, then inside mail iframe, then skip (dialog may already be open).
+    print("  Looking for Save As button...")
+    clicked_save_as = False
+    for locator in [
+        page.get_by_role("button", name="Save As", exact=True).first,
+        page.get_by_role("menuitem", name="Save As", exact=True).first,
+        mail.get_by_role("button", name="Save As", exact=True).first,
+        mail.get_by_role("menuitem", name="Save As", exact=True).first,
+    ]:
+        try:
+            locator.click(timeout=3_000)
+            print("  Clicked Save As.")
+            clicked_save_as = True
+            break
+        except PlaywrightTimeout:
+            continue
+
+    if not clicked_save_as:
+        print("  Save As button not found — proceeding to dialog handler anyway.")
+
     time.sleep(1.5)
     print(f"  Handling Save As dialog → {download_dir}")
     dismiss_save_as_dialog(timeout=60, directory=download_dir)
     save_path = wait_for_new_file(download_dir, timeout=60)
     try:
-        mail.get_by_role("button", name="OK").first.click(timeout=3_000)
+        page.get_by_role("button", name="OK").first.click(timeout=3_000)
     except PlaywrightTimeout:
         pass
     return save_path

@@ -55,20 +55,25 @@ def run(playwright: Playwright) -> None:
     _shell.get_by_role("textbox", name="Output Device Required").press("Enter")
     page.wait_for_timeout(1000)
 
-    # F8 opens PDF viewer — wait then grab the newest page in the context
+    # F8 loads PDF in a chrome-extension:// iframe on the same page (frame name changes each session)
     page.keyboard.press("F8")
-    page.wait_for_timeout(4000)
-    _pdf_page = context.pages[-1]
-    print(f"[RPA] PDF page url: {_pdf_page.url}")
-    for j, f in enumerate(_pdf_page.frames):
-        print(f"[RPA]   frame[{j}] name={f.name!r} url={f.url}")
+    _pdf_frame = None
+    for _ in range(20):
+        for f in page.frames:
+            if f.url.startswith("chrome-extension://"):
+                _pdf_frame = f
+                break
+        if _pdf_frame:
+            break
+        page.wait_for_timeout(500)
+    if not _pdf_frame:
+        raise RuntimeError("Chrome PDF viewer frame not found")
 
-    # Download button is inside an iframe in the PDF page — two clicks needed (focus then download)
-    _pdf_frame = _pdf_page.frame_locator("iframe")
+    # Two clicks: first focuses the viewer, second triggers the download
     _pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
     _pdf_frame.locator("[aria-label='Download']").click()
     page.wait_for_timeout(500)
-    with _pdf_page.expect_download() as download1_info:
+    with page.expect_download() as download1_info:
         _pdf_frame.locator("[aria-label='Download']").click()
     download1 = download1_info.value
     page.close()

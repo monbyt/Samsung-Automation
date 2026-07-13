@@ -120,9 +120,9 @@ $hwnd = $dialog.Current.NativeWindowHandle
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public class WinAPI {
+public class WinAPI {{
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-}
+}}
 '@ -ErrorAction SilentlyContinue
 [WinAPI]::SetForegroundWindow([IntPtr]$hwnd) | Out-Null
 Start-Sleep -Milliseconds 300

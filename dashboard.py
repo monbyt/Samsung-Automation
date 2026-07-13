@@ -29,6 +29,8 @@ from parse_to_db import ingest_download, parse_file
 from sqlalchemy import create_engine, inspect, text
 
 app = Flask(__name__)
+from mail.email_web import email_bp
+app.register_blueprint(email_bp)
 init_db()
 engine = create_engine(
     config.DB_URL,
@@ -153,6 +155,8 @@ def _layout(title, active, body, **ctx):
     <a href="/" class="{{{{ 'active' if active=='home' else '' }}}}">Overview</a>
     <a href="/jobs" class="{{{{ 'active' if active=='jobs' else '' }}}}">Mail Jobs</a>
     <a href="/rpa" class="{{{{ 'active' if active=='rpa' else '' }}}}">RPA Tools</a>
+    <a href="/email-jobs" class="{{{{ 'active' if active=='email' else '' }}}}">Email Jobs</a>
+    <a href="/settings" class="{{{{ 'active' if active=='settings' else '' }}}}">Settings</a>
     <a href="/data" class="{{{{ 'active' if active=='data' else '' }}}}">Data Explorer</a>
     <a href="/query" class="{{{{ 'active' if active=='query' else '' }}}}">SQL Query</a>
     <a href="/api/docs" class="{{{{ 'active' if active=='api' else '' }}}}">API</a>

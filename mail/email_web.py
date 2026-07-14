@@ -158,7 +158,10 @@ def _list_rpa_ids() -> list[dict]:
     try:
         from rpa.jobs_db import list_rpa_jobs
         return list_rpa_jobs()
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"[email_web] Failed to load RPA list: {e}")
+        traceback.print_exc()
         return []
 
 
@@ -236,7 +239,11 @@ def email_jobs_page():
 def _rpa_selector(selected: str = "") -> str:
     rpa_jobs = _list_rpa_ids()
     if not rpa_jobs:
-        return f'<input type="text" name="rpa_id" value="{selected}" placeholder="rpa_id" required>'
+        return (
+            '<select name="rpa_id" required disabled>'
+            '<option value="">No RPA jobs configured — create one on the RPA Tools page first</option>'
+            '</select>'
+        )
     opts = ['<option value="">-- select an RPA --</option>']
     for r in rpa_jobs:
         rid = r.get("rpa_id", "")

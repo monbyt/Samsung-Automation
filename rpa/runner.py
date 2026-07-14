@@ -289,6 +289,8 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
 
+        _maybe_send_email(rpa_id)
+
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
         if next_id:
@@ -309,6 +311,36 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         raise
 
     return result
+
+
+def _maybe_send_email(rpa_id: str) -> None:
+    """If an enabled email job is configured for this RPA, send it."""
+    try:
+        from mail.email_jobs_db import get_email_job_for_rpa, mark_send_finished
+    except Exception as e:
+        _log(f"Email module unavailable, skipping send: {e}")
+        return
+
+    job = get_email_job_for_rpa(rpa_id)
+    if not job:
+        return
+    if not job.get("enabled"):
+        _log(f"Email job for {rpa_id} is disabled, skipping.")
+        return
+
+    _log(f"Sending email for {rpa_id} to {job.get('to_emails')}")
+    try:
+        from mail.sender import send_for_rpa
+        send_for_rpa(rpa_id)
+        mark_send_finished(rpa_id, "ok")
+        _log(f"Email sent for {rpa_id}.")
+    except Exception as e:
+        err = traceback.format_exc()[-500:]
+        _log(f"Email send failed for {rpa_id}: {e}")
+        try:
+            mark_send_finished(rpa_id, "error", err)
+        except Exception:
+            pass
 
 
 def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):

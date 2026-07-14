@@ -228,35 +228,55 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
 _SKIP_EXTS = (".crdownload", ".part", ".tmp", ".partial", ".!ut", ".download")
 
 
-def wait_for_new_file(directory, timeout=90, extensions=None):
-    """Wait for a new file in *directory* (or move from a fallback folder).
+def snapshot_folder(directory):
+    """Snapshot filenames in *directory* (call BEFORE triggering the download)."""
+    os.makedirs(directory, exist_ok=True)
+    return {
+        f for f in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, f))
+    }
 
-    Accepts any extension by default. Pass `extensions` (tuple of lowercase
-    suffixes incl. leading dot) to filter. In-progress download temp files
-    are always skipped.
+
+def _is_temp(name):
+    return name.lower().endswith(_SKIP_EXTS)
+
+
+def wait_for_new_file(directory, timeout=90, extensions=None, before=None, started_ts=None):
+    """Locate a newly downloaded file.
+
+    Strategy:
+      1. Diff against `before` snapshot (or one taken now) in *directory* and
+         the fallback watch dirs (Downloads/Documents/Desktop).
+      2. If nothing diffs, fall back to "most recent file in *directory*
+         modified after `started_ts`" — handles Chrome auto-save where the
+         file may already exist by the time we start polling.
+
+    In-progress temp files (.crdownload, .part, ...) are always skipped.
     """
     os.makedirs(directory, exist_ok=True)
     watch = [directory] + [d for d in _extra_watch_dirs() if d and os.path.isdir(d)]
 
-    before = {}
+    snapshots = {}
     for folder in watch:
-        before[folder] = {
-            f for f in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, f))
-        }
+        if folder == directory and before is not None:
+            snapshots[folder] = set(before)
+        else:
+            snapshots[folder] = {
+                f for f in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, f))
+            }
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        time.sleep(0.5)
         for folder in watch:
             for name in os.listdir(folder):
-                if name in before.get(folder, set()):
+                if name in snapshots.get(folder, set()):
                     continue
                 path = os.path.join(folder, name)
                 if not os.path.isfile(path):
                     continue
                 lower = name.lower()
-                if lower.endswith(_SKIP_EXTS):
+                if _is_temp(lower):
                     continue
                 if extensions and not lower.endswith(extensions):
                     continue
@@ -267,5 +287,26 @@ def wait_for_new_file(directory, timeout=90, extensions=None):
                     shutil.move(path, dest)
                     return dest
                 return path
+        time.sleep(0.5)
+
+    # Fallback — Chrome may have auto-saved before our snapshot was taken.
+    if started_ts is not None:
+        candidates = []
+        for name in os.listdir(directory):
+            if _is_temp(name):
+                continue
+            path = os.path.join(directory, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime >= started_ts - 2:
+                candidates.append((mtime, path))
+        if candidates:
+            candidates.sort(reverse=True)
+            print(f"No diff found; falling back to newest recent file: {candidates[0][1]}")
+            return candidates[0][1]
 
     raise TimeoutError(f"No new file in {watch} within {timeout}s")

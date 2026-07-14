@@ -80,18 +80,32 @@ def _subject_pattern(subject: str):
 
 
 def _download_attachment(page, mail, download_dir):
-    """Click Download → OS-level Save As dialog → Alt+D path + Alt+S."""
-    from win_save_as import dismiss_save_as_dialog, wait_for_new_file
+    """Click Download → handle Save As dialog if it appears → locate file."""
+    from win_save_as import dismiss_save_as_dialog, snapshot_folder, wait_for_new_file
+
+    # Snapshot BEFORE we trigger the download so we can diff even if
+    # Chrome auto-saves the file instantly (no Save As dialog).
+    before = snapshot_folder(download_dir)
+    started = time.time()
+
     print("  Clicking Download...")
     mail.get_by_role("button", name="Download").first.click(timeout=10_000)
     time.sleep(1.5)
+
     print(f"  Handling Save As dialog → {download_dir}")
-    dismiss_save_as_dialog(timeout=60, directory=download_dir)
-    save_path = wait_for_new_file(download_dir, timeout=60)
+    dismiss_save_as_dialog(timeout=20, directory=download_dir)
+
+    # Dismiss the mail app's "Download complete" popup immediately — do
+    # NOT block on file detection first, otherwise the mailbox stays
+    # frozen and the next job can't run.
     try:
         mail.get_by_role("button", name="OK").first.click(timeout=3_000)
     except Exception:
         pass
+
+    save_path = wait_for_new_file(
+        download_dir, timeout=20, before=before, started_ts=started,
+    )
     return save_path
 
 

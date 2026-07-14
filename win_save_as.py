@@ -225,8 +225,16 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
     return False
 
 
-def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv", ".zip")):
-    """Wait for a new file in *directory* (or move from a fallback folder)."""
+_SKIP_EXTS = (".crdownload", ".part", ".tmp", ".partial", ".!ut", ".download")
+
+
+def wait_for_new_file(directory, timeout=90, extensions=None):
+    """Wait for a new file in *directory* (or move from a fallback folder).
+
+    Accepts any extension by default. Pass `extensions` (tuple of lowercase
+    suffixes incl. leading dot) to filter. In-progress download temp files
+    are always skipped.
+    """
     os.makedirs(directory, exist_ok=True)
     watch = [directory] + [d for d in _extra_watch_dirs() if d and os.path.isdir(d)]
 
@@ -247,7 +255,10 @@ def wait_for_new_file(directory, timeout=90, extensions=(".xlsx", ".xls", ".csv"
                 path = os.path.join(folder, name)
                 if not os.path.isfile(path):
                     continue
-                if not name.lower().endswith(extensions):
+                lower = name.lower()
+                if lower.endswith(_SKIP_EXTS):
+                    continue
+                if extensions and not lower.endswith(extensions):
                     continue
 
                 dest = os.path.join(directory, name)

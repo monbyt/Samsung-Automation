@@ -289,7 +289,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
 
-        _maybe_send_email(rpa_id)
+        _maybe_send_email(rpa_id, upload_file=used_path)
 
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
@@ -313,8 +313,13 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     return result
 
 
-def _maybe_send_email(rpa_id: str) -> None:
-    """If an enabled email job is configured for this RPA, send it."""
+def _maybe_send_email(rpa_id: str, upload_file: Optional[str] = None) -> None:
+    """If an enabled email job is configured for this RPA, send it.
+
+    `upload_file` is the specific file that just came in / was produced —
+    passed through as override_file so we don't fall back to "latest in
+    folder" (which is wrong when multiple mails were processed in one tick).
+    """
     try:
         from mail.email_jobs_db import get_email_job_for_rpa, mark_send_finished
     except Exception as e:
@@ -328,10 +333,10 @@ def _maybe_send_email(rpa_id: str) -> None:
         _log(f"Email job for {rpa_id} is disabled, skipping.")
         return
 
-    _log(f"Sending email for {rpa_id} to {job.get('to_emails')}")
+    _log(f"Sending email for {rpa_id} to {job.get('to_emails')} (file={upload_file})")
     try:
         from mail.sender import send_for_rpa
-        send_for_rpa(rpa_id)
+        send_for_rpa(rpa_id, override_file=upload_file)
         mark_send_finished(rpa_id, "ok")
         _log(f"Email sent for {rpa_id}.")
     except Exception as e:

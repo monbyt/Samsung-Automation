@@ -109,8 +109,38 @@ def _download_attachment(page, mail, download_dir):
     return save_path
 
 
-def check_filter(page, mail_filter, processed_subjects):
-    """Open mailbox, click matching email, download attachment."""
+MAX_UNREAD_PER_TICK = 4
+
+
+def _open_mailbox(mail, mailbox):
+    """Navigate to the given mailbox inside the mail iframe."""
+    mail.get_by_role("button", name=mailbox, exact=True).click()
+    time.sleep(0.8)
+
+
+def _find_first_unread_row(mail, subject: str):
+    """Return the first unread row whose subject matches, or None.
+
+    Unread rows have `<a class="not-open ...">` on their subject link.
+    """
+    subject_link = mail.locator(
+        f'a.not-open:text-is("{subject}")'
+    ).first
+    try:
+        subject_link.wait_for(state="visible", timeout=3_000)
+    except PlaywrightTimeout:
+        return None
+    return subject_link
+
+
+def check_filter(page, mail_filter, processed_subjects, on_download=None):
+    """Process up to MAX_UNREAD_PER_TICK unread mails matching subject.
+
+    For each unread row (oldest first), download → invoke on_download →
+    re-scan the mailbox for the next unread. Read (already-processed)
+    rows are skipped by the DOM query itself: `a.not-open` only matches
+    unread mails.
+    """
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
     subject = mail_filter["subject"]
@@ -124,27 +154,44 @@ def check_filter(page, mail_filter, processed_subjects):
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}'")
     print(f"[{filter_id}] Saving to: {download_dir}")
 
-    key = f"{filter_id}::{subject}"
-    if key in processed_subjects:
-        print(f"[{filter_id}] Already handled this session")
-        return downloaded
-
     mail = _mail(page)
-    mail.get_by_role("button", name=mailbox, exact=True).click()
-    mail.locator("div").filter(has_text=_subject_pattern(subject)).first.click()
+    _open_mailbox(mail, mailbox)
 
-    save_path = _download_attachment(page, mail, download_dir)
+    for i in range(MAX_UNREAD_PER_TICK):
+        row = _find_first_unread_row(mail, subject)
+        if row is None:
+            if i == 0:
+                print(f"[{filter_id}] No unread mails matching subject.")
+            else:
+                print(f"[{filter_id}] No more unread mails.")
+            break
 
-    processed_subjects.add(key)
-    downloaded.append({
-        "path": save_path,
-        "filter_id": filter_id,
-        "table": mail_filter["table"],
-        "subject": subject,
-        "ingest_mode": mail_filter.get("ingest_mode", "replace"),
-        "extract_zip": mail_filter.get("extract_zip", False),
-    })
-    print(f"[{filter_id}] Saved to {save_path}")
+        print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_UNREAD_PER_TICK}")
+        row.click()
+        time.sleep(1.0)
+
+        save_path = _download_attachment(page, mail, download_dir)
+
+        item = {
+            "path": save_path,
+            "filter_id": filter_id,
+            "table": mail_filter["table"],
+            "subject": subject,
+            "ingest_mode": mail_filter.get("ingest_mode", "replace"),
+            "extract_zip": mail_filter.get("extract_zip", False),
+        }
+        downloaded.append(item)
+        print(f"[{filter_id}] Saved to {save_path}")
+
+        if on_download:
+            try:
+                on_download(item)
+            except Exception as e:
+                print(f"[{filter_id}] on_download failed for {save_path}: {e}")
+
+        # Return to the mailbox so the next iteration sees the updated list.
+        _open_mailbox(mail, mailbox)
+
     return downloaded
 
 
@@ -180,11 +227,11 @@ def run_mail_check(filters=None, on_download=None):
                 if i > 0:
                     # Fresh mail view so a previous job's open email doesn't block the next.
                     _open_mail(page)
-                items = check_filter(page, mail_filter, processed_subjects)
-                for item in items:
-                    summary["downloads"].append(item)
-                    if on_download:
-                        on_download(item)
+                items = check_filter(
+                    page, mail_filter, processed_subjects,
+                    on_download=on_download,
+                )
+                summary["downloads"].extend(items)
             except Exception as e:
                 msg = f"{mail_filter['id']}: {e}"
                 print(f"ERROR {msg}")

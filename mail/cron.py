@@ -47,6 +47,17 @@ def _ingest_item(item):
     )
 
 
+def _per_file_pipeline(job_id: str):
+    """Return an on_download callback: ingest → RPA → send, per file."""
+    from rpa.runner import trigger_for_mail_job
+
+    def _handle(item):
+        _ingest_item(item)
+        trigger_for_mail_job(job_id, upload_file=item["path"])
+
+    return _handle
+
+
 def run_job(job_id: str) -> dict:
     """Download mail for one job and parse attachments into SQL."""
     job = get_job(job_id)
@@ -58,7 +69,7 @@ def run_job(job_id: str) -> dict:
     with _lock:
         summary = run_mail_check(
             filters=[job_as_filter(job)],
-            on_download=_ingest_item,
+            on_download=_per_file_pipeline(job_id),
         )
         summary["job_id"] = job_id
 
@@ -66,10 +77,6 @@ def run_job(job_id: str) -> dict:
             mark_job_finished(job_id, "error", "; ".join(summary["errors"]))
         else:
             mark_job_finished(job_id, "ok")
-            if summary.get("downloads"):
-                from rpa.runner import trigger_for_mail_job
-                upload = summary["downloads"][-1].get("path")
-                trigger_for_mail_job(job_id, upload_file=upload)
 
         record_monitor_run(summary, job_id=job_id)
 

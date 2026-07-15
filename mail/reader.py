@@ -113,8 +113,28 @@ MAX_UNREAD_PER_TICK = 4
 
 
 def _open_mailbox(mail, mailbox):
-    """Navigate to the given mailbox inside the mail iframe."""
-    mail.get_by_role("button", name=mailbox, exact=True).click()
+    """Navigate to the given mailbox inside the mail iframe.
+
+    After a mail is opened, W1 adds a tab to the top tab bar (class
+    contains "tab-link") whose aria-label is the mailbox name — so
+    get_by_role("button", name=mailbox) matches BOTH the sidebar link
+    and the tab, triggering a strict-mode violation. We pick the
+    sidebar entry by excluding tab-links.
+    """
+    candidates = mail.get_by_role("button", name=mailbox, exact=True)
+    count = candidates.count()
+    target = None
+    for i in range(count):
+        btn = candidates.nth(i)
+        cls = (btn.get_attribute("class") or "").lower()
+        if "tab-link" in cls:
+            continue
+        target = btn
+        break
+    if target is None:
+        # Fallback — first match (may be the tab, but better than crashing).
+        target = candidates.first
+    target.click()
     time.sleep(1.5)
 
 

@@ -115,22 +115,56 @@ MAX_UNREAD_PER_TICK = 4
 def _open_mailbox(mail, mailbox):
     """Navigate to the given mailbox inside the mail iframe."""
     mail.get_by_role("button", name=mailbox, exact=True).click()
-    time.sleep(0.8)
+    time.sleep(1.5)
+
+
+def _debug_dump_unread(mail):
+    """Log every unread subject link we currently see — helps when a
+    selector misses."""
+    try:
+        unread = mail.locator("a.not-open")
+        n = unread.count()
+        print(f"  DEBUG: found {n} 'a.not-open' element(s) on page.")
+        for idx in range(min(n, 15)):
+            try:
+                txt = unread.nth(idx).inner_text(timeout=1_000).strip()
+                print(f"    [{idx}] {txt!r}")
+            except Exception as e:
+                print(f"    [{idx}] <read failed: {e}>")
+    except Exception as e:
+        print(f"  DEBUG: could not enumerate unread: {e}")
 
 
 def _find_first_unread_row(mail, subject: str):
     """Return the first unread row whose subject matches, or None.
 
-    Unread rows have `<a class="not-open ...">` on their subject link.
+    Strategy — walk every `a.not-open` on the page and compare its
+    trimmed text to the target subject. This is more forgiving than a
+    `:text-is()` locator (which fails on stray whitespace or trailing
+    invisible chars).
     """
-    subject_link = mail.locator(
-        f'a.not-open:text-is("{subject}")'
-    ).first
     try:
-        subject_link.wait_for(state="visible", timeout=3_000)
+        unread = mail.locator("a.not-open")
+        unread.first.wait_for(state="visible", timeout=3_000)
     except PlaywrightTimeout:
         return None
-    return subject_link
+    except Exception:
+        return None
+
+    target = subject.strip()
+    n = unread.count()
+    for idx in range(n):
+        try:
+            txt = unread.nth(idx).inner_text(timeout=1_000).strip()
+        except Exception:
+            continue
+        if txt == target:
+            return unread.nth(idx)
+
+    # No exact hit — dump what we saw so we can tune the match.
+    print(f"  No unread row exactly matching {target!r}. Enumerating:")
+    _debug_dump_unread(mail)
+    return None
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):

@@ -158,18 +158,7 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
     )
     # endregion
 
-    # 1. Explicit file from the mail trigger wins. This is what keeps per-mail
-    #    file targeting correct when multiple mails are downloaded in a single
-    #    tick — without this, both RPA runs would pick "latest in folder" and
-    #    process the same (newest) file twice.
-    if upload_file and os.path.isfile(upload_file):
-        try:
-            _log(f"Using file from mail trigger: {upload_file}")
-            return _resolve_spreadsheet(upload_file)
-        except Exception:
-            pass
-
-    # 2. Configured upload_folder on the RPA edit page (file or directory)
+    # 1. Upload folder on RPA edit page wins (folder = newest file there, or full file path)
     if configured:
         if os.path.isfile(configured):
             _log(f"Using configured upload file: {configured}")
@@ -201,7 +190,14 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
             raise FileNotFoundError(f"No spreadsheet in upload folder: {configured}")
         raise FileNotFoundError(f"Upload path not found: {configured}")
 
+    # 2. File passed when mail job triggered this RPA
     if upload_file:
+        if os.path.isfile(upload_file):
+            try:
+                _log(f"Using file from mail trigger: {upload_file}")
+                return _resolve_spreadsheet(upload_file)
+            except Exception:
+                pass
         print(f"  Warning: upload path missing or unusable: {upload_file!r}")
 
     # 3. Latest from linked mail job folder
@@ -293,23 +289,17 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
 
-        # No upload_file override — let send_for_rpa scan the RPA's attach
-        # folder for the newest file (typically the PDF/output the RPA just
-        # produced). If a user wants to attach the input Excel instead, they
-        # should set the email job's attach_folder to the mail download folder.
         _maybe_send_email(rpa_id)
 
         # Chain to next step if configured
-        next_id = (job.get("next_rpa") or "").strip()
+        next_id = job.get("next_rpa") or ""
         if next_id:
-            _log(f"Chaining to next step: {next_id!r}")
+            _log(f"Chaining to next step: {next_id}")
             try:
                 run_rpa(next_id, upload_file=used_path, _visited=_visited)
             except Exception as chain_err:
                 _log(f"Chained step {next_id!r} failed: {chain_err}")
                 result["chain_error"] = str(chain_err)
-        else:
-            _log(f"No next_rpa configured for {rpa_id} — chain ends here.")
 
     except Exception as e:
         err = traceback.format_exc()[-500:]
@@ -323,13 +313,8 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     return result
 
 
-def _maybe_send_email(rpa_id: str, upload_file: Optional[str] = None) -> None:
-    """If an enabled email job is configured for this RPA, send it.
-
-    `upload_file` is the specific file that just came in / was produced —
-    passed through as override_file so we don't fall back to "latest in
-    folder" (which is wrong when multiple mails were processed in one tick).
-    """
+def _maybe_send_email(rpa_id: str) -> None:
+    """If an enabled email job is configured for this RPA, send it."""
     try:
         from mail.email_jobs_db import get_email_job_for_rpa, mark_send_finished
     except Exception as e:
@@ -343,10 +328,10 @@ def _maybe_send_email(rpa_id: str, upload_file: Optional[str] = None) -> None:
         _log(f"Email job for {rpa_id} is disabled, skipping.")
         return
 
-    _log(f"Sending email for {rpa_id} to {job.get('to_emails')} (file={upload_file})")
+    _log(f"Sending email for {rpa_id} to {job.get('to_emails')}")
     try:
         from mail.sender import send_for_rpa
-        send_for_rpa(rpa_id, override_file=upload_file)
+        send_for_rpa(rpa_id)
         mark_send_finished(rpa_id, "ok")
         _log(f"Email sent for {rpa_id}.")
     except Exception as e:
@@ -361,15 +346,7 @@ def _maybe_send_email(rpa_id: str, upload_file: Optional[str] = None) -> None:
 def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):
     """Run all enabled RPA tools linked to this mail job."""
     linked = list_for_mail_job(mail_job_id)
-    _log(
-        f"trigger_for_mail_job('{mail_job_id}'): "
-        f"{len(linked)} linked RPA(s) → {[r['rpa_id'] for r in linked]}"
-    )
     if not linked:
-        _log(
-            f"No RPAs have trigger_mail_job='{mail_job_id}'. "
-            f"Set 'Linked mail job' on the RPA edit page to fire it."
-        )
         return []
 
     results = []

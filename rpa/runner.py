@@ -292,14 +292,16 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         _maybe_send_email(rpa_id, upload_file=used_path)
 
         # Chain to next step if configured
-        next_id = job.get("next_rpa") or ""
+        next_id = (job.get("next_rpa") or "").strip()
         if next_id:
-            _log(f"Chaining to next step: {next_id}")
+            _log(f"Chaining to next step: {next_id!r}")
             try:
                 run_rpa(next_id, upload_file=used_path, _visited=_visited)
             except Exception as chain_err:
                 _log(f"Chained step {next_id!r} failed: {chain_err}")
                 result["chain_error"] = str(chain_err)
+        else:
+            _log(f"No next_rpa configured for {rpa_id} — chain ends here.")
 
     except Exception as e:
         err = traceback.format_exc()[-500:]
@@ -351,7 +353,15 @@ def _maybe_send_email(rpa_id: str, upload_file: Optional[str] = None) -> None:
 def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):
     """Run all enabled RPA tools linked to this mail job."""
     linked = list_for_mail_job(mail_job_id)
+    _log(
+        f"trigger_for_mail_job('{mail_job_id}'): "
+        f"{len(linked)} linked RPA(s) → {[r['rpa_id'] for r in linked]}"
+    )
     if not linked:
+        _log(
+            f"No RPAs have trigger_mail_job='{mail_job_id}'. "
+            f"Set 'Linked mail job' on the RPA edit page to fire it."
+        )
         return []
 
     results = []

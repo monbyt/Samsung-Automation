@@ -47,19 +47,25 @@ def _ingest_item(item):
     )
 
 
-def _per_file_pipeline(job_id: str):
-    """Return an on_download callback: ingest → RPA → send, per file."""
+def _run_rpas_for_downloads(job_id: str, downloads: list) -> list:
+    """Fire linked RPAs for each downloaded file — called AFTER the mail
+    Playwright context is closed (nested sync contexts are forbidden).
+    """
     from rpa.runner import trigger_for_mail_job
 
-    def _handle(item):
-        _ingest_item(item)
-        trigger_for_mail_job(job_id, upload_file=item["path"])
-
-    return _handle
+    errors = []
+    for item in downloads:
+        try:
+            trigger_for_mail_job(job_id, upload_file=item["path"])
+        except Exception as e:
+            msg = f"RPA trigger failed for {item.get('path')}: {e}"
+            print(msg)
+            errors.append(msg)
+    return errors
 
 
 def run_job(job_id: str) -> dict:
-    """Download mail for one job and parse attachments into SQL."""
+    """Download mail for one job and parse attachments into SQL, then run RPAs."""
     job = get_job(job_id)
     if not job:
         raise ValueError(f"Unknown job: {job_id}")
@@ -67,11 +73,17 @@ def run_job(job_id: str) -> dict:
     print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Running job: {job_id}")
 
     with _lock:
+        # Ingest happens per-file (no Playwright). RPAs are deferred to
+        # after run_mail_check returns so we're not inside its sync
+        # Playwright context when we call another sync Playwright script.
         summary = run_mail_check(
             filters=[job_as_filter(job)],
-            on_download=_per_file_pipeline(job_id),
+            on_download=_ingest_item,
         )
         summary["job_id"] = job_id
+
+        rpa_errors = _run_rpas_for_downloads(job_id, summary["downloads"])
+        summary["errors"].extend(rpa_errors)
 
         if summary["errors"]:
             mark_job_finished(job_id, "error", "; ".join(summary["errors"]))

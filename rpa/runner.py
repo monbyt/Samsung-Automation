@@ -158,7 +158,18 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
     )
     # endregion
 
-    # 1. Upload folder on RPA edit page wins (folder = newest file there, or full file path)
+    # 1. Explicit file from the mail trigger wins. This is what keeps per-mail
+    #    file targeting correct when multiple mails are downloaded in a single
+    #    tick — without this, both RPA runs would pick "latest in folder" and
+    #    process the same (newest) file twice.
+    if upload_file and os.path.isfile(upload_file):
+        try:
+            _log(f"Using file from mail trigger: {upload_file}")
+            return _resolve_spreadsheet(upload_file)
+        except Exception:
+            pass
+
+    # 2. Configured upload_folder on the RPA edit page (file or directory)
     if configured:
         if os.path.isfile(configured):
             _log(f"Using configured upload file: {configured}")
@@ -190,14 +201,7 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
             raise FileNotFoundError(f"No spreadsheet in upload folder: {configured}")
         raise FileNotFoundError(f"Upload path not found: {configured}")
 
-    # 2. File passed when mail job triggered this RPA
     if upload_file:
-        if os.path.isfile(upload_file):
-            try:
-                _log(f"Using file from mail trigger: {upload_file}")
-                return _resolve_spreadsheet(upload_file)
-            except Exception:
-                pass
         print(f"  Warning: upload path missing or unusable: {upload_file!r}")
 
     # 3. Latest from linked mail job folder
@@ -289,7 +293,11 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
 
-        _maybe_send_email(rpa_id, upload_file=used_path)
+        # No upload_file override — let send_for_rpa scan the RPA's attach
+        # folder for the newest file (typically the PDF/output the RPA just
+        # produced). If a user wants to attach the input Excel instead, they
+        # should set the email job's attach_folder to the mail download folder.
+        _maybe_send_email(rpa_id)
 
         # Chain to next step if configured
         next_id = (job.get("next_rpa") or "").strip()

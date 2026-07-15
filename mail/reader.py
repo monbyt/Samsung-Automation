@@ -226,6 +226,20 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
 
         save_path = _download_attachment(page, mail, download_dir)
 
+        # Guarantee a unique filename per download in this tick so multiple
+        # mails with the same subject (and thus the same attachment name)
+        # don't collapse to one file on disk.
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            base, ext = os.path.splitext(os.path.basename(save_path))
+            unique_name = f"{base}_{stamp}_{i}{ext}"
+            unique_path = os.path.join(os.path.dirname(save_path), unique_name)
+            os.rename(save_path, unique_path)
+            save_path = unique_path
+            print(f"[{filter_id}] Renamed to {unique_name}")
+        except OSError as e:
+            print(f"[{filter_id}] Could not rename download uniquely: {e}")
+
         item = {
             "path": save_path,
             "filter_id": filter_id,

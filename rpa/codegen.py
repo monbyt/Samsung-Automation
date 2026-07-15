@@ -476,9 +476,16 @@ def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
         parent = os.path.dirname(dest)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        # Force a clean overwrite — a stale/partial file left by a previous
+        # failed run can otherwise linger if shutil.copy2 hits an edge case.
+        if os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except OSError as e:
+                _log(f"Warning: could not remove stale staged file {dest}: {e}")
         shutil.copy2(upload_path, dest)
         staged.append(dest)
-        _log(f"Staged copy → {dest}")
+        _log(f"Staged copy → {dest} ({os.path.getsize(dest)} bytes)")
     return staged
 
 

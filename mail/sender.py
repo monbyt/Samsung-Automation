@@ -14,7 +14,7 @@ Entry points:
 import json
 import mimetypes
 import os
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Set
 from urllib.parse import urlparse
 
 import requests
@@ -98,20 +98,33 @@ def send_email(
         ref = _upload_attachment(p, cfg["agent_api_key"], upload_url)
         attachment_refs.append(ref)
 
+    mail_inputs = {
+        "attachments": attachment_refs,
+        "content": body or "",
+        "target_emails": to_norm,
+        "title": subject or "",
+    }
+    # Always send the CC field — Agent mail component expects it present.
+    mail_inputs["cc_target_emails"] = cc_norm
+
     payload = {
         "input_type": "text",
         "output_type": "text",
-        "input_value": f"Mail to {to_norm}",
+        "input_value": (
+            f"Mail to {to_norm}"
+            + (f" (cc {cc_norm})" if cc_norm else "")
+        ),
         "component_inputs": {
-            cfg["agent_mail_component_id"]: {
-                "attachments": attachment_refs,
-                "cc_target_emails": cc_norm,
-                "content": body or "",
-                "target_emails": to_norm,
-                "title": subject or "",
-            }
+            cfg["agent_mail_component_id"]: mail_inputs,
         },
     }
+
+    print(
+        f"[mail] Sending to={to_norm!r}"
+        + (f" cc={cc_norm!r}" if cc_norm else " cc=(none)")
+        + f" subject={subject!r} attachments={len(attachment_refs)}",
+        flush=True,
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -155,10 +168,72 @@ def _latest_files_in(directory: str, count: int) -> list[str]:
     return candidates[:max(1, count)]
 
 
-def send_for_rpa(rpa_id: str, override_file: Optional[str] = None) -> dict:
+def _protected_paths() -> Set[str]:
+    """Paths that must never be deleted during post-send cleanup."""
+    protected: Set[str] = set()
+    try:
+        import config
+        if getattr(config, "NERP_UPLOAD_FILE", None):
+            protected.add(os.path.abspath(config.NERP_UPLOAD_FILE))
+    except Exception:
+        pass
+    return protected
+
+
+def cleanup_folder_files(
+    directory: str,
+    *,
+    also: Optional[Iterable[str]] = None,
+) -> list[str]:
+    """Delete attachable files from a folder (and any explicit paths).
+
+    Returns the list of deleted file paths. Skips protected staging files
+    (e.g. data/Book1.xlsx) and anything outside the given directory unless
+    listed in ``also``.
+    """
+    deleted: list[str] = []
+    protected = _protected_paths()
+    seen: set[str] = set()
+
+    def _safe_remove(path: str) -> None:
+        if not path:
+            return
+        abs_path = os.path.abspath(path)
+        if abs_path in seen or abs_path in protected:
+            return
+        if not os.path.isfile(abs_path):
+            return
+        try:
+            os.remove(abs_path)
+            deleted.append(abs_path)
+            seen.add(abs_path)
+            print(f"[mail] Cleaned up: {abs_path}", flush=True)
+        except OSError as e:
+            print(f"[mail] Cleanup skip {abs_path}: {e}", flush=True)
+
+    for p in also or []:
+        _safe_remove(p)
+
+    if directory and os.path.isdir(directory):
+        for name in os.listdir(directory):
+            if not name.lower().endswith(_ATTACH_EXTS):
+                continue
+            _safe_remove(os.path.join(directory, name))
+
+    return deleted
+
+
+def send_for_rpa(
+    rpa_id: str,
+    override_file: Optional[str] = None,
+    *,
+    cleanup: bool = True,
+) -> dict:
     """Look up the email job for an RPA and send its latest downloaded file(s).
 
     override_file — if provided, use this exact path instead of scanning folders.
+    cleanup — after a successful send, delete files from the attach/download
+              subfolder so processed attachments do not pile up.
     """
     from mail.email_jobs_db import get_email_job_for_rpa
 
@@ -169,21 +244,31 @@ def send_for_rpa(rpa_id: str, override_file: Optional[str] = None) -> dict:
         raise SendError(f"Email job for RPA '{rpa_id}' is disabled.")
 
     files: list[str] = []
+    watch_dir = ""
     if override_file and os.path.isfile(override_file):
         files.append(override_file)
+        watch_dir = os.path.dirname(os.path.abspath(override_file))
     else:
         watch_dir = job.get("attach_folder") or _rpa_download_folder(rpa_id)
         files = _latest_files_in(watch_dir, job.get("attach_count") or 1)
         if not files:
             raise SendError(f"No attachable files found in {watch_dir!r} for RPA '{rpa_id}'.")
 
-    return send_email(
+    result = send_email(
         to=job["to_emails"],
         subject=job.get("subject", "") or "",
         body=job.get("body", "") or "",
         files=files,
         cc=job.get("cc_emails", "") or "",
     )
+
+    if cleanup:
+        deleted = cleanup_folder_files(watch_dir, also=files)
+        result = dict(result) if isinstance(result, dict) else {"response": result}
+        result["cleaned_files"] = [os.path.basename(p) for p in deleted]
+        result["cleaned_dir"] = watch_dir
+
+    return result
 
 
 def _rpa_download_folder(rpa_id: str) -> str:

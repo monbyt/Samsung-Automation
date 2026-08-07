@@ -33,6 +33,26 @@ email_jobs = Table(
 def _ensure_table():
     init_db()
     metadata.create_all(engine)
+    _migrate_email_jobs_columns()
+
+
+def _migrate_email_jobs_columns():
+    """Add columns that create_all won't add on existing SQLite DBs."""
+    from sqlalchemy import text
+    import config
+
+    if not config.DB_URL.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(email_jobs)"))
+        }
+        if not cols:
+            return
+        if "cc_emails" not in cols:
+            conn.execute(text("ALTER TABLE email_jobs ADD COLUMN cc_emails TEXT"))
+
 
 
 def _row_to_dict(row) -> dict:

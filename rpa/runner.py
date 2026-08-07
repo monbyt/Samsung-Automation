@@ -232,6 +232,10 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
 
 def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[set] = None) -> dict:
     """Run one RPA tool by id. Chains to next_rpa on success."""
+    from pipeline_progress import (
+        begin_step, current_run_id, finish_run, finish_step, start_run,
+    )
+
     if _visited is None:
         _visited = set()
     if rpa_id in _visited:
@@ -243,6 +247,20 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     if not job:
         raise ValueError(f"Unknown RPA job: {rpa_id}")
 
+    owns_run = current_run_id() is None
+    if owns_run:
+        start_run(
+            "rpa",
+            rpa_id,
+            f"RPA · {job.get('name') or rpa_id}",
+            [
+                ("prepare", "Prepare upload file"),
+                ("rpa", f"Run {job.get('name') or rpa_id}"),
+                ("email", "Send email"),
+                ("cleanup", "Clean up files"),
+            ],
+        )
+
     print(f"\n[RPA] Running {job['name']} ({rpa_id})...")
     _log(f"Tool type: {job['tool']}")
     if job.get("trigger_mail_job"):
@@ -253,11 +271,15 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     used_path = None
 
     try:
+        begin_step("prepare" if owns_run else "rpa", f"Preparing {rpa_id}")
         if job["tool"] == "nerp":
             from nerp.rpa import run as nerp_run
 
             path = _prepare_upload_file(upload_file, job)
             used_path = path
+            if owns_run:
+                finish_step("prepare", "ok", os.path.basename(path))
+                begin_step("rpa", f"Running {job['name']}")
             os.makedirs(os.path.dirname(config.NERP_UPLOAD_FILE), exist_ok=True)
             if os.path.abspath(path) != os.path.abspath(config.NERP_UPLOAD_FILE):
                 shutil.copy2(path, config.NERP_UPLOAD_FILE)
@@ -273,9 +295,15 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
                 path = _prepare_upload_file(upload_file, job)
                 used_path = path
                 _log(f"Resolved upload file: {path}")
+                if owns_run:
+                    finish_step("prepare", "ok", os.path.basename(path))
             except FileNotFoundError as e:
                 path = None
                 _log(f"No upload file: {e}")
+                if owns_run:
+                    finish_step("prepare", "ok", "No upload file (script may not need one)")
+            if owns_run:
+                begin_step("rpa", f"Running {job['name']}")
             run_recorded_script(
                 rpa_id,
                 upload_file=path,
@@ -288,6 +316,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         mark_rpa_finished(rpa_id, "ok")
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
+        finish_step("rpa", "ok", f"{job['name']} finished")
 
         _maybe_send_email(rpa_id)
 
@@ -301,6 +330,10 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
                 _log(f"Chained step {next_id!r} failed: {chain_err}")
                 result["chain_error"] = str(chain_err)
 
+        if owns_run:
+            finish_run("ok" if not result.get("chain_error") else "error",
+                       result.get("chain_error") or "")
+
     except Exception as e:
         err = traceback.format_exc()[-500:]
         result["status"] = "error"
@@ -308,6 +341,9 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         mark_rpa_finished(rpa_id, "error", err)
         record_rpa_run(rpa_id, "error", message=err, upload_file=used_path or upload_file)
         print(f"[RPA] {job['name']} failed: {e}")
+        finish_step("rpa", "error", str(e))
+        if owns_run:
+            finish_run("error", str(e))
         raise
 
     return result
@@ -315,28 +351,48 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
 
 def _maybe_send_email(rpa_id: str) -> None:
     """If an enabled email job is configured for this RPA, send it."""
+    from pipeline_progress import begin_step, finish_step, skip_step
+
     try:
         from mail.email_jobs_db import get_email_job_for_rpa, mark_send_finished
     except Exception as e:
         _log(f"Email module unavailable, skipping send: {e}")
+        skip_step("email", f"Unavailable: {e}")
+        skip_step("cleanup", "No email send")
         return
 
     job = get_email_job_for_rpa(rpa_id)
     if not job:
+        skip_step("email", "No email job linked")
+        skip_step("cleanup", "No email send")
         return
     if not job.get("enabled"):
         _log(f"Email job for {rpa_id} is disabled, skipping.")
+        skip_step("email", "Email job disabled")
+        skip_step("cleanup", "No email send")
         return
 
-    _log(f"Sending email for {rpa_id} to {job.get('to_emails')}")
+    _log(f"Sending email for {rpa_id} to {job.get('to_emails')}"
+         + (f" cc={job.get('cc_emails')}" if job.get("cc_emails") else ""))
+    cc_note = f" · cc {job.get('cc_emails')}" if job.get("cc_emails") else ""
+    begin_step("email", f"To {job.get('to_emails')}{cc_note}")
     try:
         from mail.sender import send_for_rpa
-        send_for_rpa(rpa_id)
+        result = send_for_rpa(rpa_id)  # also cleans the attach folder
         mark_send_finished(rpa_id, "ok")
+        cleaned = (result or {}).get("cleaned_files") or []
+        finish_step("email", "ok", f"Sent to {job.get('to_emails')}{cc_note}")
+        begin_step("cleanup", result.get("cleaned_dir") or "")
+        finish_step(
+            "cleanup", "ok",
+            f"Removed {len(cleaned)} file(s)" if cleaned else "Folder already empty",
+        )
         _log(f"Email sent for {rpa_id}.")
     except Exception as e:
         err = traceback.format_exc()[-500:]
         _log(f"Email send failed for {rpa_id}: {e}")
+        finish_step("email", "error", str(e))
+        skip_step("cleanup", "Skipped — send failed")
         try:
             mark_send_finished(rpa_id, "error", err)
         except Exception:

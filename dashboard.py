@@ -85,6 +85,61 @@ input[type=text], input[type=number] { cursor: text; width: 100%; max-width: 400
 .flash { padding: 12px; border-radius: 8px; margin-bottom: 16px; }
 .flash.ok { background: #1a3d2a; color: #4ec98a; }
 .flash.err { background: #3d1a1a; color: #ef6a6a; }
+/* Live pipeline stepper */
+.pipeline-panel { position: relative; overflow: hidden; }
+.pipeline-panel::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 0% 0%, rgba(78,201,138,.08), transparent 55%),
+              radial-gradient(ellipse at 100% 0%, rgba(138,180,255,.07), transparent 50%);
+}
+.pipeline-head { display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; margin-bottom: 18px; position: relative; }
+.pipeline-label { font-size: 15px; font-weight: 600; }
+.pipeline-meta { color: #8a94a6; font-size: 12px; margin-top: 4px; }
+.pipeline-badge { font-size: 11px; padding: 4px 10px; border-radius: 999px;
+  text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.pipeline-badge.running { background: rgba(138,180,255,.15); color: #8ab4ff;
+  box-shadow: 0 0 0 1px rgba(138,180,255,.35); animation: pulse-badge 1.6s ease-in-out infinite; }
+.pipeline-badge.ok { background: rgba(78,201,138,.15); color: #4ec98a; }
+.pipeline-badge.error { background: rgba(239,106,106,.15); color: #ef6a6a; }
+@keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+.stepper { list-style: none; margin: 0; padding: 0; position: relative; }
+.stepper::before {
+  content: ""; position: absolute; left: 15px; top: 12px; bottom: 12px; width: 2px;
+  background: linear-gradient(180deg, #2d6b42, #3a4458 40%, #232a38);
+}
+.step { display: grid; grid-template-columns: 32px 1fr; gap: 12px; padding: 10px 0;
+  position: relative; }
+.step-dot {
+  width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 700; z-index: 1;
+  background: #161b26; border: 2px solid #3a4458; color: #8a94a6;
+  transition: border-color .25s, background .25s, color .25s, box-shadow .25s;
+}
+.step.pending .step-dot { border-color: #3a4458; color: #5a6578; }
+.step.running .step-dot {
+  border-color: #8ab4ff; color: #8ab4ff; background: #132038;
+  box-shadow: 0 0 0 4px rgba(138,180,255,.12);
+  animation: spin-ring 1.2s linear infinite;
+}
+.step.ok .step-dot { border-color: #4ec98a; color: #4ec98a; background: #12241c; }
+.step.error .step-dot { border-color: #ef6a6a; color: #ef6a6a; background: #2a1414; }
+.step.skipped .step-dot { border-color: #3a4458; color: #5a6578; }
+@keyframes spin-ring {
+  0% { box-shadow: 0 0 0 0 rgba(138,180,255,.35); }
+  70% { box-shadow: 0 0 0 8px rgba(138,180,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(138,180,255,0); }
+}
+.step-body { min-width: 0; padding-top: 4px; }
+.step-title { font-size: 14px; font-weight: 500; }
+.step.pending .step-title { color: #5a6578; }
+.step.running .step-title { color: #e6e9ef; }
+.step.ok .step-title { color: #4ec98a; }
+.step.error .step-title { color: #ef6a6a; }
+.step.skipped .step-title { color: #5a6578; text-decoration: line-through; }
+.step-msg { font-size: 12px; color: #8a94a6; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipeline-empty { color: #8a94a6; font-size: 13px; padding: 8px 0; }
 """
 
 
@@ -145,10 +200,12 @@ def _safe_select(sql):
 
 
 def _layout(title, active, body, **ctx):
+    refresh = ctx.pop("meta_refresh", 60)
+    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     template = f"""
 <!doctype html><html><head><meta charset="utf-8">
 <title>{{{{ title }}}} — Samsung Mail DB</title>
-<meta http-equiv="refresh" content="60">
+{meta}
 <style>{BASE_STYLE}</style></head><body>
 <div class="wrap">
   <nav>
@@ -165,6 +222,74 @@ def _layout(title, active, body, **ctx):
 </div></body></html>
 """
     return render_template_string(template, title=title, active=active, **ctx)
+
+
+_PIPELINE_PANEL = """
+  <div class="panel pipeline-panel" id="pipeline-panel">
+    <div class="pipeline-head">
+      <div>
+        <h2 style="margin:0 0 6px">Live execution</h2>
+        <div class="pipeline-label" id="pipeline-label">Waiting for a run…</div>
+        <div class="pipeline-meta" id="pipeline-meta"></div>
+      </div>
+      <span class="pipeline-badge" id="pipeline-badge" style="display:none"></span>
+    </div>
+    <ul class="stepper" id="pipeline-steps">
+      <li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>
+    </ul>
+  </div>
+  <script>
+  (function () {
+    const icons = { pending: "·", running: "›", ok: "✓", error: "!", skipped: "–" };
+    function render(run) {
+      const label = document.getElementById("pipeline-label");
+      const meta = document.getElementById("pipeline-meta");
+      const badge = document.getElementById("pipeline-badge");
+      const list = document.getElementById("pipeline-steps");
+      if (!run) {
+        label.textContent = "Waiting for a run…";
+        meta.textContent = "";
+        badge.style.display = "none";
+        list.innerHTML = '<li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>';
+        return;
+      }
+      label.textContent = run.label || run.kind;
+      const parts = [];
+      if (run.started_at) parts.push("Started " + run.started_at);
+      if (run.finished_at) parts.push("Finished " + run.finished_at);
+      if (run.message) parts.push(run.message);
+      meta.textContent = parts.join(" · ");
+      badge.style.display = "";
+      badge.className = "pipeline-badge " + (run.status || "");
+      badge.textContent = run.status || "";
+      list.innerHTML = (run.steps || []).map(function (s) {
+        const msg = s.message ? '<div class="step-msg">' + escapeHtml(s.message) + '</div>' : "";
+        return '<li class="step ' + s.status + '">'
+          + '<div class="step-dot">' + (icons[s.status] || "·") + '</div>'
+          + '<div class="step-body"><div class="step-title">' + escapeHtml(s.title) + '</div>'
+          + msg + '</div></li>';
+      }).join("");
+    }
+    function escapeHtml(t) {
+      return String(t).replace(/[&<>"']/g, function (c) {
+        return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c];
+      });
+    }
+    async function tick() {
+      try {
+        const r = await fetch("/api/pipeline/active");
+        const data = await r.json();
+        render(data.run || null);
+        const running = data.run && data.run.status === "running";
+        setTimeout(tick, running ? 1500 : 5000);
+      } catch (e) {
+        setTimeout(tick, 5000);
+      }
+    }
+    tick();
+  })();
+  </script>
+"""
 
 
 @app.route("/")
@@ -199,7 +324,8 @@ def index():
 
     body = """
   <h1>Overview</h1>
-  <div class="sub">LAN: http://{{ lan_ip }}:{{ port }} · Refreshes every 60s · {{ now }}</div>
+  <div class="sub">LAN: http://{{ lan_ip }}:{{ port }} · Live progress updates every few seconds · {{ now }}</div>
+""" + _PIPELINE_PANEL + """
   <div class="cards">
     <div class="card"><div class="label">Total rows</div><div class="value">{{ total_rows }}</div></div>
     <div class="card"><div class="label">Files ingested</div><div class="value">{{ total_files }}</div></div>
@@ -226,6 +352,7 @@ def index():
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         total_rows=total_rows, total_files=total_files, last_run=last_run,
         job_count=len(jobs), table_stats=table_stats, log_rows=log_rows,
+        meta_refresh=0,
     )
 
 
@@ -248,6 +375,7 @@ def jobs_list():
   <div class="sub">Cron jobs run automatically when due — nothing runs on startup. Scheduler checks every {{ tick }}s.</div>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+""" + _PIPELINE_PANEL + """
   <div style="margin-bottom:16px">
     <a href="/jobs/new"><button>+ New mail job</button></a>
     <a href="/jobs/parse"><button>Manual parse to SQL</button></a>
@@ -280,7 +408,8 @@ def jobs_list():
       3. Finds the newest email matching your <b>subject</b> regex<br>
       4. Downloads the Excel attachment<br>
       5. Decrypts via Excel COM → loads into your <b>SQL table</b><br>
-      Use <b>Run now</b> to test without waiting for the schedule.
+      6. Linked RPA runs, email sends, then the attach folder is cleaned up<br>
+      Use <b>Run now</b> to test without waiting for the schedule — watch Live execution above.
     </p>
   </div>
   <div class="panel"><h2>Recording a new mail type</h2>
@@ -298,7 +427,10 @@ def jobs_list():
     </tr>{% endfor %}</table>{% else %}<p class="muted">No runs yet.</p>{% endif %}
   </div></div>
 """
-    return _layout("Mail Jobs", "jobs", body, jobs=jobs, runs=runs, rpa_map=rpa_map, tick=config.SCHEDULER_TICK_SECONDS, msg=msg, err=err)
+    return _layout(
+        "Mail Jobs", "jobs", body, jobs=jobs, runs=runs, rpa_map=rpa_map,
+        tick=config.SCHEDULER_TICK_SECONDS, msg=msg, err=err, meta_refresh=0,
+    )
 
 
 @app.route("/jobs/new", methods=["GET", "POST"])
@@ -534,7 +666,7 @@ def jobs_run(job_id):
     if not get_job(job_id):
         return redirect(url_for("jobs_list", err="Job not found"))
     threading.Thread(target=_bg, daemon=True, name=f"run-{job_id}").start()
-    return redirect(url_for("jobs_list", msg=f"Started '{job_id}' — check back in a minute"))
+    return redirect(url_for("jobs_list", msg=f"Started '{job_id}' — watch Live execution above"))
 
 
 @app.route("/jobs/<job_id>/toggle", methods=["POST"])
@@ -821,9 +953,10 @@ def rpa_list():
     body = """
   <h1>RPA Tools</h1>
   <div class="sub">Record Playwright codegen scripts with a start URL, or use the built-in NERP flow.</div>
-  <p><a href="/rpa/new"><button type="button">+ New recorded script</button></a></p>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+""" + _PIPELINE_PANEL + """
+  <p><a href="/rpa/new"><button type="button">+ New recorded script</button></a></p>
   <div class="panel"><h2>Registered tools</h2><div class="scroll">
     {% if jobs %}<table>
     <tr><th>Name</th><th>Type</th><th>Start URL</th><th>Trigger</th><th>Next</th><th>Script</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
@@ -862,7 +995,8 @@ def rpa_list():
       <b>Upload:</b> after OK, automation drives the Windows Open dialog (folder + file),
       then clicks SAP OK again if needed. Same steps as manual pick — not Playwright file chooser.<br>
       <b>Save:</b> Playwright downloads are auto-saved to the download folder. For native Save As dialogs use
-      <code>win_save_as(RPA_DOWNLOAD_DIR)</code> (same helper as W1 mail).
+      <code>win_save_as(RPA_DOWNLOAD_DIR)</code> (same helper as W1 mail).<br>
+      After a successful email send, attachable files in that folder are deleted automatically.
     </p>
   </div>
   <div class="panel"><h2>Recording your own script</h2>
@@ -884,7 +1018,9 @@ def rpa_list():
     </tr>{% endfor %}</table>{% else %}<p class="muted">No RPA runs yet.</p>{% endif %}
   </div></div>
 """
-    return _layout("RPA Tools", "rpa", body, jobs=jobs, runs=runs, msg=msg, err=err)
+    return _layout(
+        "RPA Tools", "rpa", body, jobs=jobs, runs=runs, msg=msg, err=err, meta_refresh=0,
+    )
 
 
 @app.route("/rpa/new", methods=["GET", "POST"])
@@ -1108,7 +1244,22 @@ def rpa_run(rpa_id):
             print(f"RPA run failed: {e}")
 
     threading.Thread(target=_bg, daemon=True, name=f"rpa-{rpa_id}").start()
-    return redirect(url_for("rpa_list", msg=f"Started '{rpa_id}' — check back in a few minutes"))
+    return redirect(url_for("rpa_list", msg=f"Started '{rpa_id}' — watch Live execution above"))
+
+
+@app.route("/api/pipeline/active")
+def api_pipeline_active():
+    from pipeline_progress import get_active_run
+    return jsonify({"run": get_active_run()})
+
+
+@app.route("/api/pipeline/<run_id>")
+def api_pipeline_run(run_id):
+    from pipeline_progress import get_run
+    run = get_run(run_id)
+    if not run:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"run": run})
 
 
 @app.route("/rpa/<rpa_id>/toggle", methods=["POST"])

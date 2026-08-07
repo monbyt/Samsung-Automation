@@ -184,7 +184,10 @@ def email_jobs_page():
             rows_html.append(f"""
             <tr>
               <td><b>{j['rpa_id']}</b> {enabled_pill}</td>
-              <td>{j['to_emails']}<br><span class="muted">cc: {j['cc_emails'] or '—'}</span></td>
+              <td>
+                <div><span class="muted">To</span> {j['to_emails']}</div>
+                <div><span class="muted">Cc</span> {j['cc_emails'] or '—'}</div>
+              </td>
               <td>{j['subject'] or '—'}</td>
               <td>{j['attach_folder'] or '<span class="muted">auto (RPA folder)</span>'}<br>
                   <span class="muted">latest {j['attach_count']}</span></td>
@@ -266,11 +269,13 @@ def _render_form(job=None, is_edit=False) -> str:
     <div class="grid-2">
       <div class="form-row">
         <label>To (comma or semicolon separated)</label>
-        <input type="text" name="to_emails" value="{j.get('to_emails', '')}" required>
+        <input type="text" name="to_emails" value="{j.get('to_emails', '')}" required
+               placeholder="alice@samsung.com, bob@samsung.com">
       </div>
       <div class="form-row">
-        <label>Cc (optional)</label>
-        <input type="text" name="cc_emails" value="{j.get('cc_emails', '')}">
+        <label>Cc (optional — same separators)</label>
+        <input type="text" name="cc_emails" value="{j.get('cc_emails', '')}"
+               placeholder="manager@samsung.com; team@samsung.com">
       </div>
     </div>
     <div class="form-row">
@@ -382,17 +387,45 @@ def email_job_edit(rpa_id):
 
 @email_bp.route("/email-jobs/<rpa_id>/send-now", methods=["POST"])
 def email_job_send_now(rpa_id):
+    from pipeline_progress import (
+        begin_step, finish_run, finish_step, skip_step, start_run,
+    )
+
+    start_run(
+        "email",
+        rpa_id,
+        f"Email · {rpa_id}",
+        [
+            ("email", "Send email"),
+            ("cleanup", "Clean up files"),
+        ],
+    )
+    begin_step("email", f"Sending for {rpa_id}")
     try:
-        send_for_rpa(rpa_id)
+        result = send_for_rpa(rpa_id)
         mark_send_finished(rpa_id, "ok", "Sent via dashboard.")
+        cleaned = (result or {}).get("cleaned_files") or []
+        finish_step("email", "ok", f"Sent for {rpa_id}")
+        finish_step(
+            "cleanup", "ok",
+            f"Removed {len(cleaned)} file(s)" if cleaned else "Folder already empty",
+        )
+        finish_run("ok")
+        extra = f" · cleaned {len(cleaned)} file(s)" if cleaned else ""
         return redirect(url_for("email_bp.email_jobs_page",
-                                msg=f"Sent email for {rpa_id}"))
+                                msg=f"Sent email for {rpa_id}{extra}"))
     except SendError as e:
         mark_send_finished(rpa_id, "error", str(e))
+        finish_step("email", "error", str(e))
+        skip_step("cleanup", "Skipped — send failed")
+        finish_run("error", str(e))
         return redirect(url_for("email_bp.email_jobs_page",
                                 msg=f"Send failed for {rpa_id}: {e}", err="1"))
     except Exception as e:
         mark_send_finished(rpa_id, "error", str(e))
+        finish_step("email", "error", str(e))
+        skip_step("cleanup", "Skipped — send failed")
+        finish_run("error", str(e))
         return redirect(url_for("email_bp.email_jobs_page",
                                 msg=f"Unexpected error for {rpa_id}: {e}", err="1"))
 

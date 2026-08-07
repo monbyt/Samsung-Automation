@@ -49,33 +49,101 @@ def _ingest_item(item):
 
 def run_job(job_id: str) -> dict:
     """Download mail for one job and parse attachments into SQL."""
+    from pipeline_progress import (
+        begin_step, finish_run, finish_step, skip_step, start_run,
+    )
+
     job = get_job(job_id)
     if not job:
         raise ValueError(f"Unknown job: {job_id}")
 
     print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Running job: {job_id}")
 
+    run_id = start_run(
+        "mail",
+        job_id,
+        f"Mail · {job.get('name') or job_id}",
+        [
+            ("mail", "Check mailbox & download"),
+            ("parse", "Parse into SQL"),
+            ("rpa", "Run linked RPA"),
+            ("email", "Send email"),
+            ("cleanup", "Clean up files"),
+        ],
+    )
+
     with _lock:
-        summary = run_mail_check(
-            filters=[job_as_filter(job)],
-            on_download=_ingest_item,
-        )
-        summary["job_id"] = job_id
+        summary = {"downloads": [], "errors": [], "job_id": job_id}
+        try:
+            begin_step("mail", f"Opening mailbox for {job_id}")
+            summary = run_mail_check(
+                filters=[job_as_filter(job)],
+                on_download=_ingest_item,
+            )
+            summary["job_id"] = job_id
+            n_dl = len(summary.get("downloads") or [])
 
-        if summary["errors"]:
-            mark_job_finished(job_id, "error", "; ".join(summary["errors"]))
-        else:
-            mark_job_finished(job_id, "ok")
-            if summary.get("downloads"):
-                from rpa.runner import trigger_for_mail_job
-                upload = summary["downloads"][-1].get("path")
-                trigger_for_mail_job(job_id, upload_file=upload)
+            if summary["errors"]:
+                finish_step("mail", "error", "; ".join(summary["errors"]))
+                mark_job_finished(job_id, "error", "; ".join(summary["errors"]))
+                finish_run("error", "; ".join(summary["errors"]), run_id=run_id)
+            else:
+                finish_step(
+                    "mail", "ok",
+                    f"{n_dl} file(s) downloaded" if n_dl else "No new mail",
+                )
+                if n_dl and job.get("target_table"):
+                    finish_step("parse", "ok", f"Loaded into {job['target_table']}")
+                elif n_dl:
+                    skip_step("parse", "No SQL table configured")
+                else:
+                    skip_step("parse", "Nothing to parse")
 
-        record_monitor_run(summary, job_id=job_id)
+                mark_job_finished(job_id, "ok")
+                if summary.get("downloads"):
+                    from rpa.runner import trigger_for_mail_job
+                    upload = summary["downloads"][-1].get("path")
+                    begin_step("rpa", "Starting linked RPA tools")
+                    try:
+                        results = trigger_for_mail_job(job_id, upload_file=upload)
+                        errs = [r for r in (results or []) if r.get("status") == "error"]
+                        if errs:
+                            finish_step(
+                                "rpa", "error",
+                                "; ".join(e.get("message", "error") for e in errs),
+                            )
+                            finish_run("error", "RPA failed", run_id=run_id)
+                        elif not results:
+                            skip_step("rpa", "No linked RPA tools")
+                            skip_step("email", "No RPA → no email")
+                            skip_step("cleanup", "Nothing to clean")
+                            finish_run("ok", "Mail done — no RPA", run_id=run_id)
+                        else:
+                            # rpa / email / cleanup steps already updated inside runner
+                            from pipeline_progress import get_run
+                            snap = get_run(run_id) or {}
+                            for s in snap.get("steps") or []:
+                                if s["key"] in ("email", "cleanup") and s["status"] == "pending":
+                                    skip_step(s["key"], "Not configured for this run")
+                            finish_run("ok", run_id=run_id)
+                    except Exception as e:
+                        finish_step("rpa", "error", str(e))
+                        finish_run("error", str(e), run_id=run_id)
+                else:
+                    skip_step("rpa", "No downloads")
+                    skip_step("email", "No downloads")
+                    skip_step("cleanup", "No downloads")
+                    finish_run("ok", "No new mail", run_id=run_id)
+
+            record_monitor_run(summary, job_id=job_id)
+        except Exception as e:
+            finish_step("mail", "error", str(e))
+            finish_run("error", str(e), run_id=run_id)
+            raise
 
     print(
-        f"Job {job_id} done — {len(summary['downloads'])} file(s), "
-        f"{len(summary['errors'])} error(s)"
+        f"Job {job_id} done — {len(summary.get('downloads') or [])} file(s), "
+        f"{len(summary.get('errors') or [])} error(s)"
     )
     return summary
 

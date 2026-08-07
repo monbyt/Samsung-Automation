@@ -102,6 +102,9 @@ input[type=text], input[type=number] { cursor: text; width: 100%; max-width: 400
   box-shadow: 0 0 0 1px rgba(138,180,255,.35); animation: pulse-badge 1.6s ease-in-out infinite; }
 .pipeline-badge.ok { background: rgba(78,201,138,.15); color: #4ec98a; }
 .pipeline-badge.error { background: rgba(239,106,106,.15); color: #ef6a6a; }
+.pipeline-badge.cancelled { background: rgba(232,176,88,.15); color: #e8b058; }
+.pipeline-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; position: relative; }
+.pipeline-actions button:disabled { opacity: .45; cursor: not-allowed; }
 @keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 .stepper { list-style: none; margin: 0; padding: 0; position: relative; }
 .stepper::before {
@@ -237,19 +240,26 @@ _PIPELINE_PANEL = """
     <ul class="stepper" id="pipeline-steps">
       <li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>
     </ul>
+    <div class="pipeline-actions">
+      <button type="button" class="btn-danger btn-sm" id="pipeline-stop" disabled>Stop</button>
+      <button type="button" class="btn-sm" id="pipeline-reset">Reset</button>
+      <span class="muted" id="pipeline-action-msg"></span>
+    </div>
   </div>
   <script>
   (function () {
-    const icons = { pending: "·", running: "›", ok: "✓", error: "!", skipped: "–" };
+    const icons = { pending: "·", running: "›", ok: "✓", error: "!", skipped: "–", cancelled: "×" };
     function render(run) {
       const label = document.getElementById("pipeline-label");
       const meta = document.getElementById("pipeline-meta");
       const badge = document.getElementById("pipeline-badge");
       const list = document.getElementById("pipeline-steps");
+      const stopBtn = document.getElementById("pipeline-stop");
       if (!run) {
         label.textContent = "Waiting for a run…";
         meta.textContent = "";
         badge.style.display = "none";
+        stopBtn.disabled = true;
         list.innerHTML = '<li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>';
         return;
       }
@@ -262,6 +272,7 @@ _PIPELINE_PANEL = """
       badge.style.display = "";
       badge.className = "pipeline-badge " + (run.status || "");
       badge.textContent = run.status || "";
+      stopBtn.disabled = run.status !== "running";
       list.innerHTML = (run.steps || []).map(function (s) {
         const msg = s.message ? '<div class="step-msg">' + escapeHtml(s.message) + '</div>' : "";
         return '<li class="step ' + s.status + '">'
@@ -286,6 +297,26 @@ _PIPELINE_PANEL = """
         setTimeout(tick, 5000);
       }
     }
+    async function postAction(url, label) {
+      const msg = document.getElementById("pipeline-action-msg");
+      msg.textContent = label + "…";
+      try {
+        const r = await fetch(url, { method: "POST" });
+        const data = await r.json();
+        msg.textContent = data.message || "Done";
+        tick();
+      } catch (e) {
+        msg.textContent = "Failed: " + e;
+      }
+    }
+    document.getElementById("pipeline-stop").addEventListener("click", function () {
+      if (!confirm("Stop the current flow after this step?")) return;
+      postAction("/api/pipeline/stop", "Stopping");
+    });
+    document.getElementById("pipeline-reset").addEventListener("click", function () {
+      if (!confirm("Reset the live execution panel and clear any stop flag?")) return;
+      postAction("/api/pipeline/reset", "Resetting");
+    });
     tick();
   })();
   </script>
@@ -1260,6 +1291,30 @@ def api_pipeline_run(run_id):
     if not run:
         return jsonify({"error": "not found"}), 404
     return jsonify({"run": run})
+
+
+@app.route("/api/pipeline/stop", methods=["POST"])
+def api_pipeline_stop():
+    from pipeline_progress import request_stop
+    run_id = request_stop("Stopped by user")
+    if run_id:
+        return jsonify({
+            "ok": True,
+            "run_id": run_id,
+            "message": "Stop requested — remaining steps will be cancelled",
+        })
+    return jsonify({
+        "ok": True,
+        "run_id": None,
+        "message": "No active run (stop flag set for next check)",
+    })
+
+
+@app.route("/api/pipeline/reset", methods=["POST"])
+def api_pipeline_reset():
+    from pipeline_progress import reset_pipeline
+    reset_pipeline("Reset by user")
+    return jsonify({"ok": True, "message": "Pipeline reset — ready for a new run"})
 
 
 @app.route("/rpa/<rpa_id>/toggle", methods=["POST"])

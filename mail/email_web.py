@@ -107,13 +107,27 @@ _AGENT_LABELS = {
 
 @email_bp.route("/settings", methods=["GET", "POST"])
 def settings_page():
+    from mail.settings_db import (
+        get_sso_password, get_sso_username, save_sso_credentials,
+    )
+
     msg = ""
     ok = True
     if request.method == "POST":
+        form = request.form
+        section = form.get("section", "agent")
         try:
-            for k in AGENT_KEYS:
-                set_setting(k, request.form.get(k, ""))
-            msg = "Saved."
+            if section == "sso":
+                save_sso_credentials(
+                    form.get("sso_username", ""),
+                    form.get("sso_password", ""),
+                    keep_password_if_blank=True,
+                )
+                msg = "Login credentials saved."
+            else:
+                for k in AGENT_KEYS:
+                    set_setting(k, form.get(k, ""))
+                msg = "Agent API settings saved."
         except Exception as e:
             ok = False
             msg = f"Failed to save: {e}"
@@ -135,17 +149,46 @@ def settings_page():
 
     status = "Configured ✓" if is_agent_configured() else "Not configured yet."
     status_cls = "ok" if is_agent_configured() else "err"
+    sso_user = get_sso_username()
+    has_pw = bool(get_sso_password())
 
     body = f"""
-    <h1>Email API settings</h1>
-    <div class="sub">Credentials for the Samsung Agent API used by Email Jobs.</div>
+    <h1>Settings</h1>
+    <div class="sub">Samsung SSO login (W1 mail + NERP / RPA) and Agent API credentials.</div>
     {_flash(msg, ok)}
+    <div class="panel">
+      <h2>Samsung SSO login</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Used when NERP or a recorded RPA script hits the User Account / Password form,
+        and when W1 shows a login page. Leave password blank to keep the current one.
+        W1 also reuses the saved Chrome profile under <code>chrome-profile/</code> —
+        delete that folder if you need a fully fresh browser login.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="sso">
+        <div class="grid-2">
+          <div class="form-row">
+            <label for="sso_username">Username</label>
+            <input type="text" id="sso_username" name="sso_username"
+                   value="{sso_user}" autocomplete="username">
+          </div>
+          <div class="form-row">
+            <label for="sso_password">Password {"(saved ✓)" if has_pw else "(not set)"}</label>
+            <input type="password" id="sso_password" name="sso_password"
+                   value="" placeholder="{'••••••••' if has_pw else 'Enter password'}"
+                   autocomplete="new-password">
+          </div>
+        </div>
+        <button type="submit" class="btn-run">Save login</button>
+      </form>
+    </div>
     <div class="panel">
       <h2>Agent (mail) API</h2>
       <p class="{status_cls}">{status}</p>
       <form method="post">
+        <input type="hidden" name="section" value="agent">
         {''.join(rows)}
-        <button type="submit" class="btn-run">Save settings</button>
+        <button type="submit" class="btn-run">Save API settings</button>
       </form>
     </div>
     """

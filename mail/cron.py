@@ -50,7 +50,8 @@ def _ingest_item(item):
 def run_job(job_id: str) -> dict:
     """Download mail for one job and parse attachments into SQL."""
     from pipeline_progress import (
-        begin_step, finish_run, finish_step, skip_step, start_run,
+        PipelineCancelled, begin_step, check_cancelled, finish_run, finish_step,
+        skip_step, start_run,
     )
 
     job = get_job(job_id)
@@ -76,12 +77,14 @@ def run_job(job_id: str) -> dict:
         summary = {"downloads": [], "errors": [], "job_id": job_id}
         try:
             begin_step("mail", f"Opening mailbox for {job_id}")
+            check_cancelled()
             summary = run_mail_check(
                 filters=[job_as_filter(job)],
                 on_download=_ingest_item,
             )
             summary["job_id"] = job_id
             n_dl = len(summary.get("downloads") or [])
+            check_cancelled()
 
             if summary["errors"]:
                 finish_step("mail", "error", "; ".join(summary["errors"]))
@@ -104,6 +107,7 @@ def run_job(job_id: str) -> dict:
                     from rpa.runner import trigger_for_mail_job
                     upload = summary["downloads"][-1].get("path")
                     begin_step("rpa", "Starting linked RPA tools")
+                    check_cancelled()
                     try:
                         results = trigger_for_mail_job(job_id, upload_file=upload)
                         errs = [r for r in (results or []) if r.get("status") == "error"]
@@ -126,6 +130,8 @@ def run_job(job_id: str) -> dict:
                                 if s["key"] in ("email", "cleanup") and s["status"] == "pending":
                                     skip_step(s["key"], "Not configured for this run")
                             finish_run("ok", run_id=run_id)
+                    except PipelineCancelled:
+                        raise
                     except Exception as e:
                         finish_step("rpa", "error", str(e))
                         finish_run("error", str(e), run_id=run_id)
@@ -136,6 +142,11 @@ def run_job(job_id: str) -> dict:
                     finish_run("ok", "No new mail", run_id=run_id)
 
             record_monitor_run(summary, job_id=job_id)
+        except PipelineCancelled as e:
+            finish_step("mail", "error", str(e))
+            finish_run("cancelled", str(e), run_id=run_id)
+            mark_job_finished(job_id, "error", str(e))
+            print(f"Job {job_id} cancelled: {e}")
         except Exception as e:
             finish_step("mail", "error", str(e))
             finish_run("error", str(e), run_id=run_id)

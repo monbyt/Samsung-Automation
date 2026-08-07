@@ -51,10 +51,16 @@ pipeline_steps = Table(
 
 _lock = threading.Lock()
 _active_run_id: Optional[str] = None
+_stop_event = threading.Event()
 
 # Contextvar-like thread-local so nested helpers can emit steps without
 # threading run_id through every call.
 _tls = threading.local()
+
+
+class PipelineCancelled(Exception):
+    """Raised when the user hits Stop on the dashboard."""
+    pass
 
 
 def _init():
@@ -75,6 +81,71 @@ def set_current_run(run_id: Optional[str]) -> None:
     _tls.run_id = run_id
 
 
+def is_stop_requested() -> bool:
+    return _stop_event.is_set()
+
+
+def check_cancelled(message: str = "Stopped by user") -> None:
+    """Raise PipelineCancelled if Stop was pressed."""
+    if _stop_event.is_set():
+        raise PipelineCancelled(message)
+
+
+def request_stop(message: str = "Stopped by user") -> Optional[str]:
+    """Signal the running pipeline to halt after the current step."""
+    _stop_event.set()
+    run_id = None
+    with _lock:
+        run_id = _active_run_id
+    if run_id:
+        # Mark currently-running step + remaining as cancelled immediately for UI
+        now = datetime.now()
+        with _engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE pipeline_steps SET status='error', message=:m, finished_at=:t "
+                    "WHERE run_id=:r AND status='running'"
+                ),
+                {"m": message, "t": now, "r": run_id},
+            )
+            conn.execute(
+                text(
+                    "UPDATE pipeline_steps SET status='skipped', message='Cancelled', "
+                    "finished_at=:t WHERE run_id=:r AND status='pending'"
+                ),
+                {"t": now, "r": run_id},
+            )
+            conn.execute(
+                text(
+                    "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t "
+                    "WHERE id=:r AND status='running'"
+                ),
+                {"m": message, "t": now, "r": run_id},
+            )
+    return run_id
+
+
+def reset_pipeline(message: str = "Reset") -> None:
+    """Stop any active run and clear the cancel flag so a new run can start clean."""
+    request_stop(message)
+    # Also force-finish any still-running rows (in case DB race)
+    with _engine.begin() as conn:
+        now = datetime.now()
+        conn.execute(
+            text(
+                "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t "
+                "WHERE status='running'"
+            ),
+            {"m": message, "t": now},
+        )
+    clear_stop()
+    set_current_run(None)
+
+
+def clear_stop() -> None:
+    _stop_event.clear()
+
+
 def start_run(
     kind: str,
     ref_id: str,
@@ -83,6 +154,7 @@ def start_run(
 ) -> str:
     """Create a run with ordered steps. steps = [(key, title), ...]."""
     _init()
+    clear_stop()
     run_id = str(uuid.uuid4())
     now = datetime.now()
     with _engine.begin() as conn:
@@ -179,14 +251,19 @@ def finish_run(
                 ),
                 {"t": now, "r": run_id},
             )
-        elif status == "error":
+        elif status in ("error", "cancelled"):
             conn.execute(
                 text(
-                    "UPDATE pipeline_steps SET status='error', "
-                    "message=COALESCE(NULLIF(message,''), 'Stopped'), finished_at=:t "
+                    "UPDATE pipeline_steps SET status=:st, "
+                    "message=COALESCE(NULLIF(message,''), :m), finished_at=:t "
                     "WHERE run_id=:r AND status IN ('pending','running')"
                 ),
-                {"t": now, "r": run_id},
+                {
+                    "st": "skipped" if status == "cancelled" else "error",
+                    "m": "Cancelled" if status == "cancelled" else "Stopped",
+                    "t": now,
+                    "r": run_id,
+                },
             )
         conn.execute(
             text(
@@ -200,6 +277,8 @@ def finish_run(
         if _active_run_id == run_id:
             _active_run_id = run_id  # keep pointing at last finished for UI
     set_current_run(None)
+    if status in ("ok", "error", "cancelled"):
+        clear_stop()
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:

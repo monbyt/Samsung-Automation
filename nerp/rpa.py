@@ -32,10 +32,14 @@ def run(upload_file=None) -> None:
 
         page.goto(config.NERP_URL)
 
+        from mail.settings_db import get_sso_password, get_sso_username
+        username = get_sso_username() or config.NERP_USERNAME
+        password = get_sso_password() or config.NERP_PASSWORD
+
         page.get_by_role("textbox", name="User Account").click()
-        page.get_by_role("textbox", name="User Account").fill(config.NERP_USERNAME)
+        page.get_by_role("textbox", name="User Account").fill(username)
         page.get_by_role("textbox", name="Password").click()
-        page.get_by_role("textbox", name="Password").fill(config.NERP_PASSWORD)
+        page.get_by_role("textbox", name="Password").fill(password)
         page.get_by_role("textbox", name="Password").press("Enter")
 
         page.locator("#canvas").click()

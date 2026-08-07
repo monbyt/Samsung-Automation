@@ -63,11 +63,37 @@ def _mail(page):
     return page.locator(MAIL_IFRAME).content_frame
 
 
+def _maybe_sso_login(page):
+    """If W1 shows a Samsung SSO login form, fill credentials from Settings."""
+    try:
+        user_box = page.get_by_role("textbox", name="User Account")
+        if user_box.count() == 0:
+            return
+        from mail.settings_db import get_sso_password, get_sso_username
+        username = get_sso_username() or config.NERP_USERNAME
+        password = get_sso_password() or config.NERP_PASSWORD
+        if not username or not password:
+            print("  SSO login form detected but username/password not set in Settings.")
+            return
+        print(f"  SSO login as {username}…")
+        user_box.first.click(timeout=3_000)
+        user_box.first.fill(username)
+        pw = page.get_by_role("textbox", name="Password")
+        pw.first.click(timeout=3_000)
+        pw.first.fill(password)
+        pw.first.press("Enter")
+        page.wait_for_timeout(2_000)
+        _click_ok_popups(page)
+    except Exception as e:
+        print(f"  SSO auto-login skipped: {e}")
+
+
 def _goto_w1(page):
     if "abnormal-logout" in page.url or "loginapp" in page.url:
         _click_ok_popups(page)
     page.goto(config.W1_URL)
     _click_ok_popups(page)
+    _maybe_sso_login(page)
 
 
 def _open_mail(page):

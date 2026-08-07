@@ -233,7 +233,8 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
 def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[set] = None) -> dict:
     """Run one RPA tool by id. Chains to next_rpa on success."""
     from pipeline_progress import (
-        begin_step, current_run_id, finish_run, finish_step, start_run,
+        PipelineCancelled, begin_step, check_cancelled, current_run_id,
+        finish_run, finish_step, start_run,
     )
 
     if _visited is None:
@@ -271,6 +272,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     used_path = None
 
     try:
+        check_cancelled()
         begin_step("prepare" if owns_run else "rpa", f"Preparing {rpa_id}")
         if job["tool"] == "nerp":
             from nerp.rpa import run as nerp_run
@@ -280,6 +282,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
             if owns_run:
                 finish_step("prepare", "ok", os.path.basename(path))
                 begin_step("rpa", f"Running {job['name']}")
+            check_cancelled()
             os.makedirs(os.path.dirname(config.NERP_UPLOAD_FILE), exist_ok=True)
             if os.path.abspath(path) != os.path.abspath(config.NERP_UPLOAD_FILE):
                 shutil.copy2(path, config.NERP_UPLOAD_FILE)
@@ -304,6 +307,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
                     finish_step("prepare", "ok", "No upload file (script may not need one)")
             if owns_run:
                 begin_step("rpa", f"Running {job['name']}")
+            check_cancelled()
             run_recorded_script(
                 rpa_id,
                 upload_file=path,
@@ -313,6 +317,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 
+        check_cancelled()
         mark_rpa_finished(rpa_id, "ok")
         record_rpa_run(rpa_id, "ok", upload_file=used_path)
         print(f"[RPA] {job['name']} complete.")
@@ -323,9 +328,12 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
         if next_id:
+            check_cancelled()
             _log(f"Chaining to next step: {next_id}")
             try:
                 run_rpa(next_id, upload_file=used_path, _visited=_visited)
+            except PipelineCancelled:
+                raise
             except Exception as chain_err:
                 _log(f"Chained step {next_id!r} failed: {chain_err}")
                 result["chain_error"] = str(chain_err)
@@ -333,6 +341,17 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         if owns_run:
             finish_run("ok" if not result.get("chain_error") else "error",
                        result.get("chain_error") or "")
+
+    except PipelineCancelled as e:
+        result["status"] = "cancelled"
+        result["message"] = str(e)
+        mark_rpa_finished(rpa_id, "error", str(e))
+        record_rpa_run(rpa_id, "error", message=str(e), upload_file=used_path or upload_file)
+        finish_step("rpa", "error", str(e))
+        if owns_run:
+            finish_run("cancelled", str(e))
+        print(f"[RPA] {job['name']} cancelled: {e}")
+        raise
 
     except Exception as e:
         err = traceback.format_exc()[-500:]
@@ -351,7 +370,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
 
 def _maybe_send_email(rpa_id: str) -> None:
     """If an enabled email job is configured for this RPA, send it."""
-    from pipeline_progress import begin_step, finish_step, skip_step
+    from pipeline_progress import begin_step, check_cancelled, finish_step, skip_step
 
     try:
         from mail.email_jobs_db import get_email_job_for_rpa, mark_send_finished
@@ -372,6 +391,7 @@ def _maybe_send_email(rpa_id: str) -> None:
         skip_step("cleanup", "No email send")
         return
 
+    check_cancelled()
     _log(f"Sending email for {rpa_id} to {job.get('to_emails')}"
          + (f" cc={job.get('cc_emails')}" if job.get("cc_emails") else ""))
     cc_note = f" · cc {job.get('cc_emails')}" if job.get("cc_emails") else ""
@@ -389,6 +409,9 @@ def _maybe_send_email(rpa_id: str) -> None:
         )
         _log(f"Email sent for {rpa_id}.")
     except Exception as e:
+        from pipeline_progress import PipelineCancelled
+        if isinstance(e, PipelineCancelled):
+            raise
         err = traceback.format_exc()[-500:]
         _log(f"Email send failed for {rpa_id}: {e}")
         finish_step("email", "error", str(e))
@@ -401,6 +424,8 @@ def _maybe_send_email(rpa_id: str) -> None:
 
 def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):
     """Run all enabled RPA tools linked to this mail job."""
+    from pipeline_progress import PipelineCancelled, check_cancelled
+
     linked = list_for_mail_job(mail_job_id)
     if not linked:
         return []
@@ -408,7 +433,15 @@ def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):
     results = []
     for rpa in linked:
         try:
+            check_cancelled()
             results.append(run_rpa(rpa["rpa_id"], upload_file=upload_file))
+        except PipelineCancelled as e:
+            results.append({
+                "rpa_id": rpa["rpa_id"],
+                "status": "error",
+                "message": str(e),
+            })
+            raise
         except Exception as e:
             results.append({
                 "rpa_id": rpa["rpa_id"],

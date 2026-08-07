@@ -194,6 +194,38 @@ def _inject_runtime_preamble(source: str, needs_upload: bool, needs_download: bo
     return "import os as _rpa_os\n\n" + source
 
 
+def _inject_sso_credentials(source: str) -> str:
+    """Rewrite hardcoded User Account / Password fills to use RPA_USERNAME / RPA_PASSWORD."""
+    out = []
+    pending = None  # "user" | "pass" | None
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        if 'name="User Account"' in stripped or "name='User Account'" in stripped:
+            if ".fill(" in stripped:
+                line = re.sub(r'\.fill\((["\']).*?\1\)', ".fill(RPA_USERNAME)", line)
+                pending = None
+            else:
+                pending = "user"
+        elif 'name="Password"' in stripped or "name='Password'" in stripped:
+            if ".fill(" in stripped:
+                line = re.sub(r'\.fill\((["\']).*?\1\)', ".fill(RPA_PASSWORD)", line)
+                pending = None
+            else:
+                pending = "pass"
+        elif pending and ".fill(" in stripped and "print(" not in stripped:
+            token = "RPA_USERNAME" if pending == "user" else "RPA_PASSWORD"
+            line = re.sub(r'\.fill\((["\']).*?\1\)', f".fill({token})", line)
+            pending = None
+        elif stripped and not stripped.startswith("#"):
+            # clicked something else — clear pending intent
+            if pending and not stripped.startswith("page.") and ".fill(" not in stripped:
+                pass
+            elif pending and ".click(" not in stripped:
+                pending = None
+        out.append(line)
+    return "\n".join(out)
+
+
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
@@ -203,6 +235,7 @@ def prepare_script_source(
 
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     source = _sanitize_upload_literals(source)
+    source = _inject_sso_credentials(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     raw_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln]
     # region agent log
@@ -531,6 +564,7 @@ def run_recorded_script(
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
+    from mail.settings_db import get_sso_password, get_sso_username
 
     run_globals = {
         "__name__": "__main__",
@@ -539,6 +573,8 @@ def run_recorded_script(
         "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
         "RPA_UPLOAD_DIR": upload_dir or "",
         "RPA_DOWNLOAD_DIR": download_dir or "",
+        "RPA_USERNAME": get_sso_username() or config.NERP_USERNAME,
+        "RPA_PASSWORD": get_sso_password() or config.NERP_PASSWORD,
         "win_open_file": dismiss_open_file_dialog,
         "win_save_as": dismiss_save_as_dialog,
     }

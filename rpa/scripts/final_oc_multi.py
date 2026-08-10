@@ -11,74 +11,82 @@ SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
 
+# SAP WebGUI cells look like: id="grid#C111#25,8@if-r"
+# Row index (25) increases down the list; column 8 is the SO number.
+SO_CELL_ID_RE = re.compile(r"^grid#C\d+#(\d+),8@if-r$")
+
+
 def _shell(page):
     return page.locator(SHELL_IFRAME).content_frame
 
 
 def _capture_all_so_numbers(page) -> list[str]:
-    """Read every 10+ digit SO from the Create Sales Order result grid.
+    """Read every SO from column 8 of the Create Sales Order result grid.
 
-    Does not rely on the hardcoded C111 row id from the original recording —
-    SAP regenerates those container ids. Strategy:
-      1) any mrss row container
-      2) fallback: all 10+ digit numbers visible in the shell iframe
+    Cell ids look like grid#C111#{row},8@if-r — row increases per SO.
     """
     shell = _shell(page)
-    # Give the result grid a moment to finish rendering all rows
     page.wait_for_timeout(1500)
 
-    # Try scrolling the grid so virtualized rows mount in the DOM
-    try:
-        grid = shell.locator('[id*="mrss-cont"]').first
-        grid.evaluate(
-            """el => {
-                el.scrollTop = el.scrollHeight;
-                const p = el.parentElement;
-                if (p) p.scrollTop = p.scrollHeight;
-            }"""
-        )
-        page.wait_for_timeout(500)
-        grid.evaluate(
-            """el => {
-                el.scrollTop = 0;
-                const p = el.parentElement;
-                if (p) p.scrollTop = 0;
-            }"""
-        )
-        page.wait_for_timeout(500)
-    except Exception as e:
-        print(f"[RPA] Grid scroll skipped: {e}")
+    # Attribute selector — ids contain '#' so CSS #id won't work
+    cells = shell.locator('[id^="grid#C"][id$=",8@if-r"]')
 
+    # Scroll grid while collecting so virtualized rows mount
+    seen_ids: set[str] = set()
+    found: list[tuple[int, str]] = []  # (row_index, so_number)
+
+    for _pass in range(8):
+        count = cells.count()
+        print(f"[RPA] SO column cells visible (pass {_pass + 1}): {count}")
+        for i in range(count):
+            cell = cells.nth(i)
+            cid = cell.get_attribute("id") or ""
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            m = SO_CELL_ID_RE.match(cid)
+            row_idx = int(m.group(1)) if m else i
+            text = (cell.inner_text() or "").strip()
+            so_m = SO_RE.search(text)
+            if not so_m:
+                print(f"[RPA] Skip cell {cid!r} text={text!r}")
+                continue
+            so = so_m.group(0)
+            found.append((row_idx, so))
+            print(f"[RPA] Cell {cid} → SO {so}")
+
+        # Scroll down to load more virtualized rows
+        try:
+            cells.last.scroll_into_view_if_needed(timeout=2_000)
+            page.wait_for_timeout(400)
+            shell.locator('[id*="mrss-cont"]').first.evaluate(
+                "el => { el.scrollTop = Math.min(el.scrollTop + el.clientHeight, el.scrollHeight); }"
+            )
+            page.wait_for_timeout(400)
+        except Exception as e:
+            print(f"[RPA] Grid scroll pass skipped: {e}")
+            break
+
+        if cells.count() == count and _pass > 0:
+            # No new cells mounted
+            break
+
+    # Sort by SAP row index, unique SO numbers preserving order
+    found.sort(key=lambda t: t[0])
     so_numbers: list[str] = []
-
-    # 1) Prefer per-row scrape (any C###-mrss-cont-*-Row-N, not just C111)
-    rows = shell.locator('[id*="mrss-cont"][id*="Row-"]')
-    row_count = rows.count()
-    row_ids = []
-    for i in range(row_count):
-        rid = rows.nth(i).get_attribute("id") or ""
-        row_ids.append(rid)
-        text = rows.nth(i).inner_text()
-        for m in SO_RE.finditer(text):
-            so = m.group(0)
-            if so not in so_numbers:
-                so_numbers.append(so)
-
-    print(f"[RPA] Grid row elements: {row_count}")
-    if row_ids:
-        print(f"[RPA] Row ids (first 20): {row_ids[:20]}")
-
-    # 2) Fallback / supplement: every 10+ digit token in the shell text
-    try:
-        shell_text = shell.locator("body").inner_text(timeout=5_000)
-    except Exception:
-        shell_text = shell.locator(":root").inner_text(timeout=5_000)
-    from_text = SO_RE.findall(shell_text)
-    for so in from_text:
+    for _, so in found:
         if so not in so_numbers:
             so_numbers.append(so)
 
-    print(f"[RPA] SO candidates from shell text: {from_text}")
+    if not so_numbers:
+        # Last-resort fallback: any 10+ digit token in the shell
+        try:
+            shell_text = shell.locator("body").inner_text(timeout=5_000)
+        except Exception:
+            shell_text = shell.locator(":root").inner_text(timeout=5_000)
+        so_numbers = list(dict.fromkeys(SO_RE.findall(shell_text)))
+        print(f"[RPA] Fallback shell-text SOs: {so_numbers}")
+
     return so_numbers
 
 

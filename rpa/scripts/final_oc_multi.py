@@ -16,23 +16,69 @@ def _shell(page):
 
 
 def _capture_all_so_numbers(page) -> list[str]:
-    """Read every 10+ digit SO from the Create Sales Order result grid."""
+    """Read every 10+ digit SO from the Create Sales Order result grid.
+
+    Does not rely on the hardcoded C111 row id from the original recording —
+    SAP regenerates those container ids. Strategy:
+      1) any mrss row container
+      2) fallback: all 10+ digit numbers visible in the shell iframe
+    """
     shell = _shell(page)
-    rows = shell.locator('[id^="C111-mrss-cont-none-Row-"]')
-    count = rows.count()
+    # Give the result grid a moment to finish rendering all rows
+    page.wait_for_timeout(1500)
+
+    # Try scrolling the grid so virtualized rows mount in the DOM
+    try:
+        grid = shell.locator('[id*="mrss-cont"]').first
+        grid.evaluate(
+            """el => {
+                el.scrollTop = el.scrollHeight;
+                const p = el.parentElement;
+                if (p) p.scrollTop = p.scrollHeight;
+            }"""
+        )
+        page.wait_for_timeout(500)
+        grid.evaluate(
+            """el => {
+                el.scrollTop = 0;
+                const p = el.parentElement;
+                if (p) p.scrollTop = 0;
+            }"""
+        )
+        page.wait_for_timeout(500)
+    except Exception as e:
+        print(f"[RPA] Grid scroll skipped: {e}")
+
     so_numbers: list[str] = []
-    for i in range(count):
-        cell = rows.nth(i).get_by_text(SO_RE)
-        if cell.count() == 0:
-            continue
-        so = cell.first.inner_text().strip()
-        # Keep digits only in case the cell has extra whitespace/labels
-        m = SO_RE.search(so)
-        if not m:
-            continue
-        so = m.group(0)
+
+    # 1) Prefer per-row scrape (any C###-mrss-cont-*-Row-N, not just C111)
+    rows = shell.locator('[id*="mrss-cont"][id*="Row-"]')
+    row_count = rows.count()
+    row_ids = []
+    for i in range(row_count):
+        rid = rows.nth(i).get_attribute("id") or ""
+        row_ids.append(rid)
+        text = rows.nth(i).inner_text()
+        for m in SO_RE.finditer(text):
+            so = m.group(0)
+            if so not in so_numbers:
+                so_numbers.append(so)
+
+    print(f"[RPA] Grid row elements: {row_count}")
+    if row_ids:
+        print(f"[RPA] Row ids (first 20): {row_ids[:20]}")
+
+    # 2) Fallback / supplement: every 10+ digit token in the shell text
+    try:
+        shell_text = shell.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        shell_text = shell.locator(":root").inner_text(timeout=5_000)
+    from_text = SO_RE.findall(shell_text)
+    for so in from_text:
         if so not in so_numbers:
             so_numbers.append(so)
+
+    print(f"[RPA] SO candidates from shell text: {from_text}")
     return so_numbers
 
 

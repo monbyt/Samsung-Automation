@@ -7,7 +7,6 @@ final_oc.py is left untouched.
 import re
 from playwright.sync_api import Playwright, sync_playwright
 
-NERP_HOME = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home"
 SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
@@ -37,12 +36,13 @@ def _capture_all_so_numbers(page) -> list[str]:
     return so_numbers
 
 
-def _open_program(page, program: str) -> None:
-    page.goto(NERP_HOME)
+def _open_zsdm31520(page) -> None:
+    # Same Utility-home goto as final_oc.py
+    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
     page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
-    search = page.get_by_role("textbox", name="Search Program")
-    search.click()
-    search.fill(program)
+    _search = page.get_by_role("textbox", name="Search Program")
+    _search.click()
+    _search.fill("ZSDM31520")
     page.get_by_role("button", name="Go").click()
 
 
@@ -72,7 +72,7 @@ def _download_pdf(page) -> None:
 def _process_so(page, so_number: str) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
     print(f"[RPA] Processing SO {so_number}")
-    _open_program(page, "ZSDM31520")
+    _open_zsdm31520(page)
     shell = _shell(page)
     shell.get_by_role("radio", name="Document select").wait_for(state="visible")
     shell.get_by_role("radio", name="Document select").click()
@@ -100,21 +100,21 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill("Pass2002?")
     page.get_by_role("button", name="Login").click()
-    page.goto(NERP_HOME)
+    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
     page.get_by_role("textbox", name="Search Program").click()
     page.get_by_role("textbox", name="Search Program").fill("ZLSDF50270")
     page.get_by_role("button", name="Go").click()
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("textbox", name="Sales Org.").click()
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("textbox", name="Sales Org.").fill("7101")
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("textbox", name="Sales Org.").click()
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("textbox", name="Upload file Required").click()
-    page.locator(SHELL_IFRAME).content_frame.locator("#ls-inputfieldhelpbutton").click()
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("button", name="OK").click()
-    page.locator(SHELL_IFRAME).content_frame.locator("#webgui_filebrowser_file_upload").set_input_files("ZLSDF50270LAYOUT.XLSX")
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("button", name="Execute  Emphasized").click()
-    page.locator(SHELL_IFRAME).content_frame.get_by_role("button", name="Create Sales Order").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").fill("7101")
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Upload file Required").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("#ls-inputfieldhelpbutton").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="OK").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("#webgui_filebrowser_file_upload").set_input_files("ZLSDF50270LAYOUT.XLSX")
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Execute  Emphasized").click()
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Create Sales Order").click()
     with page.expect_download() as download_info:
-        page.locator(SHELL_IFRAME).content_frame.get_by_role("button", name="Yes").click()
+        page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Yes").click()
     download = download_info.value
 
     # Capture ALL SO numbers from the result grid (not just Row-0)

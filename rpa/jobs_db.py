@@ -133,6 +133,20 @@ def seed_from_config():
             enabled=1,
             created_at=now,
         ))
+    if "final_oc_multi" not in existing:
+        to_insert.append(dict(
+            rpa_id="final_oc_multi",
+            name="Final Order Creation (all SOs)",
+            tool="codegen",
+            start_url=config.NERP_URL,
+            description=(
+                "Copy of final_oc: ZLSDF50270 upload → capture ALL sales orders "
+                "→ ZSDM31520 zpdf print/download for each SO one by one."
+            ),
+            trigger_mail_job="",
+            enabled=1,
+            created_at=now,
+        ))
 
     if not to_insert:
         return

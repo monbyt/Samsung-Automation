@@ -23,7 +23,8 @@ def _shell(page):
 def _capture_all_so_numbers(page) -> list[str]:
     """Read every SO from column 8 of the Create Sales Order result grid.
 
-    Cell ids look like grid#C111#{row},8@if-r — row increases per SO.
+    Cell ids look like grid#C111#25,8@if-r — row number increases per SO,
+    column 8 is the sales-order column.
     """
     shell = _shell(page)
     page.wait_for_timeout(1500)
@@ -31,13 +32,15 @@ def _capture_all_so_numbers(page) -> list[str]:
     # Attribute selector — ids contain '#' so CSS #id won't work
     cells = shell.locator('[id^="grid#C"][id$=",8@if-r"]')
 
-    # Scroll grid while collecting so virtualized rows mount
+    # Scroll grid while collecting so virtualized rows mount.
+    # Do NOT use locator.evaluate("el => { ... }") — Playwright mangles
+    # curly braces into fake names like _000 and crashes.
     seen_ids: set[str] = set()
     found: list[tuple[int, str]] = []  # (row_index, so_number)
 
-    for _pass in range(8):
+    for pass_num in range(8):
         count = cells.count()
-        print(f"[RPA] SO column cells visible (pass {_pass + 1}): {count}")
+        print(f"[RPA] SO column cells visible (pass {pass_num + 1}): {count}")
         for i in range(count):
             cell = cells.nth(i)
             cid = cell.get_attribute("id") or ""
@@ -55,19 +58,17 @@ def _capture_all_so_numbers(page) -> list[str]:
             found.append((row_idx, so))
             print(f"[RPA] Cell {cid} → SO {so}")
 
-        # Scroll down to load more virtualized rows
+        # Scroll last visible SO cell into view, then wheel down for more rows
         try:
-            cells.last.scroll_into_view_if_needed(timeout=2_000)
-            page.wait_for_timeout(400)
-            shell.locator('[id*="mrss-cont"]').first.evaluate(
-                "el => { el.scrollTop = Math.min(el.scrollTop + el.clientHeight, el.scrollHeight); }"
-            )
-            page.wait_for_timeout(400)
+            if count > 0:
+                cells.last.scroll_into_view_if_needed(timeout=2_000)
+            page.mouse.wheel(0, 900)
+            page.wait_for_timeout(500)
         except Exception as e:
             print(f"[RPA] Grid scroll pass skipped: {e}")
             break
 
-        if cells.count() == count and _pass > 0:
+        if cells.count() == count and pass_num > 0:
             # No new cells mounted
             break
 

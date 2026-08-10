@@ -33,8 +33,6 @@ def _capture_all_so_numbers(page) -> list[str]:
     cells = shell.locator('[id^="grid#C"][id$=",8@if-r"]')
 
     # Scroll grid while collecting so virtualized rows mount.
-    # Do NOT use locator.evaluate("el => { ... }") — Playwright mangles
-    # curly braces into fake names like _000 and crashes.
     seen_ids: set[str] = set()
     found: list[tuple[int, str]] = []  # (row_index, so_number)
 
@@ -61,7 +59,7 @@ def _capture_all_so_numbers(page) -> list[str]:
         # Scroll last visible SO cell into view, then wheel down for more rows
         try:
             if count > 0:
-                cells.last.scroll_into_view_if_needed(timeout=2_000)
+                cells.last.scroll_into_view_if_needed()
             page.mouse.wheel(0, 900)
             page.wait_for_timeout(500)
         except Exception as e:
@@ -82,9 +80,9 @@ def _capture_all_so_numbers(page) -> list[str]:
     if not so_numbers:
         # Last-resort fallback: any 10+ digit token in the shell
         try:
-            shell_text = shell.locator("body").inner_text(timeout=5_000)
+            shell_text = shell.locator("body").inner_text()
         except Exception:
-            shell_text = shell.locator(":root").inner_text(timeout=5_000)
+            shell_text = shell.locator(":root").inner_text()
         so_numbers = list(dict.fromkeys(SO_RE.findall(shell_text)))
         print(f"[RPA] Fallback shell-text SOs: {so_numbers}")
 

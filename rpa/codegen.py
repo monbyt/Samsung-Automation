@@ -13,7 +13,7 @@ import config
 
 _RPA_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _INPUT_FILES_RE = re.compile(r'\.set_input_files\(\s*["\']([^"\']+)["\']\s*\)')
-_ACTION_TIMEOUT_RE = re.compile(r",?\s*timeout=\d+")
+_ACTION_TIMEOUT_RE = re.compile(r",?\s*timeout=\d+(?:_\d+)*")
 _NEW_CONTEXT_RE = re.compile(
     r"(context\s*=\s*browser\.new_context\([^)]*\)\s*\n)",
     re.MULTILINE,

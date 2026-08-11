@@ -11,10 +11,14 @@ SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
 
-# SAP WebGUI cells: id="grid#C111#25,8@if-r"  → row=25, col=8
-# Column index for SO is NOT always 8 — detect whichever column holds 10+ digit SOs.
-# Many cells in that column are EMPTY (line-item padding) — skip blanks, keep unique SOs.
-GRID_CELL_ID_RE = re.compile(r"grid#C\d+#(\d+),(\d+)@")
+# SAP WebGUI cells look like:
+#   grid#C111#0,1          ← real cell (most common in the DOM dump)
+#   grid#C111#25,8@if-r    ← input overlay variant
+# NOT helper nodes like:
+#   grid#C111#0,1-ROOTCNT / -CONTENT-1 / -SELCOLTOGGLE / #cp1
+# Column for SO is auto-detected (whichever has 10+ digit values).
+# Many SO-column cells are EMPTY (line-item padding) — skip blanks.
+GRID_CELL_ID_RE = re.compile(r"^grid#C\d+#(\d+),(\d+)(?:@[\w-]+)?$")
 
 
 def _shell(page):
@@ -34,7 +38,7 @@ def _read_grid_cells(shell) -> list[tuple[str, str]]:
 
 
 def _parse_row_col(cid: str):
-    m = GRID_CELL_ID_RE.search(cid or "")
+    m = GRID_CELL_ID_RE.match(cid or "")
     if not m:
         return None, None
     return int(m.group(1)), int(m.group(2))
@@ -44,10 +48,15 @@ def _detect_so_column(cells: list[tuple[str, str]]) -> int | None:
     """Pick the column that contains the most 10+ digit SO-looking values."""
     hits: dict[int, int] = {}
     examples: dict[int, list[str]] = {}
+    parsed = 0
+    nonempty_cols: dict[int, int] = {}
     for cid, text in cells:
         row, col = _parse_row_col(cid)
         if col is None:
             continue
+        parsed += 1
+        if text:
+            nonempty_cols[col] = nonempty_cols.get(col, 0) + 1
         so_m = SO_RE.search(text or "")
         if not so_m:
             continue
@@ -55,6 +64,9 @@ def _detect_so_column(cells: list[tuple[str, str]]) -> int | None:
         examples.setdefault(col, [])
         if len(examples[col]) < 3:
             examples[col].append(so_m.group(0))
+    print(f"[RPA] Parseable data cells: {parsed}")
+    if nonempty_cols:
+        print(f"[RPA] Non-empty cells by column: {dict(sorted(nonempty_cols.items()))}")
     if not hits:
         return None
     best = max(hits, key=hits.get)

@@ -190,16 +190,21 @@ def cleanup_folder_files(
     directory: str,
     *,
     also: Optional[Iterable[str]] = None,
+    keep_name_contains: Optional[Iterable[str]] = None,
 ) -> list[str]:
     """Delete attachable files from a folder (and any explicit paths).
 
     Returns the list of deleted file paths. Skips protected staging files
     (e.g. data/Book1.xlsx) and anything outside the given directory unless
     listed in ``also``.
+
+    keep_name_contains — if set, skip files whose name contains any of these
+    substrings (case-insensitive), e.g. ("layout",) to keep ZLSDF50270LAYOUT.XLSX.
     """
     deleted: list[str] = []
     protected = _protected_paths()
     seen: set[str] = set()
+    keep_bits = [s.lower() for s in (keep_name_contains or ()) if s]
 
     def _safe_remove(path: str) -> None:
         if not path:
@@ -208,6 +213,9 @@ def cleanup_folder_files(
         if abs_path in seen or abs_path in protected:
             return
         if not os.path.isfile(abs_path):
+            return
+        name_l = os.path.basename(abs_path).lower()
+        if any(bit in name_l for bit in keep_bits):
             return
         try:
             os.remove(abs_path)
@@ -273,11 +281,56 @@ def send_for_rpa(
 
     if cleanup:
         deleted = cleanup_folder_files(watch_dir, also=files)
+        # Also clear Excel/results from the RPA upload folder, but keep LAYOUT/templates
+        upload_dir = _rpa_upload_folder(rpa_id)
+        if upload_dir and os.path.normpath(upload_dir) != os.path.normpath(watch_dir or ""):
+            deleted += cleanup_folder_files(
+                upload_dir,
+                keep_name_contains=("layout", "template"),
+            )
         result = dict(result) if isinstance(result, dict) else {"response": result}
         result["cleaned_files"] = [os.path.basename(p) for p in deleted]
         result["cleaned_dir"] = watch_dir
+        if upload_dir:
+            result["cleaned_upload_dir"] = upload_dir
 
     return result
+
+
+def _rpa_upload_folder(rpa_id: str) -> str:
+    """RPA upload folder — where Create Sales Order .xlsx results are saved."""
+    try:
+        from rpa.jobs_db import get_rpa_job
+        job = get_rpa_job(rpa_id)
+    except Exception:
+        job = None
+    if not job:
+        return ""
+    folder = (job.get("upload_folder") or "").strip()
+    if folder:
+        if os.path.isfile(folder):
+            folder = os.path.dirname(folder)
+        if os.path.isdir(folder):
+            return os.path.normpath(folder)
+    mail_id = job.get("trigger_mail_job") or ""
+    if mail_id:
+        try:
+            from mail.jobs_db import get_job, resolve_download_dir
+            mj = get_job(mail_id)
+            if mj:
+                d = mj.get("download_dir") or resolve_download_dir(mj)
+                if d and os.path.isdir(d):
+                    return os.path.normpath(d)
+        except Exception:
+            pass
+    try:
+        import config
+        d = getattr(config, "DOWNLOAD_DIR", "") or ""
+        if d and os.path.isdir(d):
+            return os.path.normpath(d)
+    except Exception:
+        pass
+    return ""
 
 
 def _rpa_download_folder(rpa_id: str) -> str:

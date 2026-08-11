@@ -182,8 +182,37 @@ def _open_zsdm31520(page) -> None:
     page.get_by_role("button", name="Go").click()
 
 
+def _save_playwright_download(dl, dest_dir: str, filename: str | None = None) -> str:
+    """Save a Playwright download to dest_dir. Returns the path written."""
+    if not dest_dir:
+        raise RuntimeError("No destination folder for download")
+    os.makedirs(dest_dir, exist_ok=True)
+    name = filename or dl.suggested_filename or "download.bin"
+    path = os.path.join(dest_dir, name)
+    if os.path.exists(path):
+        stem, ext = os.path.splitext(name)
+        path = os.path.join(dest_dir, f"{stem}_{os.getpid()}{ext}")
+    dl.save_as(path)
+    print(f"[RPA] Saved download: {path}")
+    return path
+
+
+def _excel_dir() -> str:
+    """Where Create Sales Order .xlsx results go (Upload folder — NOT the PDF folder)."""
+    return (
+        os.environ.get("RPA_UPLOAD_DIR")
+        or os.environ.get("RPA_DOWNLOAD_DIR")
+        or os.getcwd()
+    )
+
+
+def _pdf_dir() -> str:
+    """Where P/I PDFs go (Download folder — email attach folder)."""
+    return os.environ.get("RPA_DOWNLOAD_DIR") or ""
+
+
 def _download_pdf(page, so_number: str = "") -> None:
-    """F8 → chrome-extension PDF viewer → Download, then save under RPA_DOWNLOAD_DIR."""
+    """F8 → chrome-extension PDF viewer → Download → save under PDF (download) folder only."""
     page.keyboard.press("F8")
     pdf_frame = None
     for _ in range(20):
@@ -200,27 +229,21 @@ def _download_pdf(page, so_number: str = "") -> None:
     pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
     pdf_frame.locator("[aria-label='Download']").click()
     page.wait_for_timeout(500)
-    with page.expect_download() as download1_info:
+    with page.expect_download() as pdf_info:
         pdf_frame.locator("[aria-label='Download']").click()
-    download1 = download1_info.value
+    pdf_dl = pdf_info.value
 
-    dest_dir = os.environ.get("RPA_DOWNLOAD_DIR") or ""
+    dest_dir = _pdf_dir()
     if not dest_dir:
         print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
         return
 
-    os.makedirs(dest_dir, exist_ok=True)
-    suggested = download1.suggested_filename or "pi.pdf"
+    suggested = pdf_dl.suggested_filename or "pi.pdf"
     stem, ext = os.path.splitext(suggested)
     if not ext:
         ext = ".pdf"
-    # Unique per SO so multiple downloads don't overwrite each other
     fname = f"{stem}_{so_number}{ext}" if so_number else suggested
-    path = os.path.join(dest_dir, fname)
-    if os.path.exists(path):
-        path = os.path.join(dest_dir, f"{stem}_{so_number}_{os.getpid()}{ext}")
-    download1.save_as(path)
-    print(f"[RPA] Saved download: {path}")
+    _save_playwright_download(pdf_dl, dest_dir, fname)
 
 
 def _process_so(page, so_number: str) -> None:
@@ -267,9 +290,18 @@ def run(playwright: Playwright) -> None:
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("#webgui_filebrowser_file_upload").set_input_files("ZLSDF50270LAYOUT.XLSX")
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Execute  Emphasized").click()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Create Sales Order").click()
-    with page.expect_download() as download_info:
+    # Excel result → Upload folder (keep PDFs-only Download folder clean for email)
+    with page.expect_download() as excel_info:
         page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Yes").click()
-    download = download_info.value
+    excel_dl = excel_info.value
+    try:
+        _save_playwright_download(
+            excel_dl,
+            _excel_dir(),
+            excel_dl.suggested_filename or "ZLSDF50270RESULT.XLSX",
+        )
+    except Exception as e:
+        print(f"[RPA] Excel result save failed: {e}")
 
     # Capture ALL SO numbers from the result grid (not just Row-0)
     so_numbers = _capture_all_so_numbers(page)

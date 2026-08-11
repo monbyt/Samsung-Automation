@@ -140,8 +140,8 @@ def seed_from_config():
             tool="codegen",
             start_url=config.NERP_URL,
             description=(
-                "Copy of final_oc: ZLSDF50270 upload → capture ALL sales orders "
-                "→ ZSDM31520 zpdf print/download for each SO one by one."
+                "ZLSDF50270 upload → capture ALL sales orders → ZSDM31520 PDF per SO. "
+                "Upload folder = Excel; Download folder = PDFs only (for email)."
             ),
             trigger_mail_job="",
             enabled=1,

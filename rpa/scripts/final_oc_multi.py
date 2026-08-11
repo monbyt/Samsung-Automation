@@ -11,92 +11,135 @@ SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
 
-# SAP WebGUI SO column cells look like: id="grid#C111#25,8@if-r"
-# Row index increases down the column; column ",8@" is the SO number.
-# Many rows are EMPTY (line-item padding) — walk the whole column, skip blanks.
-SO_CELL_ID_RE = re.compile(r"grid#C\d+#(\d+),8@")
+# SAP WebGUI cells: id="grid#C111#25,8@if-r"  → row=25, col=8
+# Column index for SO is NOT always 8 — detect whichever column holds 10+ digit SOs.
+# Many cells in that column are EMPTY (line-item padding) — skip blanks, keep unique SOs.
+GRID_CELL_ID_RE = re.compile(r"grid#C\d+#(\d+),(\d+)@")
 
 
 def _shell(page):
     return page.locator(SHELL_IFRAME).content_frame
 
 
+def _read_grid_cells(shell) -> list[tuple[str, str]]:
+    """Return [(id, text), ...] for every grid# node in the shell document.
+
+    One evaluate call — do not nth() thousands of Playwright locators.
+    """
+    # No object-literal braces; returns a list of [id, text] pairs.
+    return shell.locator(":root").evaluate(
+        "() => Array.from(document.querySelectorAll('[id*=\"grid#\"]'))"
+        ".map(n => [n.id, (n.innerText || n.textContent || '').trim()])"
+    ) or []
+
+
+def _parse_row_col(cid: str):
+    m = GRID_CELL_ID_RE.search(cid or "")
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _detect_so_column(cells: list[tuple[str, str]]) -> int | None:
+    """Pick the column that contains the most 10+ digit SO-looking values."""
+    hits: dict[int, int] = {}
+    examples: dict[int, list[str]] = {}
+    for cid, text in cells:
+        row, col = _parse_row_col(cid)
+        if col is None:
+            continue
+        so_m = SO_RE.search(text or "")
+        if not so_m:
+            continue
+        hits[col] = hits.get(col, 0) + 1
+        examples.setdefault(col, [])
+        if len(examples[col]) < 3:
+            examples[col].append(so_m.group(0))
+    if not hits:
+        return None
+    best = max(hits, key=hits.get)
+    print(f"[RPA] SO hits by column: {dict(sorted(hits.items()))}")
+    print(f"[RPA] Using column {best} (examples: {examples.get(best)})")
+    return best
+
+
 def _capture_all_so_numbers(page) -> list[str]:
-    """Walk the entire SO column (incl. empty cells) and collect unique SOs."""
+    """Scan the SO column (auto-detected) including empty padding cells."""
     shell = _shell(page)
     page.wait_for_timeout(2000)
 
-    # XPath — CSS [id^="grid#..."] is unreliable because '#' is special in CSS.
-    col8 = shell.locator(
-        'xpath=//*[contains(@id,"grid#") and contains(@id,",8@")]'
-    )
-    any_grid = shell.locator('xpath=//*[contains(@id,"grid#")]')
-    print(f"[RPA] Any grid# nodes: {any_grid.count()}")
-    print(f"[RPA] Column-8 nodes: {col8.count()}")
-    if any_grid.count() > 0 and col8.count() == 0:
-        for i in range(min(20, any_grid.count())):
-            print(f"[RPA] sample id[{i}]: {any_grid.nth(i).get_attribute('id')!r}")
-
-    seen_ids: set[str] = set()
-    found: list[tuple[int, str]] = []  # (row_index, so_number)
-    stagnant = 0
-
-    # Focus the grid so keyboard scrolling works
+    # Focus grid for keyboard scroll
     try:
-        if col8.count() > 0:
-            col8.first.click(force=True)
-        elif any_grid.count() > 0:
-            any_grid.first.click(force=True)
+        shell.locator('xpath=//*[contains(@id,"grid#")]').first.click(force=True)
     except Exception as e:
         print(f"[RPA] Grid focus skipped: {e}")
 
-    for pass_num in range(40):
-        nodes = col8 if col8.count() > 0 else any_grid
-        count = nodes.count()
-        new_this_pass = 0
-        print(f"[RPA] Column scan pass {pass_num + 1}: {count} nodes visible")
+    seen_ids: set[str] = set()
+    found: list[tuple[int, str]] = []  # (row, so)
+    so_col: int | None = None
+    stagnant = 0
 
-        for i in range(count):
-            cell = nodes.nth(i)
-            cid = cell.get_attribute("id") or ""
+    for pass_num in range(40):
+        cells = _read_grid_cells(shell)
+        print(f"[RPA] Pass {pass_num + 1}: {len(cells)} grid# nodes")
+
+        if pass_num == 0 and cells:
+            print(f"[RPA] Sample ids: {[c[0] for c in cells[:12]]}")
+
+        if so_col is None:
+            so_col = _detect_so_column(cells)
+            if so_col is None:
+                print("[RPA] No SO-looking values yet; scrolling…")
+            else:
+                print(f"[RPA] Locked onto SO column {so_col}")
+
+        if so_col is None:
+            # Can't filter a column yet — scroll and try again
+            try:
+                page.keyboard.press("PageDown")
+                page.wait_for_timeout(400)
+            except Exception as e:
+                print(f"[RPA] Grid scroll skipped: {e}")
+                break
+            stagnant += 1
+            if stagnant >= 6:
+                print("[RPA] Gave up scrolling with no SO column detected")
+                break
+            continue
+
+        new_ids = 0
+        for cid, text in cells:
             if not cid or cid in seen_ids:
                 continue
-            # SO column only (",8@" in id) — skip other columns / empty padding handled below
-            if ",8@" not in cid:
+            row, col = _parse_row_col(cid)
+            if col is None or col != so_col:
                 continue
             seen_ids.add(cid)
-            new_this_pass += 1
+            new_ids += 1
 
-            text = (cell.inner_text() or "").strip()
-            # Empty padding cells between SOs — keep walking, just skip
             if not text:
-                continue
+                continue  # empty padding between SOs
             so_m = SO_RE.search(text)
             if not so_m:
                 continue
             so = so_m.group(0)
-            m = SO_CELL_ID_RE.search(cid)
-            row_idx = int(m.group(1)) if m else i
             if so not in {s for _, s in found}:
-                found.append((row_idx, so))
+                found.append((row if row is not None else 0, so))
                 print(f"[RPA] Cell {cid} → SO {so}")
 
-        # Scroll further down the column (virtualized rows)
         try:
-            if count > 0:
-                nodes.last.scroll_into_view_if_needed()
             page.keyboard.press("PageDown")
-            page.wait_for_timeout(350)
+            page.wait_for_timeout(400)
         except Exception as e:
             print(f"[RPA] Grid scroll skipped: {e}")
             break
 
-        if new_this_pass == 0:
+        if new_ids == 0:
             stagnant += 1
         else:
             stagnant = 0
         if stagnant >= 3:
-            print("[RPA] No new column cells after scrolling — done scanning")
+            print("[RPA] No new cells after scrolling — done scanning")
             break
 
     found.sort(key=lambda t: t[0])
@@ -106,7 +149,6 @@ def _capture_all_so_numbers(page) -> list[str]:
             so_numbers.append(so)
 
     if not so_numbers:
-        # Fallback: every 10+ digit token visible in the shell (deduped)
         try:
             shell_text = shell.locator("body").inner_text()
         except Exception:

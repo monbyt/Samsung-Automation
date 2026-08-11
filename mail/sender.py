@@ -155,6 +155,10 @@ _ATTACH_EXTS = (".pdf", ".xlsx", ".xls", ".csv", ".xlsm", ".zip", ".docx", ".doc
 
 
 def _latest_files_in(directory: str, count: int) -> list[str]:
+    """Newest attachable files in directory.
+
+    count <= 0 means attach ALL matching files (for a dedicated PDF folder).
+    """
     if not directory or not os.path.isdir(directory):
         return []
     candidates = []
@@ -165,6 +169,8 @@ def _latest_files_in(directory: str, count: int) -> list[str]:
         if os.path.isfile(path):
             candidates.append(path)
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    if count <= 0:
+        return candidates
     return candidates[:max(1, count)]
 
 
@@ -250,7 +256,10 @@ def send_for_rpa(
         watch_dir = os.path.dirname(os.path.abspath(override_file))
     else:
         watch_dir = job.get("attach_folder") or _rpa_download_folder(rpa_id)
-        files = _latest_files_in(watch_dir, job.get("attach_count") or 1)
+        # 0 = attach every file in the folder (then cleanup deletes them after send)
+        raw_count = job.get("attach_count")
+        attach_count = 0 if raw_count in (0, "0") else int(raw_count or 1)
+        files = _latest_files_in(watch_dir, attach_count)
         if not files:
             raise SendError(f"No attachable files found in {watch_dir!r} for RPA '{rpa_id}'.")
 

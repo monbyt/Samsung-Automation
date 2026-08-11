@@ -233,7 +233,7 @@ def email_jobs_page():
               </td>
               <td>{j['subject'] or '—'}</td>
               <td>{j['attach_folder'] or '<span class="muted">auto (RPA folder)</span>'}<br>
-                  <span class="muted">latest {j['attach_count']}</span></td>
+                  <span class="muted">{"all files" if int(j.get("attach_count") or 0) == 0 else f"latest {j['attach_count']}"}</span></td>
               <td><span class="{last_status_cls}">{last_status}</span><br>
                   <span class="muted">{last_when}</span></td>
               <td>
@@ -336,8 +336,8 @@ def _render_form(job=None, is_edit=False) -> str:
                placeholder="C:/Users/you/Desktop/Reports">
       </div>
       <div class="form-row">
-        <label>How many latest files to attach</label>
-        <input type="number" name="attach_count" min="1" value="{j.get('attach_count', 1)}">
+        <label>How many latest files to attach (0 = all files in folder)</label>
+        <input type="number" name="attach_count" min="0" value="{j.get('attach_count', 0)}">
       </div>
     </div>
     <div class="form-row">
@@ -361,7 +361,7 @@ def email_job_new():
                 subject=form.get("subject", ""),
                 body=form.get("body", ""),
                 attach_folder=form.get("attach_folder", ""),
-                attach_count=int(form.get("attach_count") or 1),
+                attach_count=int(form.get("attach_count") if form.get("attach_count") not in (None, "") else 0),
                 enabled=("enabled" in form),
             )
             return redirect(url_for("email_bp.email_jobs_page",
@@ -404,7 +404,7 @@ def email_job_edit(rpa_id):
                 subject=form.get("subject", ""),
                 body=form.get("body", ""),
                 attach_folder=form.get("attach_folder", ""),
-                attach_count=int(form.get("attach_count") or 1),
+                attach_count=int(form.get("attach_count") if form.get("attach_count") not in (None, "") else 0),
                 enabled=("enabled" in form),
             )
             return redirect(url_for("email_bp.email_jobs_page",

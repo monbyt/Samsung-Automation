@@ -4,6 +4,7 @@ created on the ZLSDF50270 result grid (not just row 0).
 
 final_oc.py is left untouched.
 """
+import os
 import re
 from playwright.sync_api import Playwright, sync_playwright
 
@@ -181,8 +182,8 @@ def _open_zsdm31520(page) -> None:
     page.get_by_role("button", name="Go").click()
 
 
-def _download_pdf(page) -> None:
-    """F8 → chrome-extension PDF viewer → Download (two clicks)."""
+def _download_pdf(page, so_number: str = "") -> None:
+    """F8 → chrome-extension PDF viewer → Download, then save under RPA_DOWNLOAD_DIR."""
     page.keyboard.press("F8")
     pdf_frame = None
     for _ in range(20):
@@ -199,9 +200,27 @@ def _download_pdf(page) -> None:
     pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
     pdf_frame.locator("[aria-label='Download']").click()
     page.wait_for_timeout(500)
-    with page.expect_download() as download_info:
+    with page.expect_download() as download1_info:
         pdf_frame.locator("[aria-label='Download']").click()
-    _ = download_info.value
+    download1 = download1_info.value
+
+    dest_dir = os.environ.get("RPA_DOWNLOAD_DIR") or ""
+    if not dest_dir:
+        print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
+        return
+
+    os.makedirs(dest_dir, exist_ok=True)
+    suggested = download1.suggested_filename or "pi.pdf"
+    stem, ext = os.path.splitext(suggested)
+    if not ext:
+        ext = ".pdf"
+    # Unique per SO so multiple downloads don't overwrite each other
+    fname = f"{stem}_{so_number}{ext}" if so_number else suggested
+    path = os.path.join(dest_dir, fname)
+    if os.path.exists(path):
+        path = os.path.join(dest_dir, f"{stem}_{so_number}_{os.getpid()}{ext}")
+    download1.save_as(path)
+    print(f"[RPA] Saved download: {path}")
 
 
 def _process_so(page, so_number: str) -> None:
@@ -221,7 +240,7 @@ def _process_so(page, so_number: str) -> None:
     shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     shell.get_by_role("textbox", name="Output Device Required").press("Enter")
     page.wait_for_timeout(1000)
-    _download_pdf(page)
+    _download_pdf(page, so_number)
     print(f"[RPA] Finished SO {so_number}")
 
 

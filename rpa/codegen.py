@@ -190,8 +190,17 @@ def _inject_runtime_preamble(source: str, needs_upload: bool, needs_download: bo
     if not needs_upload and not needs_download and not uses_rpa_os:
         return source
     if re.search(r"^import os as _rpa_os\s*$", source, re.MULTILINE):
+        if needs_download and "_RPA_DL_SEQ" not in source:
+            source = source.replace(
+                "import os as _rpa_os\n",
+                "import os as _rpa_os\nimport time as _rpa_time\n_RPA_DL_SEQ = [0]\n",
+                1,
+            )
         return source
-    return "import os as _rpa_os\n\n" + source
+    header = "import os as _rpa_os\n"
+    if needs_download:
+        header += "import time as _rpa_time\n_RPA_DL_SEQ = [0]\n"
+    return header + "\n" + source
 
 
 def _inject_sso_credentials(source: str) -> str:
@@ -287,9 +296,19 @@ def _inject_download_save(source: str) -> str:
         if m:
             var = m.group(1)
             indent = line[: len(line) - len(line.lstrip())]
+            # SAP/browser often reuses the same suggested_filename (e.g. document.pdf),
+            # which would overwrite earlier PDFs and leave only one file to attach.
             out.append(f"{indent}_rpa_os.makedirs(RPA_DOWNLOAD_DIR, exist_ok=True)")
             out.append(
-                f"{indent}_rpa_dl = _rpa_os.path.join(RPA_DOWNLOAD_DIR, {var}.suggested_filename)"
+                f"{indent}_rpa_base, _rpa_ext = _rpa_os.path.splitext("
+                f"{var}.suggested_filename or 'download.bin')"
+            )
+            out.append(f"{indent}_RPA_DL_SEQ[0] += 1")
+            out.append(
+                f"{indent}_rpa_dl = _rpa_os.path.join("
+                f"RPA_DOWNLOAD_DIR, "
+                f"'%s_%03d_%d%s' % (_rpa_base, _RPA_DL_SEQ[0], "
+                f"int(_rpa_time.time() * 1000), _rpa_ext))"
             )
             out.append(f"{indent}{var}.save_as(_rpa_dl)")
             out.append(f'{indent}print("[RPA] Saved download:", _rpa_dl)')

@@ -193,6 +193,22 @@ def _dump_all_window_titles():
     print(f"  [SaveAs DEBUG] Visible windows: {all_titles[:20]}")
 
 
+def _unique_rename(path: str) -> str:
+    """Rename *path* so a later save with the same suggested name cannot overwrite it."""
+    directory, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    ms = int((time.time() % 1) * 1000)
+    dest = os.path.join(directory, f"{stem}_{stamp}-{ms:03d}{ext}")
+    n = 1
+    while os.path.exists(dest):
+        dest = os.path.join(directory, f"{stem}_{stamp}-{ms:03d}_{n}{ext}")
+        n += 1
+    os.rename(path, dest)
+    print(f"  [SaveAs] Renamed to unique name: {os.path.basename(dest)}")
+    return dest
+
+
 def dismiss_save_as_dialog(timeout=60, directory=None):
     """Find Save As, navigate to *directory*, then confirm save."""
     if sys.platform != "win32":
@@ -203,6 +219,8 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
     print(f"Looking for Save As dialog{folder_msg}...")
     deadline = time.time() + timeout
     dumped = False
+    before = snapshot_folder(directory) if directory else None
+    started = time.time()
 
     while time.time() < deadline:
         titles = _find_save_as_titles()
@@ -211,6 +229,14 @@ def dismiss_save_as_dialog(timeout=60, directory=None):
             print(f"Found: '{title}'")
             if _navigate_and_save(title, directory):
                 print("Save As confirmed.")
+                if directory:
+                    try:
+                        saved = wait_for_new_file(
+                            directory, timeout=20, before=before, started_ts=started,
+                        )
+                        _unique_rename(saved)
+                    except Exception as e:
+                        print(f"  [SaveAs] Unique rename skipped: {e}")
                 return True
             print("Save As confirm failed, retrying...")
         else:

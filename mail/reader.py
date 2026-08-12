@@ -1,10 +1,8 @@
 """
-W1 mail reader — navigate mailboxes, click emails, download Excel attachments.
+W1 mail reader — navigate mailboxes, click unread emails, download attachments.
 
-Click uses the original Playwright locators that worked:
-  div.filter(has_text=exact subject).nth(i)
-
-The unread-class JS was skipping real mail and is gone.
+Find subject rows with the original Playwright locator, then click only
+rows that are unread (bold / unread class). Read mail is skipped.
 """
 import json
 import os
@@ -159,45 +157,64 @@ def _open_mailbox(mail, mailbox):
     time.sleep(1.5)
 
 
-def _click_email(mail, subject: str, index: int = 0) -> bool:
-    """Click the Nth email with this subject — same locator that used to work."""
-    exact = mail.locator("div").filter(has_text=_subject_pattern(subject))
-    n = exact.count()
-    print(f"  Exact subject rows: {n}")
-    if n > index:
-        row = exact.nth(index)
+_IS_UNREAD_JS = """
+(el) => {
+  const nodes = [el, ...el.querySelectorAll('a, span, div, b, strong, td, li')];
+  let fw = '';
+  let cls = (el.className || '').toString().slice(0, 80);
+  for (const n of nodes) {
+    const c = (n.className || '').toString().toLowerCase();
+    if (/\\bunread\\b|\\bnot-read\\b|\\bis-unread\\b|\\bmail-unread\\b/.test(c)) {
+      return { unread: true, fw: getComputedStyle(n).fontWeight, cls };
+    }
+    const w = getComputedStyle(n).fontWeight;
+    if (!fw) fw = w;
+    if (w === 'bold' || w === 'bolder' || parseInt(w, 10) >= 600) {
+      return { unread: true, fw: w, cls };
+    }
+  }
+  return { unread: false, fw, cls };
+}
+"""
+
+
+def _click_unread_email(mail, subject: str) -> bool:
+    """Click the first unread row with this subject. Read rows are skipped."""
+    rows = mail.locator("div").filter(has_text=_subject_pattern(subject))
+    n = rows.count()
+    print(f"  Subject rows: {n}")
+    if n == 0:
+        rows = mail.get_by_text(subject, exact=True)
+        n = rows.count()
+        print(f"  get_by_text rows: {n}")
+
+    limit = min(n, MAX_MAILS_PER_TICK)
+    for i in range(limit):
+        row = rows.nth(i)
+        try:
+            info = row.evaluate(_IS_UNREAD_JS)
+        except Exception as e:
+            print(f"    [{i}] unread check failed: {e}")
+            continue
+        if not isinstance(info, dict):
+            info = {"unread": bool(info)}
+        flag = "UNREAD" if info.get("unread") else "read"
+        print(
+            f"    [{i}] [{flag}] fw={info.get('fw')!r} cls={info.get('cls')!r}"
+        )
+        if not info.get("unread"):
+            continue
         row.scroll_into_view_if_needed()
         row.click(timeout=10_000)
-        print(f"  Clicked email {index + 1}/{n} (exact): {subject}")
+        print(f"  Clicked unread email: {subject}")
         return True
 
-    if index > 0:
-        return False
-
-    try:
-        row = mail.locator("div").filter(has_text=subject)
-        row.first.wait_for(state="visible", timeout=10_000)
-        row.first.scroll_into_view_if_needed()
-        row.first.click(timeout=10_000)
-        print(f"  Clicked email (contains): {subject}")
-        return True
-    except Exception as e:
-        print(f"  Contains click failed: {e}")
-
-    try:
-        row = mail.get_by_text(subject, exact=True)
-        row.first.click(timeout=10_000)
-        print(f"  Clicked email (get_by_text): {subject}")
-        return True
-    except Exception as e:
-        print(f"  get_by_text click failed: {e}")
-
-    print(f"  Could not click email with subject {subject!r}")
+    print("  No unread email with that subject.")
     return False
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
-    """Open the mailbox and download matching emails (up to MAX_MAILS_PER_TICK)."""
+    """Open the mailbox and download unread matching emails only."""
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
     subject = mail_filter["subject"]
@@ -215,14 +232,14 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     _open_mailbox(mail, mailbox)
 
     for i in range(MAX_MAILS_PER_TICK):
-        if not _click_email(mail, subject, i):
+        if not _click_unread_email(mail, subject):
             if i == 0:
-                print(f"[{filter_id}] No email to click.")
+                print(f"[{filter_id}] No unread mail — skipping download.")
             else:
-                print(f"[{filter_id}] No more emails.")
+                print(f"[{filter_id}] No more unread mail.")
             break
 
-        print(f"[{filter_id}] Processing mail {i + 1}/{MAX_MAILS_PER_TICK}")
+        print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_MAILS_PER_TICK}")
         time.sleep(1.0)
 
         save_path = _download_attachment(page, mail, download_dir)

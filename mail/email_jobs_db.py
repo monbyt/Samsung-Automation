@@ -21,7 +21,7 @@ email_jobs = Table(
     Column("subject", String(500)),
     Column("body", Text),
     Column("attach_folder", String(500)),
-    Column("attach_count", Integer, default=1),
+    Column("attach_count", Integer, default=0),
     Column("enabled", Integer, default=1),
     Column("last_sent_at", DateTime),
     Column("last_status", String(20)),
@@ -64,7 +64,7 @@ def _row_to_dict(row) -> dict:
         "subject": row.subject or "",
         "body": row.body or "",
         "attach_folder": row.attach_folder or "",
-        "attach_count": int(row.attach_count) if row.attach_count is not None else 1,
+        "attach_count": int(row.attach_count) if row.attach_count is not None else 0,
         "enabled": bool(row.enabled),
         "last_sent_at": row.last_sent_at,
         "last_status": row.last_status or "",
@@ -98,7 +98,7 @@ def upsert_email_job(
     subject: str = "",
     body: str = "",
     attach_folder: str = "",
-    attach_count: int = 1,
+    attach_count: int = 0,
     enabled: bool = True,
 ):
     if not rpa_id:
@@ -113,7 +113,7 @@ def upsert_email_job(
         subject=(subject or "").strip(),
         body=body or "",
         attach_folder=(attach_folder or "").strip(),
-        attach_count=max(0, int(attach_count if attach_count is not None else 1)),
+        attach_count=max(0, int(attach_count if attach_count is not None else 0)),
         enabled=1 if enabled else 0,
     )
     with engine.begin() as conn:

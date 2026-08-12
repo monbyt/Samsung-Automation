@@ -171,7 +171,7 @@ def _latest_files_in(directory: str, count: int) -> list[str]:
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     if count <= 0:
         return candidates
-    return candidates[:max(1, count)]
+    return candidates[:count]
 
 
 def _protected_paths() -> Set[str]:
@@ -279,12 +279,27 @@ def send_for_rpa(
         watch_dir = os.path.dirname(os.path.abspath(override_file))
     else:
         watch_dir = job.get("attach_folder") or _rpa_download_folder(rpa_id)
-        # 0 = attach every file in the folder (then cleanup deletes them after send)
+        # 0 / blank = attach every file in the folder (PDF download folder workflow).
         raw_count = job.get("attach_count")
-        attach_count = 0 if raw_count in (0, "0") else int(raw_count or 1)
+        try:
+            attach_count = int(raw_count)
+        except (TypeError, ValueError):
+            attach_count = 0
         files = _latest_files_in(watch_dir, attach_count)
+        available = _latest_files_in(watch_dir, 0)
+        if attach_count > 0 and len(available) > attach_count:
+            print(
+                f"[mail] attach_count={attach_count} but folder has {len(available)} files. "
+                "Set 'How many latest files' to 0 to attach all.",
+                flush=True,
+            )
         if not files:
             raise SendError(f"No attachable files found in {watch_dir!r} for RPA '{rpa_id}'.")
+        print(
+            f"[mail] Attach folder {watch_dir!r} count={attach_count} "
+            f"→ {len(files)} file(s): {[os.path.basename(p) for p in files]}",
+            flush=True,
+        )
 
     result = send_email(
         to=job["to_emails"],

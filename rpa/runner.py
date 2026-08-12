@@ -230,8 +230,17 @@ def _prepare_upload_file(upload_file: Optional[str], rpa_job: dict) -> str:
     )
 
 
-def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[set] = None) -> dict:
-    """Run one RPA tool by id. Chains to next_rpa on success."""
+def run_rpa(
+    rpa_id: str,
+    upload_file: Optional[str] = None,
+    _visited: Optional[set] = None,
+    send_email: bool = True,
+) -> dict:
+    """Run one RPA tool by id. Chains to next_rpa on success.
+
+    send_email — if False, skip the post-RPA mail send (used when processing
+    several downloaded Excels; send once after the last file).
+    """
     from pipeline_progress import (
         PipelineCancelled, begin_step, check_cancelled, current_run_id,
         finish_run, finish_step, start_run,
@@ -327,7 +336,10 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         print(f"[RPA] {job['name']} complete.")
         finish_step("rpa", "ok", f"{job['name']} finished")
 
-        _maybe_send_email(rpa_id, upload_dir=resolved_upload_dir)
+        if send_email:
+            _maybe_send_email(rpa_id, upload_dir=resolved_upload_dir)
+        else:
+            _log("Deferring email send until remaining download files are processed.")
 
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
@@ -426,30 +438,54 @@ def _maybe_send_email(rpa_id: str, upload_dir: str = "") -> None:
             pass
 
 
-def trigger_for_mail_job(mail_job_id: str, upload_file: Optional[str] = None):
-    """Run all enabled RPA tools linked to this mail job."""
+def trigger_for_mail_job(
+    mail_job_id: str,
+    upload_file: Optional[str] = None,
+    upload_files: Optional[list] = None,
+):
+    """Run all enabled RPA tools linked to this mail job.
+
+    upload_files — process each downloaded spreadsheet, then send email once
+    after the last file so every PDF lands in one message.
+    """
     from pipeline_progress import PipelineCancelled, check_cancelled
 
     linked = list_for_mail_job(mail_job_id)
     if not linked:
         return []
 
+    files = [p for p in (upload_files or []) if p]
+    if not files and upload_file:
+        files = [upload_file]
+    if not files:
+        files = [None]
+
     results = []
     for rpa in linked:
-        try:
-            check_cancelled()
-            results.append(run_rpa(rpa["rpa_id"], upload_file=upload_file))
-        except PipelineCancelled as e:
-            results.append({
-                "rpa_id": rpa["rpa_id"],
-                "status": "error",
-                "message": str(e),
-            })
-            raise
-        except Exception as e:
-            results.append({
-                "rpa_id": rpa["rpa_id"],
-                "status": "error",
-                "message": str(e),
-            })
+        for i, path in enumerate(files):
+            last = i == len(files) - 1
+            try:
+                check_cancelled()
+                if path:
+                    _log(f"Mail file {i + 1}/{len(files)}: {os.path.basename(path)}")
+                results.append(
+                    run_rpa(
+                        rpa["rpa_id"],
+                        upload_file=path,
+                        send_email=last,
+                    )
+                )
+            except PipelineCancelled as e:
+                results.append({
+                    "rpa_id": rpa["rpa_id"],
+                    "status": "error",
+                    "message": str(e),
+                })
+                raise
+            except Exception as e:
+                results.append({
+                    "rpa_id": rpa["rpa_id"],
+                    "status": "error",
+                    "message": str(e),
+                })
     return results

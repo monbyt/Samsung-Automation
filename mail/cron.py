@@ -105,11 +105,11 @@ def run_job(job_id: str) -> dict:
                 mark_job_finished(job_id, "ok")
                 if summary.get("downloads"):
                     from rpa.runner import trigger_for_mail_job
-                    upload = summary["downloads"][-1].get("path")
+                    paths = [d.get("path") for d in summary["downloads"] if d.get("path")]
                     begin_step("rpa", "Starting linked RPA tools")
                     check_cancelled()
                     try:
-                        results = trigger_for_mail_job(job_id, upload_file=upload)
+                        results = trigger_for_mail_job(job_id, upload_files=paths)
                         errs = [r for r in (results or []) if r.get("status") == "error"]
                         if errs:
                             finish_step(

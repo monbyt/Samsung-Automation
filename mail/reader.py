@@ -1,7 +1,8 @@
 """
 W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
 
-Only unread mails are processed (`a.not-open`). If nothing is unread, we download nothing.
+Only unread mails are processed (bold / unread class). If nothing is unread, we download nothing.
+`a.not-open` is NOT unread — in W1 that means "not the currently opened tab".
 """
 import json
 import os
@@ -17,7 +18,54 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
-MAX_UNREAD_PER_TICK = 4
+MAX_UNREAD_PER_TICK = 20
+
+# Click unread matching subjects inside the mail iframe.
+# W1 unread = bold / "unread" class. Do NOT use a.not-open — that means
+# "not the currently opened tab", so it matches old/read rows too.
+_CLICK_UNREAD_JS = """
+(subject) => {
+  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const target = norm(subject);
+  if (!target) return { clicked: false, reason: 'empty-subject', debug: [] };
+
+  const isUnread = (el) => {
+    let n = el;
+    for (let i = 0; i < 6 && n && n !== document.body; i++, n = n.parentElement) {
+      const cls = (n.className || '').toString().toLowerCase();
+      if (/\\bunread\\b|\\bnot-read\\b|\\bis-unread\\b|\\bmail-unread\\b/.test(cls)) {
+        return true;
+      }
+      const fw = getComputedStyle(n).fontWeight;
+      if (fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 600) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const matches = (text) => {
+    const t = norm(text);
+    if (!t || t.length > 180) return false;
+    return t === target || t.startsWith(target) || t.includes(target);
+  };
+
+  const nodes = [...document.querySelectorAll('a, span, div, [role="link"]')];
+  const debug = [];
+  for (const el of nodes) {
+    const raw = (el.innerText || '').trim();
+    if (!matches(raw)) continue;
+    const unread = isUnread(el);
+    if (debug.length < 12) {
+      debug.push({ text: raw.slice(0, 80), unread, cls: (el.className || '').toString().slice(0, 80) });
+    }
+    if (!unread) continue;
+    el.click();
+    return { clicked: true, text: raw.slice(0, 120), debug };
+  }
+  return { clicked: false, reason: 'no-unread-match', debug };
+}
+"""
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -156,47 +204,30 @@ def _open_mailbox(mail, mailbox):
     time.sleep(1.5)
 
 
-def _debug_dump_unread(mail):
+def _click_first_unread(mail, subject: str) -> bool:
+    """Click the first unread row whose subject matches. Read/old mails are ignored."""
     try:
-        unread = mail.locator("a.not-open")
-        n = unread.count()
-        print(f"  DEBUG: found {n} unread (a.not-open) element(s).")
-        for idx in range(min(n, 15)):
-            try:
-                txt = unread.nth(idx).inner_text(timeout=1_000).strip()
-                print(f"    [{idx}] {txt!r}")
-            except Exception as e:
-                print(f"    [{idx}] <read failed: {e}>")
+        result = mail.evaluate(_CLICK_UNREAD_JS, subject)
     except Exception as e:
-        print(f"  DEBUG: could not enumerate unread: {e}")
+        print(f"  Unread scan failed: {e}")
+        return False
 
+    if not isinstance(result, dict):
+        return False
 
-def _find_first_unread_row(mail, subject: str):
-    """Return the first unread row whose subject matches, or None.
+    debug = result.get("debug") or []
+    if debug:
+        print(f"  Subject hits ({len(debug)}):")
+        for row in debug:
+            flag = "UNREAD" if row.get("unread") else "read"
+            print(f"    [{flag}] {row.get('text')!r}")
 
-    W1 marks unread subjects with class ``not-open``. Read/old mails are ignored.
-    """
-    try:
-        unread = mail.locator("a.not-open")
-        unread.first.wait_for(state="visible", timeout=3_000)
-    except PlaywrightTimeout:
-        return None
-    except Exception:
-        return None
+    if result.get("clicked"):
+        print(f"  Opened unread: {result.get('text')!r}")
+        return True
 
-    target = subject.strip()
-    n = unread.count()
-    for idx in range(n):
-        try:
-            txt = unread.nth(idx).inner_text(timeout=1_000).strip()
-        except Exception:
-            continue
-        if txt == target:
-            return unread.nth(idx)
-
-    print(f"  No unread row exactly matching {target!r}.")
-    _debug_dump_unread(mail)
-    return None
+    print(f"  No unread mail matching {subject!r} ({result.get('reason')}).")
+    return False
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
@@ -221,8 +252,7 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     _open_mailbox(mail, mailbox)
 
     for i in range(MAX_UNREAD_PER_TICK):
-        row = _find_first_unread_row(mail, subject)
-        if row is None:
+        if not _click_first_unread(mail, subject):
             if i == 0:
                 print(f"[{filter_id}] No unread mails matching subject — skipping download.")
             else:
@@ -230,7 +260,6 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
             break
 
         print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_UNREAD_PER_TICK}")
-        row.click()
         time.sleep(1.0)
 
         save_path = _download_attachment(page, mail, download_dir)

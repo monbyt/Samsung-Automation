@@ -1,8 +1,9 @@
 """
 W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
 
-Only unread mails are processed (bold / unread class). If nothing is unread, we download nothing.
-`a.not-open` is NOT unread — in W1 that means "not the currently opened tab".
+The job already opens the mailbox that holds that subject's mail.
+Once inside, we only click NEW/unread rows — we do not re-match the subject
+on each row (that was skipping real new mail).
 """
 import json
 import os
@@ -22,56 +23,62 @@ MAX_UNREAD_PER_TICK = 20
 # Extra screens to scan below the current view. Do NOT walk a huge inbox.
 MAX_LIST_SCROLLS = 5
 
-# Click unread matching subjects inside the mail iframe.
-# W1 unread = bold / "unread" class. Do NOT use a.not-open — that means
-# "not the currently opened tab", so it matches old/read rows too.
-# The list is virtualized: rows below the fold are not in the DOM until we scroll.
+# Click the first unread mail row in the already-opened mailbox.
+# Unread = unread class, bold/medium weight, or <b>/<strong>.
+# Do NOT filter by subject here — this folder is already the right inbox.
+# Do NOT use a.not-open — that means "not the currently opened tab".
 _CLICK_UNREAD_JS = """
-(subject) => {
-  const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-  const target = norm(subject);
-  if (!target) return { clicked: false, reason: 'empty-subject', hits: 0, unreadHits: 0, debug: [] };
+() => {
+  const root = document.querySelector('[data-w1-mail-scroller="1"]') || document.body;
+  const skip = /^(inbox|sent|drafts?|mail|ok|cancel|download|compose|write)$/i;
 
   const isUnread = (el) => {
     let n = el;
-    for (let i = 0; i < 6 && n && n !== document.body; i++, n = n.parentElement) {
+    for (let i = 0; i < 8 && n && n !== document.body; i++, n = n.parentElement) {
       const cls = (n.className || '').toString().toLowerCase();
       if (/\\bunread\\b|\\bnot-read\\b|\\bis-unread\\b|\\bmail-unread\\b/.test(cls)) {
         return true;
       }
-      const fw = getComputedStyle(n).fontWeight;
-      if (fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 600) {
-        return true;
+      // Only the row itself / close parents — a folder wrapper with weight 500
+      // would otherwise mark every mail as unread.
+      if (i <= 2) {
+        const fw = getComputedStyle(n).fontWeight;
+        if (fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 500) {
+          return true;
+        }
       }
+      if (n.matches && n.matches('b, strong')) return true;
     }
+    if (el.querySelector && el.querySelector('b, strong')) return true;
+    const label = ((el.getAttribute('aria-label') || '') + ' ' + (el.title || '')).toLowerCase();
+    if (label.includes('unread')) return true;
     return false;
   };
 
-  const matches = (text) => {
-    const t = norm(text);
-    if (!t || t.length > 180) return false;
-    return t === target || t.startsWith(target) || t.includes(target);
-  };
-
-  const nodes = [...document.querySelectorAll('a, span, div, [role="link"]')];
+  const nodes = [...root.querySelectorAll('a, [role="link"]')];
   const debug = [];
   let hits = 0;
   let unreadHits = 0;
   for (const el of nodes) {
-    const raw = (el.innerText || '').trim();
-    if (!matches(raw)) continue;
+    const raw = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+    if (!raw || raw.length < 3 || raw.length > 180) continue;
+    if (skip.test(raw)) continue;
     hits += 1;
     const unread = isUnread(el);
     if (unread) unreadHits += 1;
     if (debug.length < 12) {
-      debug.push({ text: raw.slice(0, 80), unread, cls: (el.className || '').toString().slice(0, 80) });
+      debug.push({
+        text: raw.slice(0, 80),
+        unread,
+        cls: (el.className || '').toString().slice(0, 80),
+      });
     }
     if (!unread) continue;
     el.scrollIntoView({ block: 'center', inline: 'nearest' });
     el.click();
     return { clicked: true, text: raw.slice(0, 120), hits, unreadHits, debug };
   }
-  return { clicked: false, reason: 'no-unread-match', hits, unreadHits, debug };
+  return { clicked: false, reason: 'no-unread', hits, unreadHits, debug };
 }
 """
 
@@ -269,20 +276,19 @@ def _log_unread_debug(result: dict, *, scrolled: int = 0) -> None:
     unread_hits = result.get("unreadHits")
     extra = f" scrolled={scrolled}" if scrolled else ""
     if hits is not None:
-        print(f"  Subject hits: {hits} ({unread_hits} unread){extra}")
+        print(f"  List rows: {hits} ({unread_hits} unread){extra}")
     elif debug:
-        print(f"  Subject hits ({len(debug)}){extra}:")
+        print(f"  List rows ({len(debug)}){extra}:")
     for row in debug:
         flag = "UNREAD" if row.get("unread") else "read"
         print(f"    [{flag}] {row.get('text')!r}")
 
 
-def _click_first_unread(mail, subject: str) -> bool:
-    """Click an unread row whose subject matches, scrolling the list if needed.
+def _click_first_unread(mail) -> bool:
+    """Click the first unread mail in this mailbox.
 
-    W1 only keeps visible rows in the DOM, so unread mail a bit further
-    down is missed unless we scroll. Caps at MAX_LIST_SCROLLS screens so a
-    1000-mail inbox is never fully walked.
+    Subject is not checked — the mailbox is already the filtered inbox.
+    Scrolls at most MAX_LIST_SCROLLS screens; never walks a huge folder.
     """
     try:
         scroller = mail.evaluate(_MARK_LIST_SCROLLER_JS)
@@ -298,13 +304,13 @@ def _click_first_unread(mail, subject: str) -> bool:
     last_result: dict = {}
     can_scroll = bool(scroller.get("found"))
     if can_scroll:
-        print(f"  Mail list is scrollable — scanning at most {MAX_LIST_SCROLLS} screens down.")
+        print(f"  Scanning unread in this mailbox (max {MAX_LIST_SCROLLS} screens).")
     else:
-        print(f"  No mail-list scroller found — at most {MAX_LIST_SCROLLS} PageDowns.")
+        print(f"  No list scroller — at most {MAX_LIST_SCROLLS} PageDowns.")
 
     for step in range(MAX_LIST_SCROLLS + 1):
         try:
-            result = mail.evaluate(_CLICK_UNREAD_JS, subject)
+            result = mail.evaluate(_CLICK_UNREAD_JS)
         except Exception as e:
             print(f"  Unread scan failed: {e}")
             return False
@@ -341,14 +347,14 @@ def _click_first_unread(mail, subject: str) -> bool:
         time.sleep(0.35)
 
     _log_unread_debug(last_result)
-    print(f"  No unread mail matching {subject!r} ({last_result.get('reason')}).")
+    print(f"  No unread mail in this mailbox ({last_result.get('reason')}).")
     return False
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
-    """Process up to MAX_UNREAD_PER_TICK unread mails matching subject.
+    """Process up to MAX_UNREAD_PER_TICK unread mails in this mailbox.
 
-    If there are no unread matches, returns [] — never downloads a read/old mail.
+    The mailbox is already the subject inbox. If nothing is unread, returns [].
     """
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
@@ -367,9 +373,9 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     _open_mailbox(mail, mailbox)
 
     for i in range(MAX_UNREAD_PER_TICK):
-        if not _click_first_unread(mail, subject):
+        if not _click_first_unread(mail):
             if i == 0:
-                print(f"[{filter_id}] No unread mails matching subject — skipping download.")
+                print(f"[{filter_id}] No unread mails in this mailbox — skipping download.")
             else:
                 print(f"[{filter_id}] No more unread mails.")
             break

@@ -19,15 +19,18 @@ import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
 MAX_UNREAD_PER_TICK = 20
+# Extra screens to scan below the current view. Do NOT walk a huge inbox.
+MAX_LIST_SCROLLS = 5
 
 # Click unread matching subjects inside the mail iframe.
 # W1 unread = bold / "unread" class. Do NOT use a.not-open — that means
 # "not the currently opened tab", so it matches old/read rows too.
+# The list is virtualized: rows below the fold are not in the DOM until we scroll.
 _CLICK_UNREAD_JS = """
 (subject) => {
   const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
   const target = norm(subject);
-  if (!target) return { clicked: false, reason: 'empty-subject', debug: [] };
+  if (!target) return { clicked: false, reason: 'empty-subject', hits: 0, unreadHits: 0, debug: [] };
 
   const isUnread = (el) => {
     let n = el;
@@ -52,18 +55,74 @@ _CLICK_UNREAD_JS = """
 
   const nodes = [...document.querySelectorAll('a, span, div, [role="link"]')];
   const debug = [];
+  let hits = 0;
+  let unreadHits = 0;
   for (const el of nodes) {
     const raw = (el.innerText || '').trim();
     if (!matches(raw)) continue;
+    hits += 1;
     const unread = isUnread(el);
+    if (unread) unreadHits += 1;
     if (debug.length < 12) {
       debug.push({ text: raw.slice(0, 80), unread, cls: (el.className || '').toString().slice(0, 80) });
     }
     if (!unread) continue;
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
     el.click();
-    return { clicked: true, text: raw.slice(0, 120), debug };
+    return { clicked: true, text: raw.slice(0, 120), hits, unreadHits, debug };
   }
-  return { clicked: false, reason: 'no-unread-match', debug };
+  return { clicked: false, reason: 'no-unread-match', hits, unreadHits, debug };
+}
+"""
+
+_MARK_LIST_SCROLLER_JS = """
+() => {
+  const prev = document.querySelector('[data-w1-mail-scroller="1"]');
+  if (prev) prev.removeAttribute('data-w1-mail-scroller');
+  let best = null;
+  let bestScore = 0;
+  for (const n of document.querySelectorAll('div, ul, table, tbody, section')) {
+    const extra = n.scrollHeight - n.clientHeight;
+    if (extra < 40 || n.clientHeight < 80 || n.clientWidth < 120) continue;
+    const st = getComputedStyle(n);
+    if (!/(auto|scroll|overlay|hidden)/.test(st.overflowY)) continue;
+    const links = n.querySelectorAll('a, [role="link"], tr, li').length;
+    const score = extra + links * 80;
+    if (score > bestScore) {
+      best = n;
+      bestScore = score;
+    }
+  }
+  if (!best) return { found: false };
+  best.setAttribute('data-w1-mail-scroller', '1');
+  return {
+    found: true,
+    extra: best.scrollHeight - best.clientHeight,
+    clientHeight: best.clientHeight,
+    scrollHeight: best.scrollHeight,
+  };
+}
+"""
+
+_SCROLL_LIST_TOP_JS = """
+() => {
+  const el = document.querySelector('[data-w1-mail-scroller="1"]');
+  if (!el) return false;
+  el.scrollTop = 0;
+  return true;
+}
+"""
+
+_SCROLL_LIST_DOWN_JS = """
+() => {
+  const el = document.querySelector('[data-w1-mail-scroller="1"]');
+  if (!el) return { moved: false, atEnd: true };
+  const before = el.scrollTop;
+  const step = Math.max(Math.floor(el.clientHeight * 0.8), 120);
+  el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step);
+  const moved = el.scrollTop > before + 1;
+  const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  return { moved, atEnd, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight };
 }
 """
 
@@ -204,29 +263,85 @@ def _open_mailbox(mail, mailbox):
     time.sleep(1.5)
 
 
-def _click_first_unread(mail, subject: str) -> bool:
-    """Click the first unread row whose subject matches. Read/old mails are ignored."""
-    try:
-        result = mail.evaluate(_CLICK_UNREAD_JS, subject)
-    except Exception as e:
-        print(f"  Unread scan failed: {e}")
-        return False
-
-    if not isinstance(result, dict):
-        return False
-
+def _log_unread_debug(result: dict, *, scrolled: int = 0) -> None:
     debug = result.get("debug") or []
-    if debug:
-        print(f"  Subject hits ({len(debug)}):")
-        for row in debug:
-            flag = "UNREAD" if row.get("unread") else "read"
-            print(f"    [{flag}] {row.get('text')!r}")
+    hits = result.get("hits")
+    unread_hits = result.get("unreadHits")
+    extra = f" scrolled={scrolled}" if scrolled else ""
+    if hits is not None:
+        print(f"  Subject hits: {hits} ({unread_hits} unread){extra}")
+    elif debug:
+        print(f"  Subject hits ({len(debug)}){extra}:")
+    for row in debug:
+        flag = "UNREAD" if row.get("unread") else "read"
+        print(f"    [{flag}] {row.get('text')!r}")
 
-    if result.get("clicked"):
-        print(f"  Opened unread: {result.get('text')!r}")
-        return True
 
-    print(f"  No unread mail matching {subject!r} ({result.get('reason')}).")
+def _click_first_unread(mail, subject: str) -> bool:
+    """Click an unread row whose subject matches, scrolling the list if needed.
+
+    W1 only keeps visible rows in the DOM, so unread mail a bit further
+    down is missed unless we scroll. Caps at MAX_LIST_SCROLLS screens so a
+    1000-mail inbox is never fully walked.
+    """
+    try:
+        scroller = mail.evaluate(_MARK_LIST_SCROLLER_JS)
+        if isinstance(scroller, dict) and scroller.get("found"):
+            mail.evaluate(_SCROLL_LIST_TOP_JS)
+            time.sleep(0.25)
+        else:
+            scroller = {"found": False}
+    except Exception as e:
+        print(f"  Mail list scroller: {e}")
+        scroller = {"found": False}
+
+    last_result: dict = {}
+    can_scroll = bool(scroller.get("found"))
+    if can_scroll:
+        print(f"  Mail list is scrollable — scanning at most {MAX_LIST_SCROLLS} screens down.")
+    else:
+        print(f"  No mail-list scroller found — at most {MAX_LIST_SCROLLS} PageDowns.")
+
+    for step in range(MAX_LIST_SCROLLS + 1):
+        try:
+            result = mail.evaluate(_CLICK_UNREAD_JS, subject)
+        except Exception as e:
+            print(f"  Unread scan failed: {e}")
+            return False
+
+        if not isinstance(result, dict):
+            return False
+        last_result = result
+
+        if result.get("clicked"):
+            if step == 0:
+                _log_unread_debug(result)
+            else:
+                _log_unread_debug(result, scrolled=step)
+            print(f"  Opened unread: {result.get('text')!r}")
+            return True
+
+        if step >= MAX_LIST_SCROLLS:
+            break
+        advanced = False
+        if can_scroll:
+            try:
+                moved = mail.evaluate(_SCROLL_LIST_DOWN_JS)
+                advanced = isinstance(moved, dict) and bool(moved.get("moved"))
+            except Exception:
+                advanced = False
+        else:
+            try:
+                mail.locator("body").press("PageDown")
+                advanced = True
+            except Exception:
+                advanced = False
+        if not advanced:
+            break
+        time.sleep(0.35)
+
+    _log_unread_debug(last_result)
+    print(f"  No unread mail matching {subject!r} ({last_result.get('reason')}).")
     return False
 
 

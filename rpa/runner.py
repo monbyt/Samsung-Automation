@@ -270,6 +270,8 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         _log(f"Start URL: {job['start_url']}")
     result = {"rpa_id": rpa_id, "status": "ok", "message": ""}
     used_path = None
+    resolved_upload_dir = ""
+    resolved_download_dir = ""
 
     try:
         check_cancelled()
@@ -292,6 +294,8 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
             from rpa.codegen import run_recorded_script
 
             upload_dir, download_dir = _resolve_rpa_folders(job)
+            resolved_upload_dir = upload_dir
+            resolved_download_dir = download_dir
             _log(f"Upload folder: {upload_dir}")
             _log(f"Download folder: {download_dir}")
             try:
@@ -323,7 +327,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
         print(f"[RPA] {job['name']} complete.")
         finish_step("rpa", "ok", f"{job['name']} finished")
 
-        _maybe_send_email(rpa_id)
+        _maybe_send_email(rpa_id, upload_dir=resolved_upload_dir)
 
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
@@ -368,7 +372,7 @@ def run_rpa(rpa_id: str, upload_file: Optional[str] = None, _visited: Optional[s
     return result
 
 
-def _maybe_send_email(rpa_id: str) -> None:
+def _maybe_send_email(rpa_id: str, upload_dir: str = "") -> None:
     """If an enabled email job is configured for this RPA, send it."""
     from pipeline_progress import begin_step, check_cancelled, finish_step, skip_step
 
@@ -398,16 +402,16 @@ def _maybe_send_email(rpa_id: str) -> None:
     begin_step("email", f"To {job.get('to_emails')}{cc_note}")
     try:
         from mail.sender import send_for_rpa
-        result = send_for_rpa(rpa_id)  # also cleans the attach folder
+        result = send_for_rpa(rpa_id, upload_dir=upload_dir or None)
         mark_send_finished(rpa_id, "ok")
         cleaned = (result or {}).get("cleaned_files") or []
         finish_step("email", "ok", f"Sent to {job.get('to_emails')}{cc_note}")
-        begin_step("cleanup", result.get("cleaned_dir") or "")
+        begin_step("cleanup", result.get("cleaned_upload_dir") or result.get("cleaned_dir") or "")
         finish_step(
             "cleanup", "ok",
             f"Removed {len(cleaned)} file(s)" if cleaned else "Folder already empty",
         )
-        _log(f"Email sent for {rpa_id}.")
+        _log(f"Email sent for {rpa_id}. Cleaned: {cleaned}")
     except Exception as e:
         from pipeline_progress import PipelineCancelled
         if isinstance(e, PipelineCancelled):

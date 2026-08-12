@@ -237,17 +237,32 @@ def cleanup_folder_files(
     return deleted
 
 
+def _normalize_folder_path(raw: str) -> str:
+    """Expand and normalize a configured folder path (file → parent dir)."""
+    folder = (raw or "").strip().strip('"')
+    if not folder:
+        return ""
+    folder = os.path.expandvars(os.path.expanduser(folder))
+    folder = os.path.normpath(folder)
+    if os.path.isfile(folder):
+        folder = os.path.dirname(folder)
+    return folder if folder and os.path.isdir(folder) else ""
+
+
 def send_for_rpa(
     rpa_id: str,
     override_file: Optional[str] = None,
     *,
     cleanup: bool = True,
+    upload_dir: Optional[str] = None,
 ) -> dict:
     """Look up the email job for an RPA and send its latest downloaded file(s).
 
     override_file — if provided, use this exact path instead of scanning folders.
     cleanup — after a successful send, delete files from the attach/download
               subfolder so processed attachments do not pile up.
+    upload_dir — explicit RPA upload folder to clean (RESULT xlsx). Prefer this
+                 over DB lookup so we clean the same path the RPA just wrote to.
     """
     from mail.email_jobs_db import get_email_job_for_rpa
 
@@ -280,19 +295,41 @@ def send_for_rpa(
     )
 
     if cleanup:
-        deleted = cleanup_folder_files(watch_dir, also=files)
-        # Also clear Excel/results from the RPA upload folder, but keep LAYOUT/templates
-        upload_dir = _rpa_upload_folder(rpa_id)
-        if upload_dir and os.path.normpath(upload_dir) != os.path.normpath(watch_dir or ""):
+        deleted: list[str] = []
+        resolved_upload = _normalize_folder_path(upload_dir or "") or _rpa_upload_folder(rpa_id)
+        watch_norm = os.path.normpath(watch_dir) if watch_dir else ""
+        upload_norm = os.path.normpath(resolved_upload) if resolved_upload else ""
+        print(
+            f"[mail] Cleanup attach_dir={watch_norm!r} upload_dir={upload_norm!r}",
+            flush=True,
+        )
+
+        if watch_norm and upload_norm and watch_norm == upload_norm:
+            # Same folder holds PDFs + Excel — wipe attachables but keep LAYOUT/templates.
             deleted += cleanup_folder_files(
-                upload_dir,
+                watch_norm,
+                also=files,
                 keep_name_contains=("layout", "template"),
             )
+        else:
+            deleted += cleanup_folder_files(watch_norm, also=files)
+            if upload_norm:
+                deleted += cleanup_folder_files(
+                    upload_norm,
+                    keep_name_contains=("layout", "template"),
+                )
+            else:
+                print(
+                    f"[mail] Upload folder not resolved for {rpa_id!r} — "
+                    "RESULT Excel may remain. Set RPA Upload folder in the dashboard.",
+                    flush=True,
+                )
+
         result = dict(result) if isinstance(result, dict) else {"response": result}
         result["cleaned_files"] = [os.path.basename(p) for p in deleted]
-        result["cleaned_dir"] = watch_dir
-        if upload_dir:
-            result["cleaned_upload_dir"] = upload_dir
+        result["cleaned_dir"] = watch_norm
+        if upload_norm:
+            result["cleaned_upload_dir"] = upload_norm
 
     return result
 
@@ -306,12 +343,9 @@ def _rpa_upload_folder(rpa_id: str) -> str:
         job = None
     if not job:
         return ""
-    folder = (job.get("upload_folder") or "").strip()
+    folder = _normalize_folder_path(job.get("upload_folder") or "")
     if folder:
-        if os.path.isfile(folder):
-            folder = os.path.dirname(folder)
-        if os.path.isdir(folder):
-            return os.path.normpath(folder)
+        return folder
     mail_id = job.get("trigger_mail_job") or ""
     if mail_id:
         try:
@@ -319,15 +353,12 @@ def _rpa_upload_folder(rpa_id: str) -> str:
             mj = get_job(mail_id)
             if mj:
                 d = mj.get("download_dir") or resolve_download_dir(mj)
-                if d and os.path.isdir(d):
-                    return os.path.normpath(d)
+                return _normalize_folder_path(d)
         except Exception:
             pass
     try:
         import config
-        d = getattr(config, "DOWNLOAD_DIR", "") or ""
-        if d and os.path.isdir(d):
-            return os.path.normpath(d)
+        return _normalize_folder_path(getattr(config, "DOWNLOAD_DIR", "") or "")
     except Exception:
         pass
     return ""

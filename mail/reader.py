@@ -1,5 +1,7 @@
 """
 W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
+
+Only unread mails are processed (`a.not-open`). If nothing is unread, we download nothing.
 """
 import json
 import os
@@ -15,6 +17,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
+MAX_UNREAD_PER_TICK = 4
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -109,8 +112,6 @@ def _download_attachment(page, mail, download_dir):
     """Click Download → handle Save As dialog if it appears → locate file."""
     from win_save_as import dismiss_save_as_dialog, snapshot_folder, wait_for_new_file
 
-    # Snapshot BEFORE we trigger the download so we can diff even if
-    # Chrome auto-saves the file instantly (no Save As dialog).
     before = snapshot_folder(download_dir)
     started = time.time()
 
@@ -121,9 +122,6 @@ def _download_attachment(page, mail, download_dir):
     print(f"  Handling Save As dialog → {download_dir}")
     dismiss_save_as_dialog(timeout=20, directory=download_dir)
 
-    # Dismiss the mail app's "Download complete" popup immediately — do
-    # NOT block on file detection first, otherwise the mailbox stays
-    # frozen and the next job can't run.
     try:
         mail.get_by_role("button", name="OK").first.click(timeout=3_000)
     except Exception:
@@ -135,8 +133,77 @@ def _download_attachment(page, mail, download_dir):
     return save_path
 
 
-def check_filter(page, mail_filter, processed_subjects):
-    """Open mailbox, click matching email, download attachment."""
+def _open_mailbox(mail, mailbox):
+    """Navigate to the given mailbox inside the mail iframe.
+
+    After a mail is opened, W1 adds a tab whose aria-label is the mailbox name,
+    so get_by_role("button", name=mailbox) can match both the sidebar and the tab.
+    Prefer the sidebar entry (exclude tab-links).
+    """
+    candidates = mail.get_by_role("button", name=mailbox, exact=True)
+    count = candidates.count()
+    target = None
+    for i in range(count):
+        btn = candidates.nth(i)
+        cls = (btn.get_attribute("class") or "").lower()
+        if "tab-link" in cls:
+            continue
+        target = btn
+        break
+    if target is None:
+        target = candidates.first
+    target.click()
+    time.sleep(1.5)
+
+
+def _debug_dump_unread(mail):
+    try:
+        unread = mail.locator("a.not-open")
+        n = unread.count()
+        print(f"  DEBUG: found {n} unread (a.not-open) element(s).")
+        for idx in range(min(n, 15)):
+            try:
+                txt = unread.nth(idx).inner_text(timeout=1_000).strip()
+                print(f"    [{idx}] {txt!r}")
+            except Exception as e:
+                print(f"    [{idx}] <read failed: {e}>")
+    except Exception as e:
+        print(f"  DEBUG: could not enumerate unread: {e}")
+
+
+def _find_first_unread_row(mail, subject: str):
+    """Return the first unread row whose subject matches, or None.
+
+    W1 marks unread subjects with class ``not-open``. Read/old mails are ignored.
+    """
+    try:
+        unread = mail.locator("a.not-open")
+        unread.first.wait_for(state="visible", timeout=3_000)
+    except PlaywrightTimeout:
+        return None
+    except Exception:
+        return None
+
+    target = subject.strip()
+    n = unread.count()
+    for idx in range(n):
+        try:
+            txt = unread.nth(idx).inner_text(timeout=1_000).strip()
+        except Exception:
+            continue
+        if txt == target:
+            return unread.nth(idx)
+
+    print(f"  No unread row exactly matching {target!r}.")
+    _debug_dump_unread(mail)
+    return None
+
+
+def check_filter(page, mail_filter, processed_subjects, on_download=None):
+    """Process up to MAX_UNREAD_PER_TICK unread mails matching subject.
+
+    If there are no unread matches, returns [] — never downloads a read/old mail.
+    """
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
     subject = mail_filter["subject"]
@@ -150,27 +217,54 @@ def check_filter(page, mail_filter, processed_subjects):
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}'")
     print(f"[{filter_id}] Saving to: {download_dir}")
 
-    key = f"{filter_id}::{subject}"
-    if key in processed_subjects:
-        print(f"[{filter_id}] Already handled this session")
-        return downloaded
-
     mail = _mail(page)
-    mail.get_by_role("button", name=mailbox, exact=True).click()
-    mail.locator("div").filter(has_text=_subject_pattern(subject)).first.click()
+    _open_mailbox(mail, mailbox)
 
-    save_path = _download_attachment(page, mail, download_dir)
+    for i in range(MAX_UNREAD_PER_TICK):
+        row = _find_first_unread_row(mail, subject)
+        if row is None:
+            if i == 0:
+                print(f"[{filter_id}] No unread mails matching subject — skipping download.")
+            else:
+                print(f"[{filter_id}] No more unread mails.")
+            break
 
-    processed_subjects.add(key)
-    downloaded.append({
-        "path": save_path,
-        "filter_id": filter_id,
-        "table": mail_filter["table"],
-        "subject": subject,
-        "ingest_mode": mail_filter.get("ingest_mode", "replace"),
-        "extract_zip": mail_filter.get("extract_zip", False),
-    })
-    print(f"[{filter_id}] Saved to {save_path}")
+        print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_UNREAD_PER_TICK}")
+        row.click()
+        time.sleep(1.0)
+
+        save_path = _download_attachment(page, mail, download_dir)
+
+        try:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            base, ext = os.path.splitext(os.path.basename(save_path))
+            unique_name = f"{base}_{stamp}_{i}{ext}"
+            unique_path = os.path.join(os.path.dirname(save_path), unique_name)
+            os.rename(save_path, unique_path)
+            save_path = unique_path
+            print(f"[{filter_id}] Renamed to {unique_name}")
+        except OSError as e:
+            print(f"[{filter_id}] Could not rename download uniquely: {e}")
+
+        item = {
+            "path": save_path,
+            "filter_id": filter_id,
+            "table": mail_filter["table"],
+            "subject": subject,
+            "ingest_mode": mail_filter.get("ingest_mode", "replace"),
+            "extract_zip": mail_filter.get("extract_zip", False),
+        }
+        downloaded.append(item)
+        print(f"[{filter_id}] Saved to {save_path}")
+
+        if on_download:
+            try:
+                on_download(item)
+            except Exception as e:
+                print(f"[{filter_id}] on_download failed for {save_path}: {e}")
+
+        _open_mailbox(mail, mailbox)
+
     return downloaded
 
 
@@ -204,13 +298,12 @@ def run_mail_check(filters=None, on_download=None):
         for i, mail_filter in enumerate(filters):
             try:
                 if i > 0:
-                    # Fresh mail view so a previous job's open email doesn't block the next.
                     _open_mail(page)
-                items = check_filter(page, mail_filter, processed_subjects)
-                for item in items:
-                    summary["downloads"].append(item)
-                    if on_download:
-                        on_download(item)
+                items = check_filter(
+                    page, mail_filter, processed_subjects,
+                    on_download=on_download,
+                )
+                summary["downloads"].extend(items)
             except Exception as e:
                 msg = f"{mail_filter['id']}: {e}"
                 print(f"ERROR {msg}")
@@ -240,4 +333,4 @@ def download_latest():
         return result
     if summary["downloads"]:
         return summary["downloads"][-1]["path"]
-    raise RuntimeError("No matching email found to download.")
+    raise RuntimeError("No unread matching email found to download.")

@@ -1,8 +1,8 @@
 """
 Live pipeline step tracking for the dashboard.
 
-Each mail/RPA/email run gets a run_id with ordered steps that flip
-pending → running → ok/error so the UI can show a stepper in real time.
+Supports multiple concurrent runs (parallel RPA workers). Each run has its
+own cancel flag so Stop on one card does not kill the others.
 """
 from __future__ import annotations
 
@@ -30,10 +30,11 @@ pipeline_runs = Table(
     Column("kind", String(32)),          # mail | rpa | email
     Column("label", String(200)),
     Column("ref_id", String(64)),        # job_id / rpa_id
-    Column("status", String(20)),        # running | ok | error
+    Column("status", String(20)),        # running | ok | error | cancelled
     Column("started_at", DateTime),
     Column("finished_at", DateTime),
     Column("message", Text),
+    Column("cancel_requested", Integer, default=0),
 )
 
 pipeline_steps = Table(
@@ -50,11 +51,11 @@ pipeline_steps = Table(
 )
 
 _lock = threading.Lock()
-_active_run_id: Optional[str] = None
-_stop_event = threading.Event()
+_active_run_ids: set[str] = set()
+# In-process fast path (same process as the worker thread). Cross-process
+# cancel uses pipeline_runs.cancel_requested in SQLite.
+_stop_events: Dict[str, threading.Event] = {}
 
-# Contextvar-like thread-local so nested helpers can emit steps without
-# threading run_id through every call.
 _tls = threading.local()
 
 
@@ -68,6 +69,11 @@ def _init():
     if config.DB_URL.startswith("sqlite"):
         with _engine.begin() as conn:
             conn.execute(text("PRAGMA journal_mode=WAL"))
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(pipeline_runs)"))}
+            if "cancel_requested" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE pipeline_runs ADD COLUMN cancel_requested INTEGER DEFAULT 0"
+                ))
 
 
 _init()
@@ -81,69 +87,125 @@ def set_current_run(run_id: Optional[str]) -> None:
     _tls.run_id = run_id
 
 
-def is_stop_requested() -> bool:
-    return _stop_event.is_set()
+def is_stop_requested(run_id: Optional[str] = None) -> bool:
+    run_id = run_id or current_run_id()
+    if not run_id:
+        return False
+    with _lock:
+        ev = _stop_events.get(run_id)
+        if ev is not None and ev.is_set():
+            return True
+    try:
+        with _engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT cancel_requested FROM pipeline_runs "
+                    "WHERE id=:r AND status='running'"
+                ),
+                {"r": run_id},
+            ).first()
+        return bool(row and row[0])
+    except Exception:
+        return False
 
 
-def check_cancelled(message: str = "Stopped by user") -> None:
-    """Raise PipelineCancelled if Stop was pressed."""
-    if _stop_event.is_set():
+def check_cancelled(message: str = "Stopped by user", run_id: Optional[str] = None) -> None:
+    """Raise PipelineCancelled if Stop was pressed for this run."""
+    if is_stop_requested(run_id):
         raise PipelineCancelled(message)
 
 
-def request_stop(message: str = "Stopped by user") -> Optional[str]:
-    """Signal the running pipeline to halt after the current step."""
-    _stop_event.set()
-    run_id = None
-    with _lock:
-        run_id = _active_run_id
+def _mark_run_cancelled_in_db(run_id: str, message: str) -> None:
+    now = datetime.now()
+    with _engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE pipeline_runs SET cancel_requested=1 WHERE id=:r"
+            ),
+            {"r": run_id},
+        )
+        conn.execute(
+            text(
+                "UPDATE pipeline_steps SET status='error', message=:m, finished_at=:t "
+                "WHERE run_id=:r AND status='running'"
+            ),
+            {"m": message, "t": now, "r": run_id},
+        )
+        conn.execute(
+            text(
+                "UPDATE pipeline_steps SET status='skipped', message='Cancelled', "
+                "finished_at=:t WHERE run_id=:r AND status='pending'"
+            ),
+            {"t": now, "r": run_id},
+        )
+        conn.execute(
+            text(
+                "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t "
+                "WHERE id=:r AND status='running'"
+            ),
+            {"m": message, "t": now, "r": run_id},
+        )
+
+
+def request_stop(message: str = "Stopped by user", run_id: Optional[str] = None) -> Optional[str]:
+    """Stop one run (run_id) or every running run if run_id is omitted."""
+    targets: List[str] = []
     if run_id:
-        # Mark currently-running step + remaining as cancelled immediately for UI
-        now = datetime.now()
-        with _engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE pipeline_steps SET status='error', message=:m, finished_at=:t "
-                    "WHERE run_id=:r AND status='running'"
-                ),
-                {"m": message, "t": now, "r": run_id},
-            )
-            conn.execute(
-                text(
-                    "UPDATE pipeline_steps SET status='skipped', message='Cancelled', "
-                    "finished_at=:t WHERE run_id=:r AND status='pending'"
-                ),
-                {"t": now, "r": run_id},
-            )
-            conn.execute(
-                text(
-                    "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t "
-                    "WHERE id=:r AND status='running'"
-                ),
-                {"m": message, "t": now, "r": run_id},
-            )
-    return run_id
+        targets = [run_id]
+    else:
+        with _engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT id FROM pipeline_runs WHERE status='running'")
+            ).fetchall()
+        targets = [r[0] for r in rows]
+        with _lock:
+            targets = list(dict.fromkeys(list(_active_run_ids) + targets))
+
+    if not targets:
+        return None
+
+    for rid in targets:
+        with _lock:
+            ev = _stop_events.get(rid)
+            if ev is None:
+                ev = threading.Event()
+                _stop_events[rid] = ev
+            ev.set()
+        try:
+            _mark_run_cancelled_in_db(rid, message)
+        except Exception:
+            pass
+    return targets[0] if len(targets) == 1 else targets[0]
 
 
 def reset_pipeline(message: str = "Reset") -> None:
-    """Stop any active run and clear the cancel flag so a new run can start clean."""
+    """Cancel every running run and clear stop flags."""
     request_stop(message)
-    # Also force-finish any still-running rows (in case DB race)
     with _engine.begin() as conn:
         now = datetime.now()
         conn.execute(
             text(
-                "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t "
-                "WHERE status='running'"
+                "UPDATE pipeline_runs SET status='cancelled', message=:m, finished_at=:t, "
+                "cancel_requested=1 WHERE status='running'"
             ),
             {"m": message, "t": now},
         )
-    clear_stop()
+    with _lock:
+        for ev in _stop_events.values():
+            ev.clear()
+        _stop_events.clear()
+        _active_run_ids.clear()
     set_current_run(None)
 
 
-def clear_stop() -> None:
-    _stop_event.clear()
+def clear_stop(run_id: Optional[str] = None) -> None:
+    run_id = run_id or current_run_id()
+    if not run_id:
+        return
+    with _lock:
+        ev = _stop_events.get(run_id)
+        if ev is not None:
+            ev.clear()
 
 
 def start_run(
@@ -154,7 +216,6 @@ def start_run(
 ) -> str:
     """Create a run with ordered steps. steps = [(key, title), ...]."""
     _init()
-    clear_stop()
     run_id = str(uuid.uuid4())
     now = datetime.now()
     with _engine.begin() as conn:
@@ -167,6 +228,7 @@ def start_run(
             started_at=now,
             finished_at=None,
             message="",
+            cancel_requested=0,
         ))
         for i, (key, title) in enumerate(steps):
             conn.execute(pipeline_steps.insert().values(
@@ -180,8 +242,8 @@ def start_run(
                 finished_at=None,
             ))
     with _lock:
-        global _active_run_id
-        _active_run_id = run_id
+        _active_run_ids.add(run_id)
+        _stop_events[run_id] = threading.Event()
     set_current_run(run_id)
     return run_id
 
@@ -242,7 +304,6 @@ def finish_run(
         return
     now = datetime.now()
     with _engine.begin() as conn:
-        # Any still-pending steps → skipped on success, error stays if already set
         if status == "ok":
             conn.execute(
                 text(
@@ -273,12 +334,10 @@ def finish_run(
             {"s": status, "m": (message or "")[:2000], "t": now, "r": run_id},
         )
     with _lock:
-        global _active_run_id
-        if _active_run_id == run_id:
-            _active_run_id = run_id  # keep pointing at last finished for UI
-    set_current_run(None)
-    if status in ("ok", "error", "cancelled"):
-        clear_stop()
+        _active_run_ids.discard(run_id)
+        _stop_events.pop(run_id, None)
+    if current_run_id() == run_id:
+        set_current_run(None)
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
@@ -307,6 +366,7 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
         "started_at": _fmt(row["started_at"]),
         "finished_at": _fmt(row["finished_at"]),
         "message": row["message"] or "",
+        "cancel_requested": bool(row.get("cancel_requested")),
         "steps": [
             {
                 "key": s["step_key"],
@@ -322,25 +382,44 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_active_run() -> Optional[Dict[str, Any]]:
-    """Most recent running run, else the latest finished one (for the panel)."""
+    """Most recent running run, else the latest finished one (compat)."""
+    runs = get_active_runs(include_recent=1)
+    return runs[0] if runs else None
+
+
+def get_active_runs(include_recent: int = 8) -> List[Dict[str, Any]]:
+    """All currently running runs, plus a few recent finished ones."""
     _init()
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     with _engine.connect() as conn:
-        row = conn.execute(
+        running = conn.execute(
             text(
                 "SELECT id FROM pipeline_runs WHERE status='running' "
-                "ORDER BY started_at DESC LIMIT 1"
+                "ORDER BY started_at DESC"
             )
-        ).first()
-        if not row:
-            row = conn.execute(
+        ).fetchall()
+        for (rid,) in running:
+            r = get_run(rid)
+            if r:
+                out.append(r)
+                seen.add(rid)
+        if include_recent > 0:
+            recent = conn.execute(
                 text(
                     "SELECT id FROM pipeline_runs "
-                    "ORDER BY started_at DESC LIMIT 1"
-                )
-            ).first()
-    if not row:
-        return None
-    return get_run(row[0])
+                    "WHERE status != 'running' "
+                    "ORDER BY started_at DESC LIMIT :n"
+                ),
+                {"n": include_recent},
+            ).fetchall()
+            for (rid,) in recent:
+                if rid in seen:
+                    continue
+                r = get_run(rid)
+                if r:
+                    out.append(r)
+    return out
 
 
 def list_recent_runs(limit: int = 10) -> List[Dict[str, Any]]:

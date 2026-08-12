@@ -255,6 +255,7 @@ def send_for_rpa(
     *,
     cleanup: bool = True,
     upload_dir: Optional[str] = None,
+    attach_dir: Optional[str] = None,
 ) -> dict:
     """Look up the email job for an RPA and send its latest downloaded file(s).
 
@@ -263,6 +264,7 @@ def send_for_rpa(
               subfolder so processed attachments do not pile up.
     upload_dir — explicit RPA upload folder to clean (RESULT xlsx). Prefer this
                  over DB lookup so we clean the same path the RPA just wrote to.
+    attach_dir — explicit PDF/attach folder (parallel workers use an isolated subdir).
     """
     from mail.email_jobs_db import get_email_job_for_rpa
 
@@ -278,7 +280,11 @@ def send_for_rpa(
         files.append(override_file)
         watch_dir = os.path.dirname(os.path.abspath(override_file))
     else:
-        watch_dir = job.get("attach_folder") or _rpa_download_folder(rpa_id)
+        watch_dir = (
+            _normalize_folder_path(attach_dir or "")
+            or job.get("attach_folder")
+            or _rpa_download_folder(rpa_id)
+        )
         # 0 / blank = attach every file in the folder (PDF download folder workflow).
         raw_count = job.get("attach_count")
         try:

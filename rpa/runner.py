@@ -248,11 +248,15 @@ def run_rpa(
     upload_file: Optional[str] = None,
     _visited: Optional[set] = None,
     send_email: bool = True,
+    upload_dir: Optional[str] = None,
+    download_dir: Optional[str] = None,
+    run_label: Optional[str] = None,
 ) -> dict:
     """Run one RPA tool by id. Chains to next_rpa on success.
 
-    send_email — if False, skip the post-RPA mail send (used when processing
-    several downloaded Excels; send once after the last file).
+    send_email — if False, skip the post-RPA mail send.
+    upload_dir / download_dir — optional isolated folders for parallel workers.
+    run_label — optional Live-execution card title.
     """
     from pipeline_progress import (
         PipelineCancelled, begin_step, check_cancelled, current_run_id,
@@ -275,7 +279,7 @@ def run_rpa(
         start_run(
             "rpa",
             rpa_id,
-            f"RPA · {job.get('name') or rpa_id}",
+            run_label or f"RPA · {job.get('name') or rpa_id}",
             [
                 ("prepare", "Prepare upload file"),
                 ("rpa", f"Run {job.get('name') or rpa_id}"),
@@ -315,11 +319,13 @@ def run_rpa(
         elif job["tool"] == "codegen":
             from rpa.codegen import run_recorded_script
 
-            upload_dir, download_dir = _resolve_rpa_folders(job)
-            resolved_upload_dir = upload_dir
-            resolved_download_dir = download_dir
-            _log(f"Upload folder: {upload_dir}")
-            _log(f"Download folder: {download_dir}")
+            base_upload, base_download = _resolve_rpa_folders(job)
+            resolved_upload_dir = _normalize_folder_path(upload_dir) or base_upload
+            resolved_download_dir = _normalize_folder_path(download_dir) or base_download
+            os.makedirs(resolved_upload_dir, exist_ok=True)
+            os.makedirs(resolved_download_dir, exist_ok=True)
+            _log(f"Upload folder: {resolved_upload_dir}")
+            _log(f"Download folder: {resolved_download_dir}")
             try:
                 path = _prepare_upload_file(upload_file, job)
                 used_path = path
@@ -337,8 +343,8 @@ def run_rpa(
             run_recorded_script(
                 rpa_id,
                 upload_file=path,
-                upload_dir=upload_dir,
-                download_dir=download_dir,
+                upload_dir=resolved_upload_dir,
+                download_dir=resolved_download_dir,
             )
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
@@ -350,7 +356,11 @@ def run_rpa(
         finish_step("rpa", "ok", f"{job['name']} finished")
 
         if send_email:
-            _maybe_send_email(rpa_id, upload_dir=resolved_upload_dir)
+            _maybe_send_email(
+                rpa_id,
+                upload_dir=resolved_upload_dir,
+                attach_dir=resolved_download_dir,
+            )
         else:
             _log("Deferring email send until remaining download files are processed.")
 
@@ -397,7 +407,7 @@ def run_rpa(
     return result
 
 
-def _maybe_send_email(rpa_id: str, upload_dir: str = "") -> None:
+def _maybe_send_email(rpa_id: str, upload_dir: str = "", attach_dir: str = "") -> None:
     """If an enabled email job is configured for this RPA, send it."""
     from pipeline_progress import begin_step, check_cancelled, finish_step, skip_step
 
@@ -427,7 +437,11 @@ def _maybe_send_email(rpa_id: str, upload_dir: str = "") -> None:
     begin_step("email", f"To {job.get('to_emails')}{cc_note}")
     try:
         from mail.sender import send_for_rpa
-        result = send_for_rpa(rpa_id, upload_dir=upload_dir or None)
+        result = send_for_rpa(
+            rpa_id,
+            upload_dir=upload_dir or None,
+            attach_dir=attach_dir or None,
+        )
         mark_send_finished(rpa_id, "ok")
         cleaned = (result or {}).get("cleaned_files") or []
         finish_step("email", "ok", f"Sent to {job.get('to_emails')}{cc_note}")
@@ -451,16 +465,61 @@ def _maybe_send_email(rpa_id: str, upload_dir: str = "") -> None:
             pass
 
 
+def _worker_slot_dirs(base_upload: str, base_download: str, index: int, token: str) -> Tuple[str, str]:
+    """Isolated upload/PDF folders so parallel workers cannot clobber each other."""
+    name = f"_worker_{index:02d}_{token}"
+    upload = os.path.join(base_upload, name)
+    download = os.path.join(base_download, name)
+    os.makedirs(upload, exist_ok=True)
+    os.makedirs(download, exist_ok=True)
+    return upload, download
+
+
+def _parallel_worker(payload: dict) -> dict:
+    """Child-process entry: one inbox Excel → RPA → email (isolated folders)."""
+    os.environ.setdefault("NO_PROXY", "*")
+    os.environ.setdefault("no_proxy", "*")
+    # Detach from parent mail-run context so this worker owns its Live card
+    # (needed when we run in-process for a single file).
+    from pipeline_progress import set_current_run
+    set_current_run(None)
+
+    rpa_id = payload["rpa_id"]
+    path = payload.get("upload_file")
+    label = payload.get("label") or f"RPA · {rpa_id}"
+    try:
+        return run_rpa(
+            rpa_id,
+            upload_file=path,
+            send_email=True,
+            upload_dir=payload.get("upload_dir"),
+            download_dir=payload.get("download_dir"),
+            run_label=label,
+        )
+    except Exception as e:
+        return {
+            "rpa_id": rpa_id,
+            "status": "error",
+            "message": str(e),
+            "upload_file": path,
+        }
+
+
 def trigger_for_mail_job(
     mail_job_id: str,
     upload_file: Optional[str] = None,
     upload_files: Optional[list] = None,
 ):
-    """Run all enabled RPA tools linked to this mail job.
+    """Run linked RPA tools for each downloaded mail Excel.
 
-    upload_files — process each downloaded spreadsheet, then send email once
-    after the last file so every PDF lands in one message.
+    Multiple inbox Excels run in parallel (process pool, capped by
+    config.RPA_PARALLEL_WORKERS). Each worker has isolated upload/PDF folders
+    and its own Live-execution card — Stop on one card leaves the others running.
+
+    One Excel with several SOs still becomes multiple PDFs on that worker's
+    outgoing email.
     """
+    from concurrent.futures import ProcessPoolExecutor
     from pipeline_progress import PipelineCancelled, check_cancelled
 
     linked = list_for_mail_job(mail_job_id)
@@ -473,32 +532,84 @@ def trigger_for_mail_job(
     if not files:
         files = [None]
 
+    workers = max(1, int(getattr(config, "RPA_PARALLEL_WORKERS", 2) or 2))
     results = []
+
     for rpa in linked:
+        rpa_id = rpa["rpa_id"]
+        base_upload, base_download = _resolve_rpa_folders(rpa)
+        token = datetime.now().strftime("%H%M%S")
+        payloads = []
         for i, path in enumerate(files):
-            last = i == len(files) - 1
-            try:
-                check_cancelled()
-                if path:
-                    _log(f"Mail file {i + 1}/{len(files)}: {os.path.basename(path)}")
-                results.append(
-                    run_rpa(
-                        rpa["rpa_id"],
-                        upload_file=path,
-                        send_email=last,
-                    )
+            if path:
+                w_upload, w_download = _worker_slot_dirs(base_upload, base_download, i + 1, token)
+                label = (
+                    f"RPA · {rpa.get('name') or rpa_id} · "
+                    f"mail {i + 1}/{len(files)} · {os.path.basename(path)}"
                 )
-            except PipelineCancelled as e:
-                results.append({
-                    "rpa_id": rpa["rpa_id"],
-                    "status": "error",
-                    "message": str(e),
-                })
+                _log(f"Queue mail file {i + 1}/{len(files)}: {os.path.basename(path)}")
+            else:
+                w_upload, w_download = base_upload, base_download
+                label = f"RPA · {rpa.get('name') or rpa_id}"
+            payloads.append({
+                "rpa_id": rpa_id,
+                "upload_file": path,
+                "upload_dir": w_upload,
+                "download_dir": w_download,
+                "label": label,
+            })
+
+        # Single file → same process (no pool overhead / easier debugging)
+        if len(payloads) == 1 or workers <= 1:
+            for payload in payloads:
+                check_cancelled()
+                try:
+                    results.append(_parallel_worker(payload))
+                except PipelineCancelled as e:
+                    results.append({
+                        "rpa_id": rpa_id,
+                        "status": "error",
+                        "message": str(e),
+                    })
+                    raise
+                except Exception as e:
+                    results.append({
+                        "rpa_id": rpa_id,
+                        "status": "error",
+                        "message": str(e),
+                    })
+            continue
+
+        _log(f"Starting {len(payloads)} RPA worker(s), concurrency={workers}")
+        from concurrent.futures import wait, FIRST_COMPLETED
+
+        with ProcessPoolExecutor(max_workers=min(workers, len(payloads))) as pool:
+            futures = {pool.submit(_parallel_worker, p): p for p in payloads}
+            pending = set(futures)
+            try:
+                while pending:
+                    check_cancelled()
+                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        payload = futures[fut]
+                        try:
+                            results.append(fut.result())
+                        except Exception as e:
+                            results.append({
+                                "rpa_id": rpa_id,
+                                "status": "error",
+                                "message": str(e),
+                                "upload_file": payload.get("upload_file"),
+                            })
+            except PipelineCancelled:
+                _log("Stop requested — cancelling remaining RPA workers")
+                from pipeline_progress import request_stop
+                request_stop("Stopped by user")
+                for fut in pending:
+                    fut.cancel()
+                try:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    pool.shutdown(wait=False)
                 raise
-            except Exception as e:
-                results.append({
-                    "rpa_id": rpa["rpa_id"],
-                    "status": "error",
-                    "message": str(e),
-                })
     return results

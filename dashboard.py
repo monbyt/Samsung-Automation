@@ -237,43 +237,34 @@ _PIPELINE_PANEL = """
       </div>
       <span class="pipeline-badge" id="pipeline-badge" style="display:none"></span>
     </div>
-    <ul class="stepper" id="pipeline-steps">
+    <div id="pipeline-cards"></div>
+    <ul class="stepper" id="pipeline-steps" style="display:none">
       <li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>
     </ul>
     <div class="pipeline-actions">
-      <button type="button" class="btn-danger btn-sm" id="pipeline-stop" disabled>Stop</button>
+      <button type="button" class="btn-danger btn-sm" id="pipeline-stop" disabled>Stop all</button>
       <button type="button" class="btn-sm" id="pipeline-reset">Reset</button>
       <span class="muted" id="pipeline-action-msg"></span>
     </div>
   </div>
+  <style>
+    .pipeline-card { border: 1px solid #2a3142; border-radius: 8px; padding: 12px 14px; margin: 10px 0; background: #151a24; }
+    .pipeline-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+    .pipeline-card-title { font-weight: 600; margin: 0 0 4px; }
+    .pipeline-card-meta { font-size: 12px; color: #8b93a7; }
+    .pipeline-card .stepper { margin: 0; }
+    .pipeline-card .btn-sm { white-space: nowrap; }
+  </style>
   <script>
   (function () {
     const icons = { pending: "·", running: "›", ok: "✓", error: "!", skipped: "–", cancelled: "×" };
-    function render(run) {
-      const label = document.getElementById("pipeline-label");
-      const meta = document.getElementById("pipeline-meta");
-      const badge = document.getElementById("pipeline-badge");
-      const list = document.getElementById("pipeline-steps");
-      const stopBtn = document.getElementById("pipeline-stop");
-      if (!run) {
-        label.textContent = "Waiting for a run…";
-        meta.textContent = "";
-        badge.style.display = "none";
-        stopBtn.disabled = true;
-        list.innerHTML = '<li class="pipeline-empty">Start a Mail Job or RPA tool — steps will appear here.</li>';
-        return;
-      }
-      label.textContent = run.label || run.kind;
-      const parts = [];
-      if (run.started_at) parts.push("Started " + run.started_at);
-      if (run.finished_at) parts.push("Finished " + run.finished_at);
-      if (run.message) parts.push(run.message);
-      meta.textContent = parts.join(" · ");
-      badge.style.display = "";
-      badge.className = "pipeline-badge " + (run.status || "");
-      badge.textContent = run.status || "";
-      stopBtn.disabled = run.status !== "running";
-      list.innerHTML = (run.steps || []).map(function (s) {
+    function escapeHtml(t) {
+      return String(t).replace(/[&<>"']/g, function (c) {
+        return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c];
+      });
+    }
+    function stepsHtml(run) {
+      return (run.steps || []).map(function (s) {
         const msg = s.message ? '<div class="step-msg">' + escapeHtml(s.message) + '</div>' : "";
         return '<li class="step ' + s.status + '">'
           + '<div class="step-dot">' + (icons[s.status] || "·") + '</div>'
@@ -281,17 +272,61 @@ _PIPELINE_PANEL = """
           + msg + '</div></li>';
       }).join("");
     }
-    function escapeHtml(t) {
-      return String(t).replace(/[&<>"']/g, function (c) {
-        return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c];
+    function renderRuns(runs) {
+      const label = document.getElementById("pipeline-label");
+      const meta = document.getElementById("pipeline-meta");
+      const badge = document.getElementById("pipeline-badge");
+      const cards = document.getElementById("pipeline-cards");
+      const stopBtn = document.getElementById("pipeline-stop");
+      const running = (runs || []).filter(function (r) { return r.status === "running"; });
+      if (!runs || !runs.length) {
+        label.textContent = "Waiting for a run…";
+        meta.textContent = "";
+        badge.style.display = "none";
+        stopBtn.disabled = true;
+        cards.innerHTML = '<div class="pipeline-empty muted">Start a Mail Job or RPA tool — cards will appear here. Parallel mail files each get their own card.</div>';
+        return;
+      }
+      label.textContent = running.length
+        ? (running.length + " running")
+        : "Recent runs";
+      meta.textContent = running.length
+        ? "Stop one card without killing the others — or Stop all."
+        : "";
+      badge.style.display = "";
+      badge.className = "pipeline-badge " + (running.length ? "running" : (runs[0].status || ""));
+      badge.textContent = running.length ? "running" : (runs[0].status || "");
+      stopBtn.disabled = running.length === 0;
+      cards.innerHTML = runs.map(function (run) {
+        const parts = [];
+        if (run.started_at) parts.push("Started " + run.started_at);
+        if (run.finished_at) parts.push("Finished " + run.finished_at);
+        if (run.message) parts.push(run.message);
+        const stop = run.status === "running"
+          ? '<button type="button" class="btn-danger btn-sm pipeline-stop-one" data-run="' + escapeHtml(run.id) + '">Stop</button>'
+          : '<span class="pipeline-badge ' + escapeHtml(run.status || "") + '">' + escapeHtml(run.status || "") + '</span>';
+        return '<div class="pipeline-card" data-run="' + escapeHtml(run.id) + '">'
+          + '<div class="pipeline-card-head"><div>'
+          + '<div class="pipeline-card-title">' + escapeHtml(run.label || run.kind) + '</div>'
+          + '<div class="pipeline-card-meta">' + escapeHtml(parts.join(" · ")) + '</div>'
+          + '</div>' + stop + '</div>'
+          + '<ul class="stepper">' + stepsHtml(run) + '</ul></div>';
+      }).join("");
+      cards.querySelectorAll(".pipeline-stop-one").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          const id = btn.getAttribute("data-run");
+          if (!confirm("Stop this run only? Other workers keep going.")) return;
+          postAction("/api/pipeline/stop/" + encodeURIComponent(id), "Stopping");
+        });
       });
     }
     async function tick() {
       try {
         const r = await fetch("/api/pipeline/active");
         const data = await r.json();
-        render(data.run || null);
-        const running = data.run && data.run.status === "running";
+        const runs = data.runs || (data.run ? [data.run] : []);
+        renderRuns(runs);
+        const running = runs.some(function (x) { return x.status === "running"; });
         setTimeout(tick, running ? 1500 : 5000);
       } catch (e) {
         setTimeout(tick, 5000);
@@ -310,8 +345,8 @@ _PIPELINE_PANEL = """
       }
     }
     document.getElementById("pipeline-stop").addEventListener("click", function () {
-      if (!confirm("Stop the current flow after this step?")) return;
-      postAction("/api/pipeline/stop", "Stopping");
+      if (!confirm("Stop ALL running flows?")) return;
+      postAction("/api/pipeline/stop", "Stopping all");
     });
     document.getElementById("pipeline-reset").addEventListener("click", function () {
       if (!confirm("Reset the live execution panel and clear any stop flag?")) return;
@@ -1280,17 +1315,9 @@ def rpa_run(rpa_id):
 
 @app.route("/api/pipeline/active")
 def api_pipeline_active():
-    from pipeline_progress import get_active_run
-    return jsonify({"run": get_active_run()})
-
-
-@app.route("/api/pipeline/<run_id>")
-def api_pipeline_run(run_id):
-    from pipeline_progress import get_run
-    run = get_run(run_id)
-    if not run:
-        return jsonify({"error": "not found"}), 404
-    return jsonify({"run": run})
+    from pipeline_progress import get_active_run, get_active_runs
+    runs = get_active_runs(include_recent=8)
+    return jsonify({"runs": runs, "run": runs[0] if runs else get_active_run()})
 
 
 @app.route("/api/pipeline/stop", methods=["POST"])
@@ -1301,12 +1328,23 @@ def api_pipeline_stop():
         return jsonify({
             "ok": True,
             "run_id": run_id,
-            "message": "Stop requested — remaining steps will be cancelled",
+            "message": "Stop requested for all running cards",
         })
     return jsonify({
         "ok": True,
         "run_id": None,
-        "message": "No active run (stop flag set for next check)",
+        "message": "No active run",
+    })
+
+
+@app.route("/api/pipeline/stop/<run_id>", methods=["POST"])
+def api_pipeline_stop_one(run_id):
+    from pipeline_progress import request_stop
+    stopped = request_stop("Stopped by user", run_id=run_id)
+    return jsonify({
+        "ok": True,
+        "run_id": stopped,
+        "message": f"Stop requested for {run_id[:8]}… — other workers keep going",
     })
 
 
@@ -1315,6 +1353,15 @@ def api_pipeline_reset():
     from pipeline_progress import reset_pipeline
     reset_pipeline("Reset by user")
     return jsonify({"ok": True, "message": "Pipeline reset — ready for a new run"})
+
+
+@app.route("/api/pipeline/<run_id>")
+def api_pipeline_run(run_id):
+    from pipeline_progress import get_run
+    run = get_run(run_id)
+    if not run:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"run": run})
 
 
 @app.route("/rpa/<rpa_id>/toggle", methods=["POST"])

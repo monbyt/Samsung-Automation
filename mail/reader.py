@@ -1,9 +1,10 @@
 """
-W1 mail reader — navigate mailboxes, find matching emails, download Excel attachments.
+W1 mail reader — navigate mailboxes, click emails, download Excel attachments.
 
-The job already opens the mailbox that holds that subject's mail.
-Once inside, we only click NEW/unread rows — we do not re-match the subject
-on each row (that was skipping real new mail).
+Click uses the original Playwright locators that worked:
+  div.filter(has_text=exact subject).nth(i)
+
+The unread-class JS was skipping real mail and is gone.
 """
 import json
 import os
@@ -19,119 +20,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
-MAX_UNREAD_PER_TICK = 20
-# Extra screens to scan below the current view. Do NOT walk a huge inbox.
-MAX_LIST_SCROLLS = 5
-
-# Click the first unread mail row in the already-opened mailbox.
-# Unread = unread class, bold/medium weight, or <b>/<strong>.
-# Do NOT filter by subject here — this folder is already the right inbox.
-# Do NOT use a.not-open — that means "not the currently opened tab".
-_CLICK_UNREAD_JS = """
-() => {
-  const root = document.querySelector('[data-w1-mail-scroller="1"]') || document.body;
-  const skip = /^(inbox|sent|drafts?|mail|ok|cancel|download|compose|write)$/i;
-
-  const isUnread = (el) => {
-    let n = el;
-    for (let i = 0; i < 8 && n && n !== document.body; i++, n = n.parentElement) {
-      const cls = (n.className || '').toString().toLowerCase();
-      if (/\\bunread\\b|\\bnot-read\\b|\\bis-unread\\b|\\bmail-unread\\b/.test(cls)) {
-        return true;
-      }
-      // Only the row itself / close parents — a folder wrapper with weight 500
-      // would otherwise mark every mail as unread.
-      if (i <= 2) {
-        const fw = getComputedStyle(n).fontWeight;
-        if (fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 500) {
-          return true;
-        }
-      }
-      if (n.matches && n.matches('b, strong')) return true;
-    }
-    if (el.querySelector && el.querySelector('b, strong')) return true;
-    const label = ((el.getAttribute('aria-label') || '') + ' ' + (el.title || '')).toLowerCase();
-    if (label.includes('unread')) return true;
-    return false;
-  };
-
-  const nodes = [...root.querySelectorAll('a, [role="link"]')];
-  const debug = [];
-  let hits = 0;
-  let unreadHits = 0;
-  for (const el of nodes) {
-    const raw = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-    if (!raw || raw.length < 3 || raw.length > 180) continue;
-    if (skip.test(raw)) continue;
-    hits += 1;
-    const unread = isUnread(el);
-    if (unread) unreadHits += 1;
-    if (debug.length < 12) {
-      debug.push({
-        text: raw.slice(0, 80),
-        unread,
-        cls: (el.className || '').toString().slice(0, 80),
-      });
-    }
-    if (!unread) continue;
-    el.scrollIntoView({ block: 'center', inline: 'nearest' });
-    el.click();
-    return { clicked: true, text: raw.slice(0, 120), hits, unreadHits, debug };
-  }
-  return { clicked: false, reason: 'no-unread', hits, unreadHits, debug };
-}
-"""
-
-_MARK_LIST_SCROLLER_JS = """
-() => {
-  const prev = document.querySelector('[data-w1-mail-scroller="1"]');
-  if (prev) prev.removeAttribute('data-w1-mail-scroller');
-  let best = null;
-  let bestScore = 0;
-  for (const n of document.querySelectorAll('div, ul, table, tbody, section')) {
-    const extra = n.scrollHeight - n.clientHeight;
-    if (extra < 40 || n.clientHeight < 80 || n.clientWidth < 120) continue;
-    const st = getComputedStyle(n);
-    if (!/(auto|scroll|overlay|hidden)/.test(st.overflowY)) continue;
-    const links = n.querySelectorAll('a, [role="link"], tr, li').length;
-    const score = extra + links * 80;
-    if (score > bestScore) {
-      best = n;
-      bestScore = score;
-    }
-  }
-  if (!best) return { found: false };
-  best.setAttribute('data-w1-mail-scroller', '1');
-  return {
-    found: true,
-    extra: best.scrollHeight - best.clientHeight,
-    clientHeight: best.clientHeight,
-    scrollHeight: best.scrollHeight,
-  };
-}
-"""
-
-_SCROLL_LIST_TOP_JS = """
-() => {
-  const el = document.querySelector('[data-w1-mail-scroller="1"]');
-  if (!el) return false;
-  el.scrollTop = 0;
-  return true;
-}
-"""
-
-_SCROLL_LIST_DOWN_JS = """
-() => {
-  const el = document.querySelector('[data-w1-mail-scroller="1"]');
-  if (!el) return { moved: false, atEnd: true };
-  const before = el.scrollTop;
-  const step = Math.max(Math.floor(el.clientHeight * 0.8), 120);
-  el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step);
-  const moved = el.scrollTop > before + 1;
-  const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-  return { moved, atEnd, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight };
-}
-"""
+MAX_MAILS_PER_TICK = 20
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -270,92 +159,45 @@ def _open_mailbox(mail, mailbox):
     time.sleep(1.5)
 
 
-def _log_unread_debug(result: dict, *, scrolled: int = 0) -> None:
-    debug = result.get("debug") or []
-    hits = result.get("hits")
-    unread_hits = result.get("unreadHits")
-    extra = f" scrolled={scrolled}" if scrolled else ""
-    if hits is not None:
-        print(f"  List rows: {hits} ({unread_hits} unread){extra}")
-    elif debug:
-        print(f"  List rows ({len(debug)}){extra}:")
-    for row in debug:
-        flag = "UNREAD" if row.get("unread") else "read"
-        print(f"    [{flag}] {row.get('text')!r}")
+def _click_email(mail, subject: str, index: int = 0) -> bool:
+    """Click the Nth email with this subject — same locator that used to work."""
+    exact = mail.locator("div").filter(has_text=_subject_pattern(subject))
+    n = exact.count()
+    print(f"  Exact subject rows: {n}")
+    if n > index:
+        row = exact.nth(index)
+        row.scroll_into_view_if_needed()
+        row.click(timeout=10_000)
+        print(f"  Clicked email {index + 1}/{n} (exact): {subject}")
+        return True
 
+    if index > 0:
+        return False
 
-def _click_first_unread(mail) -> bool:
-    """Click the first unread mail in this mailbox.
-
-    Subject is not checked — the mailbox is already the filtered inbox.
-    Scrolls at most MAX_LIST_SCROLLS screens; never walks a huge folder.
-    """
     try:
-        scroller = mail.evaluate(_MARK_LIST_SCROLLER_JS)
-        if isinstance(scroller, dict) and scroller.get("found"):
-            mail.evaluate(_SCROLL_LIST_TOP_JS)
-            time.sleep(0.25)
-        else:
-            scroller = {"found": False}
+        row = mail.locator("div").filter(has_text=subject)
+        row.first.wait_for(state="visible", timeout=10_000)
+        row.first.scroll_into_view_if_needed()
+        row.first.click(timeout=10_000)
+        print(f"  Clicked email (contains): {subject}")
+        return True
     except Exception as e:
-        print(f"  Mail list scroller: {e}")
-        scroller = {"found": False}
+        print(f"  Contains click failed: {e}")
 
-    last_result: dict = {}
-    can_scroll = bool(scroller.get("found"))
-    if can_scroll:
-        print(f"  Scanning unread in this mailbox (max {MAX_LIST_SCROLLS} screens).")
-    else:
-        print(f"  No list scroller — at most {MAX_LIST_SCROLLS} PageDowns.")
+    try:
+        row = mail.get_by_text(subject, exact=True)
+        row.first.click(timeout=10_000)
+        print(f"  Clicked email (get_by_text): {subject}")
+        return True
+    except Exception as e:
+        print(f"  get_by_text click failed: {e}")
 
-    for step in range(MAX_LIST_SCROLLS + 1):
-        try:
-            result = mail.evaluate(_CLICK_UNREAD_JS)
-        except Exception as e:
-            print(f"  Unread scan failed: {e}")
-            return False
-
-        if not isinstance(result, dict):
-            return False
-        last_result = result
-
-        if result.get("clicked"):
-            if step == 0:
-                _log_unread_debug(result)
-            else:
-                _log_unread_debug(result, scrolled=step)
-            print(f"  Opened unread: {result.get('text')!r}")
-            return True
-
-        if step >= MAX_LIST_SCROLLS:
-            break
-        advanced = False
-        if can_scroll:
-            try:
-                moved = mail.evaluate(_SCROLL_LIST_DOWN_JS)
-                advanced = isinstance(moved, dict) and bool(moved.get("moved"))
-            except Exception:
-                advanced = False
-        else:
-            try:
-                mail.locator("body").press("PageDown")
-                advanced = True
-            except Exception:
-                advanced = False
-        if not advanced:
-            break
-        time.sleep(0.35)
-
-    _log_unread_debug(last_result)
-    print(f"  No unread mail in this mailbox ({last_result.get('reason')}).")
+    print(f"  Could not click email with subject {subject!r}")
     return False
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
-    """Process up to MAX_UNREAD_PER_TICK unread mails in this mailbox.
-
-    The mailbox is already the subject inbox. If nothing is unread, returns [].
-    """
+    """Open the mailbox and download matching emails (up to MAX_MAILS_PER_TICK)."""
     filter_id = mail_filter["id"]
     mailbox = mail_filter["mailbox"]
     subject = mail_filter["subject"]
@@ -372,15 +214,15 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     mail = _mail(page)
     _open_mailbox(mail, mailbox)
 
-    for i in range(MAX_UNREAD_PER_TICK):
-        if not _click_first_unread(mail):
+    for i in range(MAX_MAILS_PER_TICK):
+        if not _click_email(mail, subject, i):
             if i == 0:
-                print(f"[{filter_id}] No unread mails in this mailbox — skipping download.")
+                print(f"[{filter_id}] No email to click.")
             else:
-                print(f"[{filter_id}] No more unread mails.")
+                print(f"[{filter_id}] No more emails.")
             break
 
-        print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_UNREAD_PER_TICK}")
+        print(f"[{filter_id}] Processing mail {i + 1}/{MAX_MAILS_PER_TICK}")
         time.sleep(1.0)
 
         save_path = _download_attachment(page, mail, download_dir)
@@ -483,4 +325,4 @@ def download_latest():
         return result
     if summary["downloads"]:
         return summary["downloads"][-1]["path"]
-    raise RuntimeError("No unread matching email found to download.")
+    raise RuntimeError("No matching email found to download.")

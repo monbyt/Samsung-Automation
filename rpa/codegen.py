@@ -35,6 +35,27 @@ def _log(msg: str) -> None:
     print(f"[RPA {datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+def _chrome_executable() -> str:
+    """Installed Google Chrome, not Playwright's bundled Chromium (needs PDF viewer)."""
+    env = (os.environ.get("CHROME_PATH") or os.environ.get("RPA_CHROME_EXE") or "").strip()
+    if env and os.path.isfile(env):
+        return env
+    roots = [
+        os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+        os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]
+    candidates = [
+        os.path.join(r, "Google", "Chrome", "Application", "chrome.exe")
+        for r in roots if r
+    ]
+    candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
 def _validate_rpa_id(rpa_id: str) -> str:
     if not _RPA_ID_RE.match(rpa_id or ""):
         raise ValueError(f"Invalid RPA id: {rpa_id!r}")
@@ -413,18 +434,28 @@ def _patch_playwright_no_timeout() -> None:
         if not profile:
             return _orig_launch(self, *args, **kwargs)
         os.makedirs(profile, exist_ok=True)
-        extra = ["--no-first-run", "--no-default-browser-check"]
+        extra = [
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+            "--new-window",
+        ]
         port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
         if port:
             extra.append(f"--remote-debugging-port={port}")
-        _log(f"Chrome NEW WINDOW profile={profile} port={port or '-'}")
-        ctx = _orig_persistent(
-            self,
-            profile,
-            channel=kwargs.get("channel") or "chrome",
-            headless=bool(kwargs.get("headless", False)),
-            args=extra,
-        )
+        chrome_exe = _chrome_executable()
+        launch_kwargs = {
+            "headless": bool(kwargs.get("headless", False)),
+            "args": extra,
+        }
+        # Do NOT use channel="chrome" — that hits Chrome's singleton lock and
+        # the second worker waits until the first window closes (looks sequential).
+        if chrome_exe:
+            launch_kwargs["executable_path"] = chrome_exe
+            _log(f"Chrome EXE window exe={chrome_exe} profile={profile} port={port or '-'}")
+        else:
+            _log(f"Chrome EXE not found — bundled Chromium profile={profile}")
+        ctx = _orig_persistent(self, profile, **launch_kwargs)
         return _IsolatedChrome(_disable(ctx))
 
     BrowserType.launch = launch

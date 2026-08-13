@@ -24,9 +24,19 @@ def _write_result(path: str, payload: dict) -> None:
         json.dump(payload, fh)
 
 
-def main() -> int:
+def _load_payload() -> dict:
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--payload-file", "-f"):
+        with open(sys.argv[2], encoding="utf-8") as fh:
+            return json.load(fh)
     raw = sys.argv[1] if len(sys.argv) > 1 else "{}"
-    payload = json.loads(raw)
+    if raw.endswith(".json") and os.path.isfile(raw):
+        with open(raw, encoding="utf-8") as fh:
+            return json.load(fh)
+    return json.loads(raw)
+
+
+def main() -> int:
+    payload = _load_payload()
     result_path = payload.get("result_path") or ""
     profile = (payload.get("chrome_profile") or "").strip()
     if profile:
@@ -37,6 +47,10 @@ def main() -> int:
     if port:
         os.environ["RPA_CHROME_DEBUG_PORT"] = str(port)
         print(f"[RPA worker] debug port: {port}", flush=True)
+    print(
+        f"[RPA worker] pid={os.getpid()} file={os.path.basename(payload.get('upload_file') or '')}",
+        flush=True,
+    )
 
     from pipeline_progress import set_current_run
     from rpa.runner import _parallel_worker
@@ -65,7 +79,7 @@ if __name__ == "__main__":
     except Exception as e:
         payload = {}
         try:
-            payload = json.loads(sys.argv[1])
+            payload = _load_payload()
         except Exception:
             pass
         _write_result(

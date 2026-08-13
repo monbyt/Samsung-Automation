@@ -538,7 +538,10 @@ def _start_worker_process(payload: dict):
     upload_dir = payload.get("upload_dir") or config.BASE_DIR
     os.makedirs(upload_dir, exist_ok=True)
     result_path = os.path.join(upload_dir, "_worker_result.json")
+    payload_path = os.path.join(upload_dir, "_worker_payload.json")
     payload["result_path"] = result_path
+    with open(payload_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
     env = os.environ.copy()
     env.setdefault("NO_PROXY", "*")
     env.setdefault("no_proxy", "*")
@@ -549,12 +552,22 @@ def _start_worker_process(payload: dict):
         env["RPA_CHROME_DEBUG_PORT"] = str(payload["chrome_port"])
     worker_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
     _log(f"Opening Chrome · {payload.get('label')}")
+    popen_kwargs = {
+        "cwd": config.BASE_DIR,
+        "env": env,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NEW_CONSOLE
+        )
     proc = subprocess.Popen(
-        [sys.executable, worker_py, json.dumps(payload)],
-        cwd=config.BASE_DIR,
-        env=env,
+        [sys.executable, worker_py, "--payload-file", payload_path],
+        **popen_kwargs,
     )
-    _log(f"Chrome PID {proc.pid} · profile={os.path.basename(payload.get('chrome_profile') or '-')}")
+    _log(
+        f"Spawned worker PID {proc.pid} · chrome_port={payload.get('chrome_port')} · "
+        f"profile={os.path.basename(payload.get('chrome_profile') or '-')}"
+    )
     return proc, payload, result_path
 
 
@@ -651,13 +664,14 @@ def trigger_for_mail_job(
             continue
         queue = list(payloads)
         active = []
+        last_heartbeat = 0.0
         try:
             while queue or active:
                 check_cancelled()
                 while queue and len(active) < workers:
                     proc, payload, result_path = _start_worker_process(queue.pop(0))
                     active.append((proc, payload, result_path))
-                    _log(f"Live Chrome windows: {len(active)} / cap {workers}")
+                    _log(f"Live workers now: {len(active)} / cap {workers}")
                 still = []
                 for proc, payload, result_path in active:
                     rc = proc.poll()
@@ -666,10 +680,20 @@ def trigger_for_mail_job(
                         continue
                     results.append(_read_worker_result(result_path, payload, rc))
                     _log(
-                        f"Chrome PID {proc.pid} finished ({rc}) · "
+                        f"Worker PID {proc.pid} finished ({rc}) · "
                         f"{os.path.basename(payload.get('upload_file') or '')}"
                     )
                 active = still
+                now = time.time()
+                if active and now - last_heartbeat >= 8:
+                    last_heartbeat = now
+                    _log(
+                        "Still running in parallel: "
+                        + ", ".join(
+                            f"PID {p.pid}/{os.path.basename(pl.get('upload_file') or '')}"
+                            for p, pl, _r in active
+                        )
+                    )
                 if queue or active:
                     time.sleep(0.4)
         except PipelineCancelled:

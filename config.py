@@ -89,6 +89,9 @@ NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"
 NERP_PROGRAM_PI = "ZSDM31520"
 
+# Recorded Playwright codegen scripts (one .py per custom RPA job).
+RPA_SCRIPTS_DIR = os.path.join(BASE_DIR, "rpa", "scripts")
+
 # Max concurrent RPA Chrome windows after mail download (separate processes).
 # Each worker uses its own Chrome profile + upload/PDF folders.
 RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "4"))

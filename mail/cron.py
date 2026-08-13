@@ -103,48 +103,7 @@ def run_job(job_id: str) -> dict:
                     skip_step("parse", "Nothing to parse")
 
                 mark_job_finished(job_id, "ok")
-                if summary.get("downloads"):
-                    from rpa.runner import trigger_for_mail_job
-                    paths = [d.get("path") for d in summary["downloads"] if d.get("path")]
-                    print(
-                        f"[RPA] Mail downloaded {len(paths)} Excel file(s) — "
-                        f"starting RPA workers (cap {getattr(__import__('config'), 'RPA_PARALLEL_WORKERS', 4)})",
-                        flush=True,
-                    )
-                    begin_step(
-                        "rpa",
-                        f"Starting RPA for {len(paths)} file(s) "
-                        f"(up to {getattr(__import__('config'), 'RPA_PARALLEL_WORKERS', 4)} Chrome windows)",
-                    )
-                    check_cancelled()
-                    try:
-                        results = trigger_for_mail_job(job_id, upload_files=paths)
-                        errs = [r for r in (results or []) if r.get("status") == "error"]
-                        if errs:
-                            finish_step(
-                                "rpa", "error",
-                                "; ".join(e.get("message", "error") for e in errs),
-                            )
-                            finish_run("error", "RPA failed", run_id=run_id)
-                        elif not results:
-                            skip_step("rpa", "No linked RPA tools")
-                            skip_step("email", "No RPA → no email")
-                            skip_step("cleanup", "Nothing to clean")
-                            finish_run("ok", "Mail done — no RPA", run_id=run_id)
-                        else:
-                            # rpa / email / cleanup steps already updated inside runner
-                            from pipeline_progress import get_run
-                            snap = get_run(run_id) or {}
-                            for s in snap.get("steps") or []:
-                                if s["key"] in ("email", "cleanup") and s["status"] == "pending":
-                                    skip_step(s["key"], "Not configured for this run")
-                            finish_run("ok", run_id=run_id)
-                    except PipelineCancelled:
-                        raise
-                    except Exception as e:
-                        finish_step("rpa", "error", str(e))
-                        finish_run("error", str(e), run_id=run_id)
-                else:
+                if not summary.get("downloads"):
                     skip_step("rpa", "No downloads")
                     skip_step("email", "No downloads")
                     skip_step("cleanup", "No downloads")
@@ -156,10 +115,54 @@ def run_job(job_id: str) -> dict:
             finish_run("cancelled", str(e), run_id=run_id)
             mark_job_finished(job_id, "error", str(e))
             print(f"Job {job_id} cancelled: {e}")
+            return summary
         except Exception as e:
             finish_step("mail", "error", str(e))
             finish_run("error", str(e), run_id=run_id)
             raise
+
+    # RPA runs OUTSIDE the mail lock so parallel Chromium workers are not blocked.
+    if summary.get("downloads") and not summary.get("errors"):
+        from rpa.runner import trigger_for_mail_job
+        paths = [d.get("path") for d in summary["downloads"] if d.get("path")]
+        print(
+            f"[RPA] Mail downloaded {len(paths)} Excel file(s) — "
+            f"starting RPA workers (cap {getattr(config, 'RPA_PARALLEL_WORKERS', 4)})",
+            flush=True,
+        )
+        begin_step(
+            "rpa",
+            f"Starting RPA for {len(paths)} file(s) "
+            f"(up to {getattr(config, 'RPA_PARALLEL_WORKERS', 4)} browser windows)",
+        )
+        check_cancelled()
+        try:
+            results = trigger_for_mail_job(job_id, upload_files=paths)
+            errs = [r for r in (results or []) if r.get("status") == "error"]
+            if errs:
+                finish_step(
+                    "rpa", "error",
+                    "; ".join(e.get("message", "error") for e in errs),
+                )
+                finish_run("error", "RPA failed", run_id=run_id)
+            elif not results:
+                skip_step("rpa", "No linked RPA tools")
+                skip_step("email", "No RPA → no email")
+                skip_step("cleanup", "Nothing to clean")
+                finish_run("ok", "Mail done — no RPA", run_id=run_id)
+            else:
+                from pipeline_progress import get_run
+                snap = get_run(run_id) or {}
+                for s in snap.get("steps") or []:
+                    if s["key"] in ("email", "cleanup") and s["status"] == "pending":
+                        skip_step(s["key"], "Not configured for this run")
+                finish_run("ok", run_id=run_id)
+        except PipelineCancelled:
+            finish_run("cancelled", "Stopped by user", run_id=run_id)
+            raise
+        except Exception as e:
+            finish_step("rpa", "error", str(e))
+            finish_run("error", str(e), run_id=run_id)
 
     print(
         f"Job {job_id} done — {len(summary.get('downloads') or [])} file(s), "

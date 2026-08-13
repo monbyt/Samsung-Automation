@@ -410,59 +410,33 @@ def _patch_playwright_no_timeout() -> None:
 
     _orig_launch = BrowserType.launch
 
-    class _IsolatedChrome:
-        """Make launch_persistent_context look like launch()+new_context()."""
-
-        def __init__(self, context):
-            self._context = context
-            self._closed = False
-
-        def new_context(self, *args, **kwargs):
-            return self._context
-
-        def close(self):
-            if self._closed:
-                return
-            self._closed = True
-            try:
-                self._context.close()
-            except Exception:
-                pass
-
     def launch(self, *args, **kwargs):
-        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
-        if not profile:
-            return _orig_launch(self, *args, **kwargs)
-        os.makedirs(profile, exist_ok=True)
-        extra = [
+        # Never use installed Google Chrome (channel="chrome"). That executable
+        # has a process singleton: the 2nd worker waits until the 1st closes.
+        # Playwright's bundled Chromium can run many windows at once.
+        kwargs = dict(kwargs)
+        kwargs.pop("channel", None)
+        extra = list(kwargs.get("args") or [])
+        extra.extend([
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-session-crashed-bubble",
-            "--new-window",
-        ]
+        ])
         port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
-        if port:
+        if port and not any(str(a).startswith("--remote-debugging-port") for a in extra):
             extra.append(f"--remote-debugging-port={port}")
-        chrome_exe = _chrome_executable()
-        launch_kwargs = {
-            "headless": bool(kwargs.get("headless", False)),
-            "args": extra,
-        }
-        # Do NOT use channel="chrome" — that hits Chrome's singleton lock and
-        # the second worker waits until the first window closes (looks sequential).
-        if chrome_exe:
-            launch_kwargs["executable_path"] = chrome_exe
-            _log(f"Chrome EXE window exe={chrome_exe} profile={profile} port={port or '-'}")
-        else:
-            _log(f"Chrome EXE not found — bundled Chromium profile={profile}")
-        ctx = _orig_persistent(self, profile, **launch_kwargs)
-        return _IsolatedChrome(_disable(ctx))
+        kwargs["args"] = extra
+        kwargs.setdefault("headless", False)
+        _log(f"Playwright Chromium launch (not installed Chrome) port={port or '-'}")
+        return _orig_launch(self, *args, **kwargs)
 
     BrowserType.launch = launch
 
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs.pop("channel", None)
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
         if profile:
             os.makedirs(profile, exist_ok=True)
@@ -470,7 +444,7 @@ def _patch_playwright_no_timeout() -> None:
                 args = (profile,) + tuple(args[1:])
             else:
                 kwargs["user_data_dir"] = profile
-            _log(f"Chrome persistent profile: {profile}")
+        _log(f"Playwright Chromium persistent profile={profile or kwargs.get('user_data_dir')}")
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context

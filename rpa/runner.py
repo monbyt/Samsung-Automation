@@ -557,8 +557,10 @@ def _start_worker_process(payload: dict):
         "env": env,
     }
     if sys.platform == "win32":
+        # Break away from the dashboard job object so a second browser is allowed.
         popen_kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NEW_CONSOLE
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
         )
     proc = subprocess.Popen(
         [sys.executable, worker_py, "--payload-file", payload_path],

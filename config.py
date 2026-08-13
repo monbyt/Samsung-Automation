@@ -89,9 +89,9 @@ NERP_UPLOAD_FILE = os.path.join(BASE_DIR, "data", "Book1.xlsx")
 NERP_PROGRAM_UPLOAD = "ZLSDF50270"
 NERP_PROGRAM_PI = "ZSDM31520"
 
-# Max concurrent RPA browser workers after mail download (process pool).
-# Playwright sync API is not thread-safe — workers are separate processes.
-RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "2"))
+# Max concurrent RPA Chrome windows after mail download (separate processes).
+# Each worker uses its own Chrome profile + upload/PDF folders.
+RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "4"))
 
 # ── Database ───────────────────────────────────────────────────
 # SQLite by default (WAL mode enabled for concurrent dashboard reads).

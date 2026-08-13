@@ -1,6 +1,7 @@
 """
 Run RPA tools — manually or after a mail job finishes.
 """
+import json
 import os
 import shutil
 import traceback
@@ -505,6 +506,56 @@ def _parallel_worker(payload: dict) -> dict:
         }
 
 
+def _chrome_profile_dir(index: int, token: str) -> str:
+    root = os.path.join(config.BASE_DIR, "chrome-profile-rpa")
+    path = os.path.join(root, f"w{index:02d}_{token}")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _read_worker_result(result_path: str, payload: dict, exit_code: int) -> dict:
+    if result_path and os.path.isfile(result_path):
+        try:
+            with open(result_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {
+        "rpa_id": payload.get("rpa_id"),
+        "status": "error",
+        "message": f"Worker exited {exit_code} with no result file",
+        "upload_file": payload.get("upload_file"),
+    }
+
+
+def _start_worker_process(payload: dict):
+    import subprocess
+    import sys
+
+    payload = dict(payload)
+    upload_dir = payload.get("upload_dir") or config.BASE_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+    result_path = os.path.join(upload_dir, "_worker_result.json")
+    payload["result_path"] = result_path
+    env = os.environ.copy()
+    env.setdefault("NO_PROXY", "*")
+    env.setdefault("no_proxy", "*")
+    env["PYTHONPATH"] = config.BASE_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    if payload.get("chrome_profile"):
+        env["RPA_CHROME_PROFILE"] = payload["chrome_profile"]
+    worker_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
+    _log(f"Opening Chrome · {payload.get('label')}")
+    proc = subprocess.Popen(
+        [sys.executable, worker_py, json.dumps(payload)],
+        cwd=config.BASE_DIR,
+        env=env,
+    )
+    _log(f"Chrome PID {proc.pid} · profile={os.path.basename(payload.get('chrome_profile') or '-')}")
+    return proc, payload, result_path
+
+
 def trigger_for_mail_job(
     mail_job_id: str,
     upload_file: Optional[str] = None,
@@ -512,15 +563,16 @@ def trigger_for_mail_job(
 ):
     """Run linked RPA tools for each downloaded mail Excel.
 
-    Multiple inbox Excels run in parallel (process pool, capped by
-    config.RPA_PARALLEL_WORKERS). Each worker has isolated upload/PDF folders
-    and its own Live-execution card — Stop on one card leaves the others running.
+    Multiple inbox Excels run as separate Chrome processes (capped by
+    config.RPA_PARALLEL_WORKERS, default 4). Each worker has its own Chrome
+    profile + upload/PDF folders and Live card.
 
     One Excel with several SOs still becomes multiple PDFs on that worker's
     outgoing email.
     """
-    from concurrent.futures import ProcessPoolExecutor
-    from pipeline_progress import PipelineCancelled, check_cancelled
+    import time
+
+    from pipeline_progress import PipelineCancelled, check_cancelled, request_stop
 
     linked = list_for_mail_job(mail_job_id)
     if not linked:
@@ -532,7 +584,7 @@ def trigger_for_mail_job(
     if not files:
         files = [None]
 
-    workers = max(1, int(getattr(config, "RPA_PARALLEL_WORKERS", 2) or 2))
+    workers = max(1, int(getattr(config, "RPA_PARALLEL_WORKERS", 4) or 4))
     results = []
 
     for rpa in linked:
@@ -541,6 +593,7 @@ def trigger_for_mail_job(
         token = datetime.now().strftime("%H%M%S")
         payloads = []
         for i, path in enumerate(files):
+            chrome_profile = _chrome_profile_dir(i + 1, token)
             if path:
                 w_upload, w_download = _worker_slot_dirs(base_upload, base_download, i + 1, token)
                 label = (
@@ -556,13 +609,15 @@ def trigger_for_mail_job(
                 "upload_file": path,
                 "upload_dir": w_upload,
                 "download_dir": w_download,
+                "chrome_profile": chrome_profile,
                 "label": label,
             })
 
-        # Single file → same process (no pool overhead / easier debugging)
         if len(payloads) == 1 or workers <= 1:
             for payload in payloads:
                 check_cancelled()
+                if payload.get("chrome_profile"):
+                    os.environ["RPA_CHROME_PROFILE"] = payload["chrome_profile"]
                 try:
                     results.append(_parallel_worker(payload))
                 except PipelineCancelled as e:
@@ -580,36 +635,39 @@ def trigger_for_mail_job(
                     })
             continue
 
-        _log(f"Starting {len(payloads)} RPA worker(s), concurrency={workers}")
-        from concurrent.futures import wait, FIRST_COMPLETED
-
-        with ProcessPoolExecutor(max_workers=min(workers, len(payloads))) as pool:
-            futures = {pool.submit(_parallel_worker, p): p for p in payloads}
-            pending = set(futures)
-            try:
-                while pending:
-                    check_cancelled()
-                    done, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        payload = futures[fut]
-                        try:
-                            results.append(fut.result())
-                        except Exception as e:
-                            results.append({
-                                "rpa_id": rpa_id,
-                                "status": "error",
-                                "message": str(e),
-                                "upload_file": payload.get("upload_file"),
-                            })
-            except PipelineCancelled:
-                _log("Stop requested — cancelling remaining RPA workers")
-                from pipeline_progress import request_stop
-                request_stop("Stopped by user")
-                for fut in pending:
-                    fut.cancel()
+        _log(
+            f"Batch RPA: {len(payloads)} file(s), up to {workers} Chrome windows in parallel"
+        )
+        queue = list(payloads)
+        active = []
+        try:
+            while queue or active:
+                check_cancelled()
+                while queue and len(active) < workers:
+                    proc, payload, result_path = _start_worker_process(queue.pop(0))
+                    active.append((proc, payload, result_path))
+                    _log(f"Live Chrome windows: {len(active)} / cap {workers}")
+                still = []
+                for proc, payload, result_path in active:
+                    rc = proc.poll()
+                    if rc is None:
+                        still.append((proc, payload, result_path))
+                        continue
+                    results.append(_read_worker_result(result_path, payload, rc))
+                    _log(
+                        f"Chrome PID {proc.pid} finished ({rc}) · "
+                        f"{os.path.basename(payload.get('upload_file') or '')}"
+                    )
+                active = still
+                if queue or active:
+                    time.sleep(0.4)
+        except PipelineCancelled:
+            _log("Stop requested — closing remaining Chrome workers")
+            request_stop("Stopped by user")
+            for proc, payload, _result_path in active:
                 try:
-                    pool.shutdown(wait=False, cancel_futures=True)
-                except TypeError:
-                    pool.shutdown(wait=False)
-                raise
+                    proc.terminate()
+                except Exception:
+                    pass
+            raise
     return results

@@ -1,0 +1,71 @@
+"""Standalone process: one inbox Excel → RPA → email, own Chrome window."""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import traceback
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE not in sys.path:
+    sys.path.insert(0, BASE)
+
+os.environ.setdefault("NO_PROXY", "*")
+os.environ.setdefault("no_proxy", "*")
+
+
+def _write_result(path: str, payload: dict) -> None:
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+
+def main() -> int:
+    raw = sys.argv[1] if len(sys.argv) > 1 else "{}"
+    payload = json.loads(raw)
+    result_path = payload.get("result_path") or ""
+    profile = (payload.get("chrome_profile") or "").strip()
+    if profile:
+        os.makedirs(profile, exist_ok=True)
+        os.environ["RPA_CHROME_PROFILE"] = profile
+        print(f"[RPA worker] Chrome profile: {profile}", flush=True)
+
+    from pipeline_progress import set_current_run
+    from rpa.runner import _parallel_worker
+
+    set_current_run(None)
+    try:
+        result = _parallel_worker(payload)
+    except Exception as e:
+        result = {
+            "rpa_id": payload.get("rpa_id"),
+            "status": "error",
+            "message": str(e),
+            "upload_file": payload.get("upload_file"),
+            "trace": traceback.format_exc()[-500:],
+        }
+    if not isinstance(result, dict):
+        result = {"status": "ok", "raw": str(result)}
+    _write_result(result_path, result)
+    status = (result.get("status") or "ok").lower()
+    return 0 if status in ("ok", "skipped") else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as e:
+        payload = {}
+        try:
+            payload = json.loads(sys.argv[1])
+        except Exception:
+            pass
+        _write_result(
+            payload.get("result_path") or "",
+            {"status": "error", "message": str(e), "trace": traceback.format_exc()[-500:]},
+        )
+        raise

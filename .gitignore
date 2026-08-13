@@ -4,6 +4,7 @@ __pycache__/
 .env
 chrome-profile/
 chrome-profile-nerp/
+chrome-profile-rpa/
 rpa/scripts/*
 !rpa/scripts/.gitkeep
 Order-Extract/

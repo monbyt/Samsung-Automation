@@ -387,9 +387,32 @@ def _patch_playwright_no_timeout() -> None:
 
     Browser.new_context = new_context
 
+    _orig_launch = BrowserType.launch
+
+    def launch(self, *args, **kwargs):
+        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
+        if profile:
+            os.makedirs(profile, exist_ok=True)
+            extra = list(kwargs.get("args") or [])
+            if not any(str(a).lower().startswith("--user-data-dir") for a in extra):
+                extra.append(f"--user-data-dir={profile}")
+            kwargs["args"] = extra
+            _log(f"Chrome isolated profile: {profile}")
+        return _orig_launch(self, *args, **kwargs)
+
+    BrowserType.launch = launch
+
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
+        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
+        if profile:
+            os.makedirs(profile, exist_ok=True)
+            if args:
+                args = (profile,) + tuple(args[1:])
+            else:
+                kwargs["user_data_dir"] = profile
+            _log(f"Chrome persistent profile: {profile}")
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context

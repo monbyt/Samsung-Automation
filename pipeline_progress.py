@@ -365,6 +365,7 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
         "status": row["status"],
         "started_at": _fmt(row["started_at"]),
         "finished_at": _fmt(row["finished_at"]),
+        "duration_s": _duration_s(row["started_at"], row["finished_at"]),
         "message": row["message"] or "",
         "cancel_requested": bool(row.get("cancel_requested")),
         "steps": [
@@ -375,6 +376,7 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
                 "message": s["message"] or "",
                 "started_at": _fmt(s["started_at"]),
                 "finished_at": _fmt(s["finished_at"]),
+                "duration_s": _duration_s(s["started_at"], s["finished_at"]),
             }
             for s in steps
         ],
@@ -382,16 +384,15 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
 
 
 def get_active_run() -> Optional[Dict[str, Any]]:
-    """Most recent running run, else the latest finished one (compat)."""
-    runs = get_active_runs(include_recent=1)
+    """Most recent currently running run, or None."""
+    runs = get_active_runs()
     return runs[0] if runs else None
 
 
-def get_active_runs(include_recent: int = 8) -> List[Dict[str, Any]]:
-    """All currently running runs, plus a few recent finished ones."""
+def get_active_runs() -> List[Dict[str, Any]]:
+    """Currently running runs only (Live execution)."""
     _init()
     out: List[Dict[str, Any]] = []
-    seen: set[str] = set()
     with _engine.connect() as conn:
         running = conn.execute(
             text(
@@ -399,35 +400,20 @@ def get_active_runs(include_recent: int = 8) -> List[Dict[str, Any]]:
                 "ORDER BY started_at DESC"
             )
         ).fetchall()
-        for (rid,) in running:
-            r = get_run(rid)
-            if r:
-                out.append(r)
-                seen.add(rid)
-        if include_recent > 0:
-            recent = conn.execute(
-                text(
-                    "SELECT id FROM pipeline_runs "
-                    "WHERE status != 'running' "
-                    "ORDER BY started_at DESC LIMIT :n"
-                ),
-                {"n": include_recent},
-            ).fetchall()
-            for (rid,) in recent:
-                if rid in seen:
-                    continue
-                r = get_run(rid)
-                if r:
-                    out.append(r)
+    for (rid,) in running:
+        r = get_run(rid)
+        if r:
+            out.append(r)
     return out
 
 
-def list_recent_runs(limit: int = 10) -> List[Dict[str, Any]]:
+def list_recent_runs(limit: int = 30) -> List[Dict[str, Any]]:
     _init()
     with _engine.connect() as conn:
         rows = conn.execute(
             text(
                 "SELECT id FROM pipeline_runs "
+                "WHERE status != 'running' "
                 "ORDER BY started_at DESC LIMIT :n"
             ),
             {"n": limit},
@@ -438,6 +424,16 @@ def list_recent_runs(limit: int = 10) -> List[Dict[str, Any]]:
         if r:
             out.append(r)
     return out
+
+
+def _duration_s(start, end) -> Optional[float]:
+    if start is None:
+        return None
+    try:
+        delta = (end or datetime.now()) - start
+        return round(delta.total_seconds(), 1)
+    except Exception:
+        return None
 
 
 def _fmt(dt) -> Optional[str]:

@@ -389,16 +389,43 @@ def _patch_playwright_no_timeout() -> None:
 
     _orig_launch = BrowserType.launch
 
+    class _IsolatedChrome:
+        """Make launch_persistent_context look like launch()+new_context()."""
+
+        def __init__(self, context):
+            self._context = context
+            self._closed = False
+
+        def new_context(self, *args, **kwargs):
+            return self._context
+
+        def close(self):
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._context.close()
+            except Exception:
+                pass
+
     def launch(self, *args, **kwargs):
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
-        if profile:
-            os.makedirs(profile, exist_ok=True)
-            extra = list(kwargs.get("args") or [])
-            if not any(str(a).lower().startswith("--user-data-dir") for a in extra):
-                extra.append(f"--user-data-dir={profile}")
-            kwargs["args"] = extra
-            _log(f"Chrome isolated profile: {profile}")
-        return _orig_launch(self, *args, **kwargs)
+        if not profile:
+            return _orig_launch(self, *args, **kwargs)
+        os.makedirs(profile, exist_ok=True)
+        extra = ["--no-first-run", "--no-default-browser-check"]
+        port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
+        if port:
+            extra.append(f"--remote-debugging-port={port}")
+        _log(f"Chrome NEW WINDOW profile={profile} port={port or '-'}")
+        ctx = _orig_persistent(
+            self,
+            profile,
+            channel=kwargs.get("channel") or "chrome",
+            headless=bool(kwargs.get("headless", False)),
+            args=extra,
+        )
+        return _IsolatedChrome(_disable(ctx))
 
     BrowserType.launch = launch
 

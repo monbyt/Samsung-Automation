@@ -545,6 +545,8 @@ def _start_worker_process(payload: dict):
     env["PYTHONPATH"] = config.BASE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     if payload.get("chrome_profile"):
         env["RPA_CHROME_PROFILE"] = payload["chrome_profile"]
+    if payload.get("chrome_port"):
+        env["RPA_CHROME_DEBUG_PORT"] = str(payload["chrome_port"])
     worker_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
     _log(f"Opening Chrome · {payload.get('label')}")
     proc = subprocess.Popen(
@@ -610,14 +612,27 @@ def trigger_for_mail_job(
                 "upload_dir": w_upload,
                 "download_dir": w_download,
                 "chrome_profile": chrome_profile,
+                "chrome_port": 9330 + i,
                 "label": label,
             })
 
-        if len(payloads) == 1 or workers <= 1:
+        _log(
+            f"===== RPA BATCH: {len(payloads)} Excel file(s) → "
+            f"up to {workers} Chrome windows ====="
+        )
+        if len(payloads) == 1:
+            _log(
+                "Only 1 file was downloaded, so only 1 SAP Chrome will open. "
+                "Need 2+ unread mail Excels for parallel windows."
+            )
+
+        if workers <= 1:
             for payload in payloads:
                 check_cancelled()
                 if payload.get("chrome_profile"):
                     os.environ["RPA_CHROME_PROFILE"] = payload["chrome_profile"]
+                if payload.get("chrome_port"):
+                    os.environ["RPA_CHROME_DEBUG_PORT"] = str(payload["chrome_port"])
                 try:
                     results.append(_parallel_worker(payload))
                 except PipelineCancelled as e:
@@ -634,10 +649,6 @@ def trigger_for_mail_job(
                         "message": str(e),
                     })
             continue
-
-        _log(
-            f"Batch RPA: {len(payloads)} file(s), up to {workers} Chrome windows in parallel"
-        )
         queue = list(payloads)
         active = []
         try:

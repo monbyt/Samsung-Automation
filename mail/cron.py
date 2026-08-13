@@ -106,7 +106,16 @@ def run_job(job_id: str) -> dict:
                 if summary.get("downloads"):
                     from rpa.runner import trigger_for_mail_job
                     paths = [d.get("path") for d in summary["downloads"] if d.get("path")]
-                    begin_step("rpa", "Starting linked RPA tools")
+                    print(
+                        f"[RPA] Mail downloaded {len(paths)} Excel file(s) — "
+                        f"starting RPA workers (cap {getattr(__import__('config'), 'RPA_PARALLEL_WORKERS', 4)})",
+                        flush=True,
+                    )
+                    begin_step(
+                        "rpa",
+                        f"Starting RPA for {len(paths)} file(s) "
+                        f"(up to {getattr(__import__('config'), 'RPA_PARALLEL_WORKERS', 4)} Chrome windows)",
+                    )
                     check_cancelled()
                     try:
                         results = trigger_for_mail_job(job_id, upload_files=paths)

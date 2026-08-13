@@ -33,6 +33,10 @@ def main() -> int:
         os.makedirs(profile, exist_ok=True)
         os.environ["RPA_CHROME_PROFILE"] = profile
         print(f"[RPA worker] Chrome profile: {profile}", flush=True)
+    port = payload.get("chrome_port")
+    if port:
+        os.environ["RPA_CHROME_DEBUG_PORT"] = str(port)
+        print(f"[RPA worker] debug port: {port}", flush=True)
 
     from pipeline_progress import set_current_run
     from rpa.runner import _parallel_worker

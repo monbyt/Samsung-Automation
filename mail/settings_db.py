@@ -33,8 +33,14 @@ SSO_KEYS = (
     "sso_password",
 )
 
+ALERT_KEYS = (
+    "alert_emails",
+    "stuck_minutes",
+)
+
 DEFAULTS = {
     "agent_mail_component_id": "knox_portal_mail-1irUi",
+    "stuck_minutes": "60",
 }
 
 

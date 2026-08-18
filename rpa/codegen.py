@@ -604,6 +604,8 @@ def run_recorded_script(
             f"No script for '{rpa_id}'. Open Record in the dashboard and save codegen output."
         )
 
+    os.environ.setdefault("RPA_CHROME_DEBUG_PORT", "9329")
+
     _log(f"Starting script: {rpa_id}")
     if upload_dir:
         _log(f"Upload folder: {upload_dir}")

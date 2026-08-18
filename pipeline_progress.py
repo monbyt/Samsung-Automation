@@ -35,6 +35,8 @@ pipeline_runs = Table(
     Column("finished_at", DateTime),
     Column("message", Text),
     Column("cancel_requested", Integer, default=0),
+    Column("last_alert_at", DateTime),
+    Column("alert_count", Integer, default=0),
 )
 
 pipeline_steps = Table(
@@ -73,6 +75,14 @@ def _init():
             if "cancel_requested" not in cols:
                 conn.execute(text(
                     "ALTER TABLE pipeline_runs ADD COLUMN cancel_requested INTEGER DEFAULT 0"
+                ))
+            if "last_alert_at" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE pipeline_runs ADD COLUMN last_alert_at DATETIME"
+                ))
+            if "alert_count" not in cols:
+                conn.execute(text(
+                    "ALTER TABLE pipeline_runs ADD COLUMN alert_count INTEGER DEFAULT 0"
                 ))
 
 
@@ -368,6 +378,8 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
         "duration_s": _duration_s(row["started_at"], row["finished_at"]),
         "message": row["message"] or "",
         "cancel_requested": bool(row.get("cancel_requested")),
+        "alert_count": int(row.get("alert_count") or 0),
+        "last_alert_at": _fmt(row["last_alert_at"]) if "last_alert_at" in row else None,
         "steps": [
             {
                 "key": s["step_key"],
@@ -424,6 +436,50 @@ def list_recent_runs(limit: int = 30) -> List[Dict[str, Any]]:
         if r:
             out.append(r)
     return out
+
+
+def claim_alert(run_id: str, min_interval_s: float) -> bool:
+    """Mark this running session as alerted. True if this caller should send mail.
+
+    Prevents two watchdog ticks from emailing the same hang. A still-running
+    session can be claimed again after min_interval_s (hourly reminder).
+    """
+    if not run_id:
+        return False
+    _init()
+    now = datetime.now()
+    min_interval_s = max(60.0, float(min_interval_s or 3600))
+    with _engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT status, last_alert_at, alert_count FROM pipeline_runs "
+                "WHERE id=:r"
+            ),
+            {"r": run_id},
+        ).mappings().first()
+        if not row or row["status"] != "running":
+            return False
+        last = row["last_alert_at"]
+        if isinstance(last, str) and last.strip():
+            try:
+                last = datetime.fromisoformat(last.replace(" ", "T"))
+            except Exception:
+                last = None
+        if last is not None:
+            try:
+                elapsed = (now - last).total_seconds()
+            except Exception:
+                elapsed = min_interval_s
+            if elapsed < min_interval_s:
+                return False
+        conn.execute(
+            text(
+                "UPDATE pipeline_runs SET last_alert_at=:t, "
+                "alert_count=COALESCE(alert_count,0)+1 WHERE id=:r AND status='running'"
+            ),
+            {"t": now, "r": run_id},
+        )
+    return True
 
 
 def _duration_s(start, end) -> Optional[float]:

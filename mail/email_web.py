@@ -124,6 +124,14 @@ def settings_page():
                     keep_password_if_blank=True,
                 )
                 msg = "Login credentials saved."
+            elif section == "alerts":
+                set_setting("alert_emails", form.get("alert_emails", ""))
+                set_setting("stuck_minutes", form.get("stuck_minutes", "60"))
+                msg = "Alert settings saved."
+            elif section == "alert_test":
+                from rpa.hang_alert import send_test_alert
+                to = send_test_alert()
+                msg = f"Test alert sent to {to}."
             else:
                 for k in AGENT_KEYS:
                     set_setting(k, form.get(k, ""))
@@ -133,6 +141,9 @@ def settings_page():
             msg = f"Failed to save: {e}"
 
     cfg = get_agent_config()
+    from mail.settings_db import get_setting
+    alert_to = get_setting("alert_emails", "")
+    stuck = get_setting("stuck_minutes", "60") or "60"
     rows = []
     for key in AGENT_KEYS:
         label, hint = _AGENT_LABELS[key]
@@ -154,7 +165,7 @@ def settings_page():
 
     body = f"""
     <h1>Settings</h1>
-    <div class="sub">Samsung SSO login (W1 mail + NERP / RPA) and Agent API credentials.</div>
+    <div class="sub">Samsung SSO login, Agent API, and overnight hang alerts.</div>
     {_flash(msg, ok)}
     <div class="panel">
       <h2>Samsung SSO login</h2>
@@ -189,6 +200,36 @@ def settings_page():
         <input type="hidden" name="section" value="agent">
         {''.join(rows)}
         <button type="submit" class="btn-run">Save API settings</button>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Stuck-session alerts</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        If a Live mail or RPA session is still running after this many minutes
+        (overnight hang, SAP dialog, dead click), send one email with desktop
+        + browser screenshots and the collected logs. The job is <b>not</b>
+        stopped. Set your own address here — do not use the customer Email Job.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="alerts">
+        <div class="grid-2">
+          <div class="form-row">
+            <label for="alert_emails">Alert to (comma-separated)</label>
+            <input type="text" id="alert_emails" name="alert_emails"
+                   value="{alert_to}" placeholder="you@samsung.com">
+          </div>
+          <div class="form-row">
+            <label for="stuck_minutes">Minutes before alert</label>
+            <input type="number" id="stuck_minutes" name="stuck_minutes"
+                   min="5" max="1440" value="{stuck}">
+          </div>
+        </div>
+        <button type="submit" class="btn-run">Save alerts</button>
+      </form>
+      <form method="post" style="margin-top:12px">
+        <input type="hidden" name="section" value="alert_test">
+        <button type="submit">Send test alert</button>
+        <span class="muted"> Needs Agent API + alert address above.</span>
       </form>
     </div>
     """

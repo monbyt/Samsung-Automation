@@ -1459,8 +1459,12 @@ def api_ingestions():
 
 
 if __name__ == "__main__":
+    from rpa.hang_alert import install_dashboard_tee, start_watchdog
+    log_path = install_dashboard_tee()
+    print(f"Logging to {log_path}")
     seed_from_config()
     seed_rpa()
+    start_watchdog()
     if config.DASHBOARD_RUNS_SCHEDULER:
         from mail.cron import start_background
         start_background()

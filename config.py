@@ -96,6 +96,12 @@ RPA_SCRIPTS_DIR = os.path.join(BASE_DIR, "rpa", "scripts")
 # Each worker uses its own Chrome profile + upload/PDF folders.
 RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "4"))
 
+# Email a screenshot + logs if a Live session is still running after this many minutes.
+# Override in Settings → Stuck-session alerts (or env RPA_STUCK_MINUTES).
+RPA_STUCK_MINUTES = int(os.environ.get("RPA_STUCK_MINUTES", "60"))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+MAIL_CDP_PORT = 9222
+
 # ── Database ───────────────────────────────────────────────────
 # SQLite by default (WAL mode enabled for concurrent dashboard reads).
 # For heavy LAN querying, switch to MySQL on a small server:

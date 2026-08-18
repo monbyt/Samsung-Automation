@@ -14,3 +14,4 @@ data/
 .DS_Store
 venv/
 .venv/
+logs/

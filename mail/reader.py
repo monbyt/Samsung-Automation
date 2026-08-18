@@ -294,12 +294,17 @@ def run_mail_check(filters=None, on_download=None):
     processed_subjects = set()
 
     with sync_playwright() as pw:
+        mail_port = int(getattr(config, "MAIL_CDP_PORT", 9222) or 9222)
         context = pw.chromium.launch_persistent_context(
             config.PROFILE_DIR,
             channel="chrome",
             headless=config.HEADLESS,
             accept_downloads=True,
-            args=["--disable-popup-blocking", "--no-first-run"],
+            args=[
+                "--disable-popup-blocking",
+                "--no-first-run",
+                f"--remote-debugging-port={mail_port}",
+            ],
         )
         page = context.pages[0] if context.pages else context.new_page()
         _open_mail(page)

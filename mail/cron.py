@@ -200,6 +200,11 @@ def scheduler_loop():
     seed_from_config()
     from rpa.jobs_db import seed_from_config as seed_rpa
     seed_rpa()
+    try:
+        from rpa.hang_alert import start_watchdog
+        start_watchdog()
+    except Exception as e:
+        print(f"Hang watchdog failed to start: {e}", flush=True)
     tick_seconds = getattr(config, "SCHEDULER_TICK_SECONDS", 60)
 
     print(
@@ -218,6 +223,11 @@ def scheduler_loop():
 
 def start_background():
     """Start the cron loop in a daemon thread (used by dashboard)."""
+    try:
+        from rpa.hang_alert import start_watchdog
+        start_watchdog()
+    except Exception as e:
+        print(f"Hang watchdog failed to start: {e}", flush=True)
     t = threading.Thread(target=scheduler_loop, daemon=True, name="mail-cron")
     t.start()
     return t

@@ -534,12 +534,18 @@ def _start_worker_process(payload: dict):
     import subprocess
     import sys
 
+    from rpa.hang_alert import register_worker, worker_log_path
+
     payload = dict(payload)
     upload_dir = payload.get("upload_dir") or config.BASE_DIR
     os.makedirs(upload_dir, exist_ok=True)
     result_path = os.path.join(upload_dir, "_worker_result.json")
     payload_path = os.path.join(upload_dir, "_worker_payload.json")
     payload["result_path"] = result_path
+    payload["log_path"] = payload.get("log_path") or worker_log_path(
+        payload.get("label") or "",
+        payload.get("upload_file") or "",
+    )
     with open(payload_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh)
     env = os.environ.copy()
@@ -566,9 +572,20 @@ def _start_worker_process(payload: dict):
         [sys.executable, worker_py, "--payload-file", payload_path],
         **popen_kwargs,
     )
+    register_worker({
+        "pid": proc.pid,
+        "chrome_port": payload.get("chrome_port"),
+        "log_path": payload.get("log_path"),
+        "label": payload.get("label"),
+        "rpa_id": payload.get("rpa_id"),
+        "upload_file": payload.get("upload_file"),
+        "upload_dir": payload.get("upload_dir"),
+        "download_dir": payload.get("download_dir"),
+    })
     _log(
         f"Spawned worker PID {proc.pid} · chrome_port={payload.get('chrome_port')} · "
-        f"profile={os.path.basename(payload.get('chrome_profile') or '-')}"
+        f"profile={os.path.basename(payload.get('chrome_profile') or '-')} · "
+        f"log={os.path.basename(payload.get('log_path') or '-')}"
     )
     return proc, payload, result_path
 
@@ -681,6 +698,11 @@ def trigger_for_mail_job(
                         still.append((proc, payload, result_path))
                         continue
                     results.append(_read_worker_result(result_path, payload, rc))
+                    try:
+                        from rpa.hang_alert import unregister_worker
+                        unregister_worker(proc.pid)
+                    except Exception:
+                        pass
                     _log(
                         f"Worker PID {proc.pid} finished ({rc}) · "
                         f"{os.path.basename(payload.get('upload_file') or '')}"
@@ -704,6 +726,11 @@ def trigger_for_mail_job(
             for proc, payload, _result_path in active:
                 try:
                     proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    from rpa.hang_alert import unregister_worker
+                    unregister_worker(proc.pid)
                 except Exception:
                     pass
             raise

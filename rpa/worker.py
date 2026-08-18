@@ -37,6 +37,11 @@ def _load_payload() -> dict:
 
 def main() -> int:
     payload = _load_payload()
+    log_path = (payload.get("log_path") or "").strip()
+    if log_path:
+        from rpa.hang_alert import install_worker_tee
+        install_worker_tee(log_path)
+        print(f"[RPA worker] log file: {log_path}", flush=True)
     result_path = payload.get("result_path") or ""
     profile = (payload.get("chrome_profile") or "").strip()
     if profile:

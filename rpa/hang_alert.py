@@ -27,9 +27,10 @@ _TEE_INSTALLED = False
 _DASHBOARD_LOG = ""
 
 _TICK_S = 30
-_MAX_ATTACH = 10
-_MAX_ATTACH_BYTES = 8 * 1024 * 1024
-_LOG_TAIL_CHARS = 80_000
+_MAX_ATTACH = 4
+_MAX_ATTACH_BYTES = 4 * 1024 * 1024
+_LOG_TAIL_CHARS = 24_000
+_BODY_CHARS = 12_000
 
 
 def _log(msg: str) -> None:
@@ -478,14 +479,6 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
         lines.append("")
         lines.append(f"===== {title}: {path} =====")
         lines.append(text or "(empty)")
-        if path and os.path.isfile(path):
-            copy = os.path.join(out_dir, os.path.basename(path))
-            try:
-                import shutil
-                shutil.copy2(path, copy)
-                attachments.append(copy)
-            except Exception:
-                pass
 
     upload_dir = (worker or {}).get("upload_dir") or ""
     download_dir = (worker or {}).get("download_dir") or ""
@@ -499,24 +492,27 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
         lines.append(_dir_listing(download_dir))
 
     if run:
-        snap = os.path.join(out_dir, "pipeline-run.json")
-        _write_text(snap, json.dumps(run, indent=2, default=str))
-        attachments.append(snap)
+        lines.append("")
+        lines.append("===== Pipeline run =====")
+        lines.append(json.dumps(run, indent=2, default=str)[:4000])
 
     body = "\n".join(lines)
     body_path = _write_text(os.path.join(out_dir, "alert-body.txt"), body)
     attachments.append(body_path)
 
-    slim: List[str] = []
-    seen = set()
-    for path in attachments:
-        ap = os.path.abspath(path)
-        if ap in seen or not os.path.isfile(ap):
-            continue
+    def _ok(path: str) -> bool:
         try:
-            if os.path.getsize(ap) > _MAX_ATTACH_BYTES:
-                continue
+            return os.path.isfile(path) and 0 < os.path.getsize(path) <= _MAX_ATTACH_BYTES
         except OSError:
+            return False
+
+    pngs = [p for p in attachments if p.lower().endswith(".png") and _ok(p)]
+    texts = [p for p in attachments if p.lower().endswith(".txt") and _ok(p)]
+    slim = []
+    seen = set()
+    for path in pngs + texts:
+        ap = os.path.abspath(path)
+        if ap in seen:
             continue
         seen.add(ap)
         slim.append(ap)
@@ -534,8 +530,26 @@ def _send(subject: str, body: str, files: List[str]) -> None:
         raise RuntimeError(
             "No alert emails in Settings. Open Settings → Stuck-session alerts."
         )
-    from mail.sender import send_email
-    send_email(to=to, subject=subject, body=body, files=files)
+    from mail.sender import SendError, send_email
+
+    short = body if len(body) <= _BODY_CHARS else body[:_BODY_CHARS] + "\n\n[... truncated; full text in alert-body.txt ...]"
+    pngs = [p for p in (files or []) if str(p).lower().endswith((".png", ".jpg", ".jpeg"))]
+    attempts = [
+        (short, files or []),
+        (short[:4000], pngs[:2]),
+        (short[:2500], []),
+    ]
+    last_err: Optional[Exception] = None
+    for i, (text, attach) in enumerate(attempts, start=1):
+        try:
+            send_email(to=to, subject=subject, body=text, files=attach)
+            if i > 1:
+                _log(f"Hang alert sent on fallback attempt {i} (attachments={len(attach)})")
+            return
+        except SendError as e:
+            last_err = e
+            _log(f"Hang alert send attempt {i}/3 failed: {e}")
+    raise last_err or RuntimeError("Hang alert send failed")
 
 
 def send_test_alert() -> str:

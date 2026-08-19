@@ -14,6 +14,7 @@ Entry points:
 import json
 import mimetypes
 import os
+import time
 from typing import Iterable, Optional, Set
 from urllib.parse import urlparse
 
@@ -131,23 +132,37 @@ def send_email(
         "x-api-key": cfg["agent_api_key"],
     }
 
-    resp = requests.post(
-        cfg["agent_api_url"], headers=headers,
-        data=json.dumps(payload), timeout=120,
-    )
-
-    if not resp.ok:
+    last_err = ""
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(
+                cfg["agent_api_url"], headers=headers,
+                data=json.dumps(payload), timeout=120,
+            )
+        except requests.RequestException as e:
+            last_err = str(e)
+            print(f"[mail] Send attempt {attempt}/3 network error: {e}", flush=True)
+            if attempt < 3:
+                time.sleep(4 * attempt)
+            continue
+        if resp.ok:
+            try:
+                return resp.json()
+            except Exception:
+                return {"status_code": resp.status_code, "text": resp.text}
         try:
             err = resp.json()
-            msg = err.get("errorMessage") or err.get("errorCode") or resp.text
+            last_err = err.get("errorMessage") or err.get("errorCode") or resp.text
         except Exception:
-            msg = resp.text
-        raise SendError(f"Agent API {resp.status_code}: {msg}")
-
-    try:
-        return resp.json()
-    except Exception:
-        return {"status_code": resp.status_code, "text": resp.text}
+            last_err = resp.text
+        print(
+            f"[mail] Send attempt {attempt}/3 failed: {resp.status_code} {last_err[:200]}",
+            flush=True,
+        )
+        if resp.status_code not in (502, 503, 504) or attempt >= 3:
+            raise SendError(f"Agent API {resp.status_code}: {last_err}")
+        time.sleep(4 * attempt)
+    raise SendError(f"Agent API failed after retries: {last_err}")
 
 
 _ATTACH_EXTS = (".pdf", ".xlsx", ".xls", ".csv", ".xlsm", ".zip", ".docx", ".doc",

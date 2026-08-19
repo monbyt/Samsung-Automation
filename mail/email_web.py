@@ -206,9 +206,10 @@ def settings_page():
       <h2>Stuck-session alerts</h2>
       <p class="muted" style="margin-bottom:14px;line-height:1.5">
         If a Live mail or RPA session is still running after this many minutes
-        (overnight hang, SAP dialog, dead click), send one email with desktop
-        + browser screenshots and the collected logs. The job is <b>not</b>
-        stopped. Set your own address here — do not use the customer Email Job.
+        (overnight hang, SAP dialog, dead click), send one email with screenshots
+        and logs, then close that session and clean its upload/PDF files.
+        Other parallel workers keep running. Set your own address here —
+        do not use the customer Email Job.
       </p>
       <form method="post">
         <input type="hidden" name="section" value="alerts">

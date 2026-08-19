@@ -627,6 +627,81 @@ def _worker_due(info: dict, threshold_s: float) -> bool:
     return True
 
 
+def _kill_process_tree(pid: int) -> None:
+    if not pid:
+        return
+    _log(f"Closing hung worker PID {pid}")
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                timeout=15,
+                check=False,
+                capture_output=True,
+            )
+        else:
+            os.kill(int(pid), 9)
+    except Exception as e:
+        _log(f"Kill PID {pid} failed: {e}")
+
+
+def _close_hung_session(run: Optional[dict], worker: Optional[dict]) -> None:
+    """Stop the hung Chrome/Python worker, mark the Live card done, delete its files.
+
+    Other parallel workers are left running. LAYOUT/template Excels are kept.
+    """
+    msg = "Closed after hang alert"
+    pid = int((worker or {}).get("pid") or 0)
+    if pid:
+        _kill_process_tree(pid)
+        unregister_worker(pid)
+
+    rid = (run or {}).get("id")
+    if not rid and worker:
+        label = (worker.get("label") or "").strip()
+        try:
+            from pipeline_progress import get_active_runs
+            for r in get_active_runs():
+                if (r.get("label") or "").strip() == label:
+                    rid = r.get("id")
+                    break
+        except Exception:
+            rid = None
+    if rid:
+        try:
+            from pipeline_progress import request_stop
+            request_stop(msg, run_id=rid)
+        except Exception as e:
+            _log(f"Could not mark run stopped: {e}")
+
+    try:
+        from mail.sender import cleanup_folder_files
+    except Exception as e:
+        _log(f"Cleanup unavailable: {e}")
+        return
+
+    upload = (worker or {}).get("upload_dir") or ""
+    download = (worker or {}).get("download_dir") or ""
+    upload_file = (worker or {}).get("upload_file") or ""
+    deleted: List[str] = []
+    if download:
+        deleted += cleanup_folder_files(download)
+    if upload:
+        deleted += cleanup_folder_files(
+            upload, keep_name_contains=("layout", "template")
+        )
+    if upload_file:
+        deleted += cleanup_folder_files(
+            "",
+            also=[upload_file],
+            keep_name_contains=("layout", "template"),
+        )
+    _log(
+        f"Hung session closed · cleaned {len(deleted)} file(s)"
+        + (f" · {', '.join(os.path.basename(p) for p in deleted[:8])}" if deleted else "")
+    )
+
+
 def check_once() -> List[str]:
     """Scan Live runs + worker PIDs; send at most one email per stuck session."""
     sent: List[str] = []
@@ -660,11 +735,12 @@ def check_once() -> List[str]:
             _send(subject, body, files)
             sent.append(run.get("label") or run["id"])
             _log(f"Sent hang alert for {run.get('label')} ({mins} min) to {to}")
-            if worker and worker.get("pid"):
-                _mark_worker_alerted(int(worker["pid"]))
-                handled_pids.add(int(worker["pid"]))
         except Exception:
             _log("Hang alert send failed:\n" + traceback.format_exc()[-800:])
+        if worker and worker.get("pid"):
+            _mark_worker_alerted(int(worker["pid"]))
+            handled_pids.add(int(worker["pid"]))
+        _close_hung_session(run, worker)
 
     for worker in live_workers():
         pid = int(worker.get("pid") or 0)
@@ -685,10 +761,12 @@ def check_once() -> List[str]:
             )
             _send(subject, body, files)
             sent.append(worker.get("label") or str(pid))
-            _mark_worker_alerted(pid)
             _log(f"Sent hang alert for worker PID {pid} to {to}")
         except Exception:
             _log("Worker hang alert failed:\n" + traceback.format_exc()[-800:])
+        _mark_worker_alerted(pid)
+        handled_pids.add(pid)
+        _close_hung_session(None, worker)
 
     return sent
 

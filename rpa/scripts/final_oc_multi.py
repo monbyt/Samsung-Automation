@@ -213,6 +213,25 @@ def _pdf_dir() -> str:
 
 def _download_pdf(page, so_number: str = "") -> None:
     """F8 → chrome-extension PDF viewer → Download → save under PDF (download) folder only."""
+    # Close any leftover PDF viewer tabs from a previous SO so Download cannot
+    # grab the wrong printout (classic mismatch: SO A processed, PDF B attached).
+    try:
+        for f in list(page.context.pages):
+            if f != page and "chrome-extension://" in (f.url or ""):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        for f in list(page.frames):
+            if f != page.main_frame and (f.url or "").startswith("chrome-extension://"):
+                try:
+                    if f.page != page:
+                        f.page.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[RPA] PDF tab cleanup skipped: {e}")
+
     page.keyboard.press("F8")
     pdf_frame = None
     for _ in range(20):
@@ -243,7 +262,15 @@ def _download_pdf(page, so_number: str = "") -> None:
     if not ext:
         ext = ".pdf"
     fname = f"{stem}_{so_number}{ext}" if so_number else suggested
-    _save_playwright_download(pdf_dl, dest_dir, fname)
+    path = _save_playwright_download(pdf_dl, dest_dir, fname)
+    print(f"[RPA] PDF for SO {so_number or '?'} → {path}")
+    # Close the viewer so the next SO cannot download this print again.
+    try:
+        pdf_page = pdf_frame.page
+        if pdf_page != page:
+            pdf_page.close()
+    except Exception:
+        pass
 
 
 def _shell_status_text(shell) -> str:

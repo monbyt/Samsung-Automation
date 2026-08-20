@@ -325,6 +325,18 @@ def run_rpa(
             resolved_download_dir = _normalize_folder_path(download_dir) or base_download
             os.makedirs(resolved_upload_dir, exist_ok=True)
             os.makedirs(resolved_download_dir, exist_ok=True)
+            # Isolated worker folders must start empty — old PDFs here get emailed
+            # as the "wrong SO printout" when attach picks everything in the folder.
+            if os.path.basename(resolved_download_dir).startswith("_worker_"):
+                from mail.sender import wipe_folder_attachables
+                wiped = wipe_folder_attachables(resolved_download_dir)
+                if wiped:
+                    _log(f"Wiped {len(wiped)} leftover file(s) from PDF folder before run")
+            if os.path.basename(resolved_upload_dir).startswith("_worker_"):
+                from mail.sender import wipe_folder_attachables
+                wipe_folder_attachables(
+                    resolved_upload_dir, keep_name_contains=("layout", "template")
+                )
             _log(f"Upload folder: {resolved_upload_dir}")
             _log(f"Download folder: {resolved_download_dir}")
             try:
@@ -473,7 +485,44 @@ def _worker_slot_dirs(base_upload: str, base_download: str, index: int, token: s
     download = os.path.join(base_download, name)
     os.makedirs(upload, exist_ok=True)
     os.makedirs(download, exist_ok=True)
+    # Guarantee empty PDF slot even if a previous crash reused a name.
+    try:
+        from mail.sender import wipe_folder_attachables
+        wipe_folder_attachables(download)
+        wipe_folder_attachables(upload, keep_name_contains=("layout", "template"))
+    except Exception as e:
+        _log(f"Worker slot wipe skipped: {e}")
     return upload, download
+
+
+def _purge_stale_worker_dirs(base_upload: str, base_download: str) -> None:
+    """Remove leftover _worker_* folders from earlier runs (wrong-PDF source)."""
+    import shutil
+    import time
+
+    now = time.time()
+    for base in (base_upload, base_download):
+        if not base or not os.path.isdir(base):
+            continue
+        for name in os.listdir(base):
+            if not name.startswith("_worker_"):
+                continue
+            path = os.path.join(base, name)
+            if not os.path.isdir(path):
+                continue
+            try:
+                age_h = (now - os.path.getmtime(path)) / 3600.0
+            except OSError:
+                age_h = 999
+            # Anything older than ~10 minutes from a prior batch is safe to drop
+            # before starting a new parallel batch.
+            if age_h < (10 / 60.0):
+                continue
+            try:
+                shutil.rmtree(path)
+                _log(f"Removed stale worker folder: {path}")
+            except OSError as e:
+                _log(f"Could not remove stale worker folder {path}: {e}")
 
 
 def _parallel_worker(payload: dict) -> dict:
@@ -625,6 +674,7 @@ def trigger_for_mail_job(
         rpa_id = rpa["rpa_id"]
         base_upload, base_download = _resolve_rpa_folders(rpa)
         token = datetime.now().strftime("%H%M%S")
+        _purge_stale_worker_dirs(base_upload, base_download)
         payloads = []
         for i, path in enumerate(files):
             chrome_profile = _chrome_profile_dir(i + 1, token)

@@ -252,6 +252,45 @@ def cleanup_folder_files(
     return deleted
 
 
+def remove_worker_dir(directory: str) -> bool:
+    """Delete an isolated _worker_* folder after the run (files + directory)."""
+    import shutil
+
+    directory = _normalize_folder_path(directory or "")
+    if not directory:
+        return False
+    base = os.path.basename(directory.rstrip("\\/"))
+    if not base.startswith("_worker_"):
+        return False
+    try:
+        shutil.rmtree(directory, ignore_errors=False)
+        print(f"[mail] Removed worker folder: {directory}", flush=True)
+        return True
+    except OSError as e:
+        print(f"[mail] Could not remove worker folder {directory}: {e}", flush=True)
+        return False
+
+
+def wipe_folder_attachables(directory: str, *, keep_name_contains: Optional[Iterable[str]] = None) -> list[str]:
+    """Empty a folder of attachable files before a new RPA run starts."""
+    return cleanup_folder_files(directory, keep_name_contains=keep_name_contains)
+
+
+def _pdf_files_in(directory: str) -> list[str]:
+    """All PDFs in directory, newest first — never Excel leftovers."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    out = []
+    for name in os.listdir(directory):
+        if not name.lower().endswith(".pdf"):
+            continue
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            out.append(path)
+    out.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return out
+
+
 def _normalize_folder_path(raw: str) -> str:
     """Expand and normalize a configured folder path (file → parent dir)."""
     folder = (raw or "").strip().strip('"')
@@ -291,23 +330,37 @@ def send_for_rpa(
 
     files: list[str] = []
     watch_dir = ""
+    explicit_attach = (attach_dir or "").strip()
     if override_file and os.path.isfile(override_file):
         files.append(override_file)
         watch_dir = os.path.dirname(os.path.abspath(override_file))
     else:
-        watch_dir = (
-            _normalize_folder_path(attach_dir or "")
-            or job.get("attach_folder")
-            or _rpa_download_folder(rpa_id)
-        )
-        # 0 / blank = attach every file in the folder (PDF download folder workflow).
+        if explicit_attach:
+            # Parallel workers pass an isolated _worker_* folder. Never fall back
+            # to the Email Job's parent attach_folder — that piles up old PDFs
+            # and is exactly how the wrong sales-order print gets emailed.
+            watch_dir = _normalize_folder_path(explicit_attach)
+            if not watch_dir:
+                raise SendError(
+                    f"Worker PDF folder missing or not a directory: {explicit_attach!r}"
+                )
+        else:
+            watch_dir = (
+                _normalize_folder_path(job.get("attach_folder") or "")
+                or _rpa_download_folder(rpa_id)
+            )
+        # Prefer PDFs only (P/I prints). Excel RESULT leftovers must not ride along.
+        pdfs = _pdf_files_in(watch_dir)
         raw_count = job.get("attach_count")
         try:
             attach_count = int(raw_count)
         except (TypeError, ValueError):
             attach_count = 0
-        files = _latest_files_in(watch_dir, attach_count)
-        available = _latest_files_in(watch_dir, 0)
+        if pdfs:
+            files = pdfs if attach_count <= 0 else pdfs[:attach_count]
+        else:
+            files = _latest_files_in(watch_dir, attach_count)
+        available = pdfs or _latest_files_in(watch_dir, 0)
         if attach_count > 0 and len(available) > attach_count:
             print(
                 f"[mail] attach_count={attach_count} but folder has {len(available)} files. "
@@ -366,6 +419,12 @@ def send_for_rpa(
         result["cleaned_dir"] = watch_norm
         if upload_norm:
             result["cleaned_upload_dir"] = upload_norm
+
+        # Drop the whole isolated worker slot so the next run cannot see leftovers.
+        if watch_norm and os.path.basename(watch_norm).startswith("_worker_"):
+            remove_worker_dir(watch_norm)
+        if upload_norm and os.path.basename(upload_norm).startswith("_worker_"):
+            remove_worker_dir(upload_norm)
 
     return result
 

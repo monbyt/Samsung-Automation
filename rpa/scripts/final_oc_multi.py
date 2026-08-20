@@ -246,8 +246,8 @@ def _download_pdf(page, so_number: str = "") -> None:
         raise RuntimeError("Chrome PDF viewer frame not found")
 
     pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
-    pdf_frame.locator("[aria-label='Download']").click()
-    page.wait_for_timeout(500)
+    # One click only — a second Download was creating duplicate identical PDFs
+    # (same invoice attached twice in one email).
     with page.expect_download() as pdf_info:
         pdf_frame.locator("[aria-label='Download']").click()
     pdf_dl = pdf_info.value

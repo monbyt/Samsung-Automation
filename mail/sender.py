@@ -291,6 +291,39 @@ def _pdf_files_in(directory: str) -> list[str]:
     return out
 
 
+def _file_sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _dedupe_files_by_content(paths: list[str]) -> list[str]:
+    """Keep one file per identical PDF bytes (stops same invoice attached 2x)."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            digest = _file_sha256(path)
+        except OSError:
+            unique.append(path)
+            continue
+        if digest in seen:
+            print(
+                f"[mail] Skipping duplicate PDF (same bytes as an earlier attach): "
+                f"{os.path.basename(path)}",
+                flush=True,
+            )
+            continue
+        seen.add(digest)
+        unique.append(path)
+    return unique
+
+
 def _normalize_folder_path(raw: str) -> str:
     """Expand and normalize a configured folder path (file → parent dir)."""
     folder = (raw or "").strip().strip('"')
@@ -369,6 +402,13 @@ def send_for_rpa(
             )
         if not files:
             raise SendError(f"No attachable files found in {watch_dir!r} for RPA '{rpa_id}'.")
+        before = len(files)
+        files = _dedupe_files_by_content(files)
+        if len(files) < before:
+            print(
+                f"[mail] Removed {before - len(files)} duplicate PDF(s) before send",
+                flush=True,
+            )
         print(
             f"[mail] Attach folder {watch_dir!r} count={attach_count} "
             f"→ {len(files)} file(s): {[os.path.basename(p) for p in files]}",

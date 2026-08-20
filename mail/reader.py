@@ -157,6 +157,20 @@ def _open_mailbox(mail, mailbox):
     time.sleep(1.5)
 
 
+def _apply_unread_filter(mail) -> None:
+    """Open the mailbox Filter popover and select Unread (W1 codegen)."""
+    try:
+        mail.get_by_role("button", name="Filter").click(timeout=8_000)
+        time.sleep(0.4)
+        mail.locator("#FilterPopover").get_by_role(
+            "button", name="Unread"
+        ).click(timeout=8_000)
+        time.sleep(1.0)
+        print("  Filter → Unread applied")
+    except Exception as e:
+        print(f"  Filter → Unread skipped ({e})")
+
+
 _IS_UNREAD_JS = """
 (el) => {
   const nodes = [el, ...el.querySelectorAll('a, span, div, b, strong, td, li')];
@@ -230,6 +244,7 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
 
     mail = _mail(page)
     _open_mailbox(mail, mailbox)
+    _apply_unread_filter(mail)
 
     for i in range(MAX_MAILS_PER_TICK):
         if not _click_unread_email(mail, subject):

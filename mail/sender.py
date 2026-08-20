@@ -343,6 +343,7 @@ def send_for_rpa(
     cleanup: bool = True,
     upload_dir: Optional[str] = None,
     attach_dir: Optional[str] = None,
+    source_upload_file: Optional[str] = None,
 ) -> dict:
     """Look up the email job for an RPA and send its latest downloaded file(s).
 
@@ -352,6 +353,9 @@ def send_for_rpa(
     upload_dir — explicit RPA upload folder to clean (RESULT xlsx). Prefer this
                  over DB lookup so we clean the same path the RPA just wrote to.
     attach_dir — explicit PDF/attach folder (parallel workers use an isolated subdir).
+    source_upload_file — original mail Excel in the parent upload folder (not the
+                 _worker_ copy). Deleted after a successful send so order-creation
+                 does not keep growing.
     """
     from mail.email_jobs_db import get_email_job_for_rpa
 
@@ -465,6 +469,23 @@ def send_for_rpa(
             remove_worker_dir(watch_norm)
         if upload_norm and os.path.basename(upload_norm).startswith("_worker_"):
             remove_worker_dir(upload_norm)
+
+        # Parent order-creation mail Excel (W1 download) — not inside _worker_*.
+        if source_upload_file:
+            src = os.path.abspath(source_upload_file)
+            name_l = os.path.basename(src).lower()
+            if any(bit in name_l for bit in ("layout", "template")):
+                print(f"[mail] Keeping protected upload: {src}", flush=True)
+            elif os.path.isfile(src):
+                extra = cleanup_folder_files("", also=[src])
+                deleted += extra
+                if extra:
+                    print(
+                        f"[mail] Removed source mail Excel from parent folder: "
+                        f"{os.path.basename(src)}",
+                        flush=True,
+                    )
+            result["cleaned_files"] = [os.path.basename(p) for p in deleted]
 
     return result
 

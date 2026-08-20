@@ -373,6 +373,7 @@ def run_rpa(
                 rpa_id,
                 upload_dir=resolved_upload_dir,
                 attach_dir=resolved_download_dir,
+                source_upload_file=used_path or upload_file,
             )
         else:
             _log("Deferring email send until remaining download files are processed.")
@@ -420,7 +421,12 @@ def run_rpa(
     return result
 
 
-def _maybe_send_email(rpa_id: str, upload_dir: str = "", attach_dir: str = "") -> None:
+def _maybe_send_email(
+    rpa_id: str,
+    upload_dir: str = "",
+    attach_dir: str = "",
+    source_upload_file: str = "",
+) -> None:
     """If an enabled email job is configured for this RPA, send it."""
     from pipeline_progress import begin_step, check_cancelled, finish_step, skip_step
 
@@ -454,6 +460,7 @@ def _maybe_send_email(rpa_id: str, upload_dir: str = "", attach_dir: str = "") -
             rpa_id,
             upload_dir=upload_dir or None,
             attach_dir=attach_dir or None,
+            source_upload_file=source_upload_file or None,
         )
         mark_send_finished(rpa_id, "ok")
         cleaned = (result or {}).get("cleaned_files") or []

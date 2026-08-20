@@ -362,15 +362,11 @@ def _process_so(page, so_number: str) -> None:
         raise RuntimeError(
             f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
         )
-    # Confirm the result grid is for THIS SO before Create P/I.
+    # Row visible = Execute returned a selectable document. Do NOT require the SO
+    # digits in body.inner_text() — live WebGUI virtualizes the grid and that
+    # check false-failed even when Document select worked.
     page.wait_for_timeout(500)
-    grid_text = _shell_status_text(shell)
-    if so_number not in (grid_text or ""):
-        raise RuntimeError(
-            f"After Execute, SO {so_number} was not found on the ZSDM31520 screen. "
-            "Refusing Create P/I (would print the wrong vendor)."
-        )
-    print(f"[RPA] Confirmed SO {so_number} on result screen")
+    print(f"[RPA] Result row visible after Execute for SO {so_number} — Create P/I")
     row.first.click()
     create_pi = shell.get_by_role("button", name="Create P/I")
     for _ in range(30):

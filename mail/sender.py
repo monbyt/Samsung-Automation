@@ -386,26 +386,26 @@ def send_for_rpa(
                 _normalize_folder_path(job.get("attach_folder") or "")
                 or _rpa_download_folder(rpa_id)
             )
-        # Prefer PDFs only (P/I prints). Excel RESULT leftovers must not ride along.
+        # P/I emails are PDF-only. Never fall back to .xlsx (RESULT / mail Excel)
+        # when PDF download failed — that is how "why is it sending Excel?" happens.
         pdfs = _pdf_files_in(watch_dir)
         raw_count = job.get("attach_count")
         try:
             attach_count = int(raw_count)
         except (TypeError, ValueError):
             attach_count = 0
-        if pdfs:
-            files = pdfs if attach_count <= 0 else pdfs[:attach_count]
-        else:
-            files = _latest_files_in(watch_dir, attach_count)
-        available = pdfs or _latest_files_in(watch_dir, 0)
-        if attach_count > 0 and len(available) > attach_count:
+        if not pdfs:
+            raise SendError(
+                f"No PDF files in {watch_dir!r} for RPA '{rpa_id}'. "
+                "Not attaching Excel. Re-run after P/I download succeeds."
+            )
+        files = pdfs if attach_count <= 0 else pdfs[:attach_count]
+        if attach_count > 0 and len(pdfs) > attach_count:
             print(
-                f"[mail] attach_count={attach_count} but folder has {len(available)} files. "
+                f"[mail] attach_count={attach_count} but folder has {len(pdfs)} PDFs. "
                 "Set 'How many latest files' to 0 to attach all.",
                 flush=True,
             )
-        if not files:
-            raise SendError(f"No attachable files found in {watch_dir!r} for RPA '{rpa_id}'.")
         before = len(files)
         files = _dedupe_files_by_content(files)
         if len(files) < before:
@@ -415,7 +415,7 @@ def send_for_rpa(
             )
         print(
             f"[mail] Attach folder {watch_dir!r} count={attach_count} "
-            f"→ {len(files)} file(s): {[os.path.basename(p) for p in files]}",
+            f"→ {len(files)} PDF(s): {[os.path.basename(p) for p in files]}",
             flush=True,
         )
 

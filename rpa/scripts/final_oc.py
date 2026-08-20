@@ -12,7 +12,7 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill("Pass2002?")
     page.get_by_role("button", name="Login").click()
-    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
+    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
     page.get_by_role("textbox", name="Search Program").click()
     page.get_by_role("textbox", name="Search Program").fill("ZLSDF50270")
     page.get_by_role("button", name="Go").click()
@@ -35,7 +35,7 @@ def run(playwright: Playwright) -> None:
     print(f"[RPA] Captured SO number: {_so_number}")
 
     # Reset to home so Search Program is fresh (avoids stuck ZLSDF50270)
-    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
+    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
     page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
     _search = page.get_by_role("textbox", name="Search Program")
     _search.click()

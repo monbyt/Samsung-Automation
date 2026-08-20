@@ -173,8 +173,8 @@ def _capture_all_so_numbers(page) -> list[str]:
 
 
 def _open_zsdm31520(page) -> None:
-    # Same Utility-home goto as final_oc.py
-    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
+    # Live NERP Shell-home
+    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
     page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
     _search = page.get_by_role("textbox", name="Search Program")
     _search.click()
@@ -272,7 +272,7 @@ def run(playwright: Playwright) -> None:
     context = browser.new_context()
     page = context.new_page()
     # NERP only — do NOT goto sts.secsso.net
-    page.goto("https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home")
+    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
     page.get_by_role("textbox", name="User Account").click()
     page.get_by_role("textbox", name="User Account").fill("m.tasoglu")
     page.get_by_role("textbox", name="Password").click()

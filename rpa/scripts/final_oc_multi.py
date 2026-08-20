@@ -246,18 +246,98 @@ def _download_pdf(page, so_number: str = "") -> None:
     _save_playwright_download(pdf_dl, dest_dir, fname)
 
 
+def _shell_status_text(shell) -> str:
+    """Best-effort SAP status / shell text for error detection."""
+    try:
+        return (shell.locator("body").inner_text(timeout=2000) or "")[:4000]
+    except Exception:
+        try:
+            return (shell.locator(":root").inner_text(timeout=2000) or "")[:4000]
+        except Exception:
+            return ""
+
+
+def _fill_sales_document(shell, page, so_number: str) -> None:
+    """Type SO like a human and leave the field so WebGUI commits it before Execute.
+
+    Live nerps often ignores a fast fill()+Execute and shows CHECK input s/o no.!!
+    even though the same SO works when typed by hand.
+    """
+    sales_doc = shell.get_by_role("textbox", name="Sales Document", exact=True)
+    sales_doc.wait_for(state="visible")
+    sales_doc.click()
+    page.wait_for_timeout(300)
+    try:
+        sales_doc.press("Control+A")
+        sales_doc.press("Backspace")
+    except Exception:
+        sales_doc.fill("")
+    # type() fires key events; fill() alone often does not sync SAP WebGUI.
+    sales_doc.type(so_number, delay=40)
+    sales_doc.press("Tab")
+    page.wait_for_timeout(800)
+    try:
+        got = (sales_doc.input_value() or "").strip()
+    except Exception:
+        got = ""
+    print(f"[RPA] Sales Document field after commit: {got!r} (wanted {so_number!r})")
+    if got and so_number not in got.replace(" ", ""):
+        print("[RPA] Field mismatch — retyping SO")
+        sales_doc.click()
+        sales_doc.fill("")
+        sales_doc.type(so_number, delay=40)
+        sales_doc.press("Tab")
+        page.wait_for_timeout(800)
+
+
 def _process_so(page, so_number: str) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
     print(f"[RPA] Processing SO {so_number}")
+    # Live: SO from Create Sales Order is not always queryable in ZSDM31520 instantly.
+    print("[RPA] Waiting 8s for live SO to be available in ZSDM31520…")
+    page.wait_for_timeout(8000)
     _open_zsdm31520(page)
     shell = _shell(page)
     shell.get_by_role("radio", name="Document select").wait_for(state="visible")
     shell.get_by_role("radio", name="Document select").click()
-    shell.get_by_role("textbox", name="Sales Document", exact=True).click()
-    shell.get_by_role("textbox", name="Sales Document", exact=True).fill(so_number)
+    page.wait_for_timeout(500)
+    _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
-    shell.get_by_role("gridcell", name="To select a row, press the").click()
-    shell.get_by_role("button", name="Create P/I").click()
+    # Live is slower than test; do not click the row until it actually appears.
+    print(f"[RPA] Waiting for ZSDM31520 result row after Execute (SO {so_number})")
+    row = shell.get_by_role("gridcell", name="To select a row, press the")
+    ready = False
+    for i in range(60):
+        try:
+            if row.count() > 0 and row.first.is_visible():
+                ready = True
+                break
+        except Exception:
+            pass
+        status = _shell_status_text(shell)
+        if re.search(r"CHECK\s+input\s+s/?o", status, re.I):
+            raise RuntimeError(
+                f"SAP rejected SO {so_number} after Execute: CHECK input s/o no. "
+                f"(field may not have committed — see Sales Document log above)"
+            )
+        if i in (5, 15, 30):
+            print(f"[RPA] Still waiting for result row… ({i}s)")
+        page.wait_for_timeout(1000)
+    if not ready:
+        raise RuntimeError(
+            f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
+        )
+    page.wait_for_timeout(500)
+    row.first.click()
+    create_pi = shell.get_by_role("button", name="Create P/I")
+    for _ in range(30):
+        try:
+            if create_pi.count() > 0 and create_pi.first.is_visible():
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    create_pi.first.click()
     shell.get_by_role("button", name="Print P/I").click()
     shell.get_by_role("textbox", name="Output Device Required").click()
     shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")

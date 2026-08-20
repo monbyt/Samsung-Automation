@@ -1,5 +1,5 @@
 """
-NERP RPA — matches Playwright codegen line-for-line (nerpsr URL + config creds).
+NERP RPA — matches Playwright codegen line-for-line (nerps URL + config creds).
 
 Run:  python run_nerp.py   (or double-click run_nerp.bat)
 """

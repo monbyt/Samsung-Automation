@@ -77,7 +77,7 @@ MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
 MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 
 # ── NERP RPA ───────────────────────────────────────────────────
-NERP_URL = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home"
+NERP_URL = "https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 

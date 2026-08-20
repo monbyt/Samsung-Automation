@@ -11,6 +11,9 @@ from playwright.sync_api import Playwright, sync_playwright
 SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
+# sha256 digests of PDFs saved in this browser run — same bytes twice = wrong print reused
+_PDF_HASHES_THIS_RUN: list[str] = []
+
 
 # SAP WebGUI cells look like:
 #   grid#C111#0,1          ← real cell (most common in the DOM dump)
@@ -211,32 +214,35 @@ def _pdf_dir() -> str:
     return os.environ.get("RPA_DOWNLOAD_DIR") or ""
 
 
+def _pdf_sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _download_pdf(page, so_number: str = "") -> None:
     """F8 → chrome-extension PDF viewer → Download → save under PDF (download) folder only."""
     # Close any leftover PDF viewer tabs from a previous SO so Download cannot
     # grab the wrong printout (classic mismatch: SO A processed, PDF B attached).
     try:
-        for f in list(page.context.pages):
-            if f != page and "chrome-extension://" in (f.url or ""):
-                try:
-                    f.close()
-                except Exception:
-                    pass
-        for f in list(page.frames):
-            if f != page.main_frame and (f.url or "").startswith("chrome-extension://"):
-                try:
-                    if f.page != page:
-                        f.page.close()
-                except Exception:
-                    pass
+        for p in list(page.context.pages):
+            if p == page:
+                continue
+            try:
+                p.close()
+            except Exception:
+                pass
     except Exception as e:
         print(f"[RPA] PDF tab cleanup skipped: {e}")
 
     page.keyboard.press("F8")
     pdf_frame = None
-    for _ in range(20):
+    for _ in range(30):
         for f in page.frames:
-            if f.url.startswith("chrome-extension://"):
+            if (f.url or "").startswith("chrome-extension://"):
                 pdf_frame = f
                 break
         if pdf_frame:
@@ -246,8 +252,7 @@ def _download_pdf(page, so_number: str = "") -> None:
         raise RuntimeError("Chrome PDF viewer frame not found")
 
     pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
-    # One click only — a second Download was creating duplicate identical PDFs
-    # (same invoice attached twice in one email).
+    # One click only — a second Download was creating duplicate identical PDFs.
     with page.expect_download() as pdf_info:
         pdf_frame.locator("[aria-label='Download']").click()
     pdf_dl = pdf_info.value
@@ -263,8 +268,19 @@ def _download_pdf(page, so_number: str = "") -> None:
         ext = ".pdf"
     fname = f"{stem}_{so_number}{ext}" if so_number else suggested
     path = _save_playwright_download(pdf_dl, dest_dir, fname)
-    print(f"[RPA] PDF for SO {so_number or '?'} → {path}")
-    # Close the viewer so the next SO cannot download this print again.
+    digest = _pdf_sha256(path)
+    size = os.path.getsize(path)
+    print(f"[RPA] PDF for SO {so_number or '?'} → {path} ({size} bytes, sha={digest[:16]})")
+    if digest in _PDF_HASHES_THIS_RUN:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"PDF for SO {so_number} is byte-identical to an earlier print in this run. "
+            "SAP/Chrome reused the same document (wrong vendor). Refusing to keep it."
+        )
+    _PDF_HASHES_THIS_RUN.append(digest)
     try:
         pdf_page = pdf_frame.page
         if pdf_page != page:
@@ -285,11 +301,7 @@ def _shell_status_text(shell) -> str:
 
 
 def _fill_sales_document(shell, page, so_number: str) -> None:
-    """Type SO like a human and leave the field so WebGUI commits it before Execute.
-
-    Live nerps often ignores a fast fill()+Execute and shows CHECK input s/o no.!!
-    even though the same SO works when typed by hand.
-    """
+    """Type SO like a human and leave the field so WebGUI commits it before Execute."""
     sales_doc = shell.get_by_role("textbox", name="Sales Document", exact=True)
     sales_doc.wait_for(state="visible")
     sales_doc.click()
@@ -298,29 +310,27 @@ def _fill_sales_document(shell, page, so_number: str) -> None:
         sales_doc.press("Control+A")
         sales_doc.press("Backspace")
     except Exception:
-        sales_doc.fill("")
-    # type() fires key events; fill() alone often does not sync SAP WebGUI.
-    sales_doc.type(so_number, delay=40)
+        pass
+    sales_doc.fill("")
+    page.wait_for_timeout(200)
+    sales_doc.fill(so_number)
     sales_doc.press("Tab")
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(1000)
     try:
-        got = (sales_doc.input_value() or "").strip()
+        got = (sales_doc.input_value() or "").strip().replace(" ", "")
     except Exception:
         got = ""
     print(f"[RPA] Sales Document field after commit: {got!r} (wanted {so_number!r})")
-    if got and so_number not in got.replace(" ", ""):
-        print("[RPA] Field mismatch — retyping SO")
-        sales_doc.click()
-        sales_doc.fill("")
-        sales_doc.type(so_number, delay=40)
-        sales_doc.press("Tab")
-        page.wait_for_timeout(800)
+    if so_number not in got:
+        raise RuntimeError(
+            f"Sales Document field did not keep SO {so_number} (got {got!r}). "
+            "Aborting before Create P/I so we do not print the wrong vendor."
+        )
 
 
 def _process_so(page, so_number: str) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
     print(f"[RPA] Processing SO {so_number}")
-    # Live: SO from Create Sales Order is not always queryable in ZSDM31520 instantly.
     print("[RPA] Waiting 8s for live SO to be available in ZSDM31520…")
     page.wait_for_timeout(8000)
     _open_zsdm31520(page)
@@ -330,7 +340,6 @@ def _process_so(page, so_number: str) -> None:
     page.wait_for_timeout(500)
     _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
-    # Live is slower than test; do not click the row until it actually appears.
     print(f"[RPA] Waiting for ZSDM31520 result row after Execute (SO {so_number})")
     row = shell.get_by_role("gridcell", name="To select a row, press the")
     ready = False
@@ -344,8 +353,7 @@ def _process_so(page, so_number: str) -> None:
         status = _shell_status_text(shell)
         if re.search(r"CHECK\s+input\s+s/?o", status, re.I):
             raise RuntimeError(
-                f"SAP rejected SO {so_number} after Execute: CHECK input s/o no. "
-                f"(field may not have committed — see Sales Document log above)"
+                f"SAP rejected SO {so_number} after Execute: CHECK input s/o no."
             )
         if i in (5, 15, 30):
             print(f"[RPA] Still waiting for result row… ({i}s)")
@@ -354,7 +362,15 @@ def _process_so(page, so_number: str) -> None:
         raise RuntimeError(
             f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
         )
+    # Confirm the result grid is for THIS SO before Create P/I.
     page.wait_for_timeout(500)
+    grid_text = _shell_status_text(shell)
+    if so_number not in (grid_text or ""):
+        raise RuntimeError(
+            f"After Execute, SO {so_number} was not found on the ZSDM31520 screen. "
+            "Refusing Create P/I (would print the wrong vendor)."
+        )
+    print(f"[RPA] Confirmed SO {so_number} on result screen")
     row.first.click()
     create_pi = shell.get_by_role("button", name="Create P/I")
     for _ in range(30):
@@ -369,12 +385,14 @@ def _process_so(page, so_number: str) -> None:
     shell.get_by_role("textbox", name="Output Device Required").click()
     shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
     shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(1500)
     _download_pdf(page, so_number)
     print(f"[RPA] Finished SO {so_number}")
 
 
 def run(playwright: Playwright) -> None:
+    global _PDF_HASHES_THIS_RUN
+    _PDF_HASHES_THIS_RUN = []
     browser = playwright.chromium.launch(channel="chrome", headless=False)
     context = browser.new_context()
     page = context.new_page()

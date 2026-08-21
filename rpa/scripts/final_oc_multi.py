@@ -307,30 +307,82 @@ def _close_extra_pages(page) -> None:
         print(f"[RPA] PDF tab cleanup skipped: {e}")
 
 
+def _chrome_pdf_frames(page):
+    return [f for f in page.frames if (f.url or "").startswith("chrome-extension://")]
+
+
+def _chrome_pdf_urls(page) -> set[str]:
+    return {(f.url or "") for f in _chrome_pdf_frames(page)}
+
+
+def _dismiss_pdf_viewers(page) -> None:
+    """Clear embedded/popup Chrome PDF viewers before F8.
+
+    Manual SAP works; the bot was clicking Download on a STALE chrome-extension
+    iframe still in the page from an earlier SO (classic …5107 mismatch).
+    """
+    _close_extra_pages(page)
+    for _ in range(8):
+        frames = _chrome_pdf_frames(page)
+        if not frames:
+            return
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        for f in frames:
+            try:
+                p = f.page
+                if p != page:
+                    p.close()
+            except Exception:
+                pass
+        _close_extra_pages(page)
+        page.wait_for_timeout(300)
+    left = len(_chrome_pdf_frames(page))
+    if left:
+        print(f"[RPA] WARNING: {left} PDF viewer frame(s) still present before F8")
+
+
+def _wait_pdf_frame_after_f8(page, before_urls: set[str], timeout_s: float = 20.0):
+    """Return a chrome-extension frame that was not open before F8."""
+    steps = max(1, int(timeout_s * 2))
+    for _ in range(steps):
+        for f in _chrome_pdf_frames(page):
+            u = f.url or ""
+            if u not in before_urls:
+                return f
+            # Before was empty → first viewer after dismiss is fine
+            if not before_urls:
+                return f
+        page.wait_for_timeout(500)
+    return None
+
+
 def _download_pdf(page, so_number: str = "") -> None:
-    """Simple path (same as original final_oc): F8 → Download → save → light SO check."""
+    """F8 → Download from the NEW viewer only → save → verify SO in PDF text."""
     dest_dir = _pdf_dir()
     if not dest_dir:
         print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
         return
 
-    _close_extra_pages(page)
-    page.keyboard.press("F8")
+    _dismiss_pdf_viewers(page)
+    before_urls = _chrome_pdf_urls(page)
+    if before_urls:
+        print(f"[RPA] Pre-F8 PDF URLs still present: {len(before_urls)}")
 
-    pdf_frame = None
-    for _ in range(30):
-        for f in page.frames:
-            if (f.url or "").startswith("chrome-extension://"):
-                pdf_frame = f
-                break
-        if pdf_frame:
-            break
-        page.wait_for_timeout(500)
+    page.keyboard.press("F8")
+    pdf_frame = _wait_pdf_frame_after_f8(page, before_urls, timeout_s=20.0)
     if not pdf_frame:
-        raise RuntimeError("Chrome PDF viewer frame not found")
+        raise RuntimeError(
+            "No NEW Chrome PDF viewer after F8 (refusing to use a stale viewer)"
+        )
+    print(f"[RPA] Using new PDF viewer frame")
 
     download_btn = pdf_frame.locator("[aria-label='Download']")
     download_btn.wait_for(state="visible", timeout=20_000)
+    # Let the new document paint before Download (stale frame was instant-visible).
+    page.wait_for_timeout(800)
     with page.expect_download(timeout=60_000) as pdf_info:
         download_btn.click()
     pdf_dl = pdf_info.value
@@ -349,15 +401,7 @@ def _download_pdf(page, so_number: str = "") -> None:
         f"({size} bytes, sha={digest[:16]}, nums_in_pdf={numbers[:8]})"
     )
 
-    try:
-        pdf_page = pdf_frame.page
-        if pdf_page != page:
-            pdf_page.close()
-        else:
-            page.keyboard.press("Escape")
-    except Exception:
-        pass
-    _close_extra_pages(page)
+    _dismiss_pdf_viewers(page)
 
     if digest in _PDF_HASHES_THIS_RUN:
         try:
@@ -368,7 +412,6 @@ def _download_pdf(page, so_number: str = "") -> None:
             f"PDF for SO {so_number} is byte-identical to an earlier print in this run."
         )
 
-    # Soft check: refuse obvious wrong spool (e.g. sticky 1360705107) but no locks/retries.
     if so_number and numbers and not _pdf_contains_so(path, so_number):
         try:
             os.remove(path)
@@ -376,8 +419,7 @@ def _download_pdf(page, so_number: str = "") -> None:
             pass
         raise RuntimeError(
             f"PDF content does not contain SO {so_number} (found {numbers[:8]}). "
-            "Wrong zpdf spool — clear old output in SAP (SP01) for this user, "
-            "or run with RPA_PARALLEL_WORKERS=1."
+            "Bot downloaded a stale Chrome PDF viewer — not SAP spool."
         )
 
     _PDF_HASHES_THIS_RUN.append(digest)
@@ -471,7 +513,7 @@ def _process_so(page, so_number: str) -> None:
             pass
         page.wait_for_timeout(1000)
     create_pi.first.click()
-    _close_extra_pages(page)
+    _dismiss_pdf_viewers(page)
     shell.get_by_role("button", name="Print P/I").click()
     shell.get_by_role("textbox", name="Output Device Required").click()
     shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")

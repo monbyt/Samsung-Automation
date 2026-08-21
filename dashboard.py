@@ -525,7 +525,7 @@ def jobs_list():
       <td>{{ j.target_table }}</td>
       <td><span class="pill">{{ j.download_folder or '—' }}</span></td>
       <td>{% if rpa_map.get(j.job_id) %}{% for n in rpa_map[j.job_id] %}<span class="pill">{{ n }}</span> {% endfor %}{% else %}<span class="muted">—</span>{% endif %}</td>
-      <td>{{ j.interval_hours }}h</td>
+      <td>{{ j.interval_minutes }}m</td>
       <td>{{ j.next_run or '—' }}</td>
       <td>{{ j.last_run or '—' }}</td>
       <td class="{{ 'ok' if j.last_status=='ok' else 'err' if j.last_status else '' }}">{{ j.last_status or '—' }}</td>
@@ -579,7 +579,7 @@ def jobs_new():
         "subject_pattern": "",
         "target_table": "",
         "download_folder": "Order-Extract",
-        "interval_hours": "2",
+        "interval_minutes": "120",
         "ingest_mode": "replace",
         "enabled": True,
         "extract_zip": False,
@@ -593,7 +593,7 @@ def jobs_new():
             "subject_pattern": request.form.get("subject_pattern", ""),
             "target_table": request.form.get("target_table", ""),
             "download_folder": request.form.get("download_folder", ""),
-            "interval_hours": request.form.get("interval_hours", "2"),
+            "interval_minutes": request.form.get("interval_minutes", "120"),
             "ingest_mode": request.form.get("ingest_mode", "replace"),
             "enabled": request.form.get("enabled") == "on",
             "extract_zip": request.form.get("extract_zip") == "on",
@@ -612,7 +612,7 @@ def jobs_new():
                 subject_pattern=form["subject_pattern"].strip(),
                 target_table=form["target_table"],
                 download_folder=form["download_folder"].strip(),
-                interval_hours=int(form["interval_hours"] or 2),
+                interval_minutes=int(form["interval_minutes"] or 120),
                 enabled=form["enabled"],
                 ingest_mode=form["ingest_mode"],
                 extract_zip=form["extract_zip"],
@@ -645,8 +645,8 @@ def jobs_new():
       <input type="text" name="download_folder" required value="{{ form.download_folder }}"
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly (e.g. C:/Users/you/Documents/Reports).</p>
-    <div class="form-row"><label>Check every (hours)</label>
-      <input type="number" name="interval_hours" value="{{ form.interval_hours }}" min="1" required></div>
+    <div class="form-row"><label>Check every (minutes)</label>
+      <input type="number" name="interval_minutes" value="{{ form.interval_minutes }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" {{ 'selected' if form.ingest_mode=='replace' else '' }}>Replace — swap old rows (recommended)</option>
@@ -744,7 +744,7 @@ def jobs_edit(job_id):
                 subject_pattern=request.form["subject_pattern"].strip(),
                 target_table=request.form.get("target_table", "").strip().lower(),
                 download_folder=request.form.get("download_folder", "").strip(),
-                interval_hours=int(request.form.get("interval_hours", 2)),
+                interval_minutes=int(request.form.get("interval_minutes", 120)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
                 extract_zip=request.form.get("extract_zip") == "on",
@@ -769,8 +769,8 @@ def jobs_edit(job_id):
       <input type="text" name="download_folder" value="{{ job.download_folder }}" required
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly.</p>
-    <div class="form-row"><label>Every (hours)</label>
-      <input type="number" name="interval_hours" value="{{ job.interval_hours }}" min="1" required></div>
+    <div class="form-row"><label>Every (minutes)</label>
+      <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" {{ 'selected' if job.ingest_mode=='replace' else '' }}>Replace old rows</option>

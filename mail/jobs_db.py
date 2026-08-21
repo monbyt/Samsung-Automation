@@ -25,8 +25,8 @@ mail_jobs = Table(
     Column("download_folder", String(200)),
     Column("ingest_mode", String(20), default="replace"),
     Column("extract_zip", Integer, default=0),
-    Column("interval_hours", Integer, default=2),
-    Column("interval_minutes", Integer),  # legacy — migrated to interval_hours
+    Column("interval_hours", Integer, default=2),  # legacy — prefer interval_minutes
+    Column("interval_minutes", Integer, default=120),
     Column("enabled", Integer, default=1),
     Column("last_run", DateTime),
     Column("next_run", DateTime),
@@ -56,11 +56,17 @@ def _migrate_jobs_columns():
             conn.execute(sqltext(
                 "ALTER TABLE mail_jobs ADD COLUMN interval_hours INTEGER DEFAULT 2"
             ))
-            if "interval_minutes" in cols:
-                conn.execute(sqltext(
-                    "UPDATE mail_jobs SET interval_hours = MAX(1, interval_minutes / 60) "
-                    "WHERE interval_hours IS NULL OR interval_hours = 0"
-                ))
+        if "interval_minutes" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE mail_jobs ADD COLUMN interval_minutes INTEGER DEFAULT 120"
+            ))
+            cols.add("interval_minutes")
+        # Prefer minutes: backfill from hours when minutes is missing/zero.
+        if "interval_minutes" in cols and "interval_hours" in cols:
+            conn.execute(sqltext(
+                "UPDATE mail_jobs SET interval_minutes = MAX(1, COALESCE(interval_hours, 2) * 60) "
+                "WHERE interval_minutes IS NULL OR interval_minutes = 0"
+            ))
         if "download_folder" not in cols:
             conn.execute(sqltext(
                 "ALTER TABLE mail_jobs ADD COLUMN download_folder VARCHAR(200)"
@@ -88,11 +94,12 @@ def resolve_download_dir(job: dict) -> str:
     return os.path.join(desktop, folder)
 
 
-def _interval_hours(row):
-    if getattr(row, "interval_hours", None):
-        return max(1, int(row.interval_hours))
-    mins = getattr(row, "interval_minutes", None) or 60
-    return max(1, int(mins) // 60)
+def _interval_minutes(row):
+    mins = getattr(row, "interval_minutes", None)
+    if mins:
+        return max(1, int(mins))
+    hours = getattr(row, "interval_hours", None) or 2
+    return max(1, int(hours) * 60)
 
 
 def _normalize_job_id(raw: str) -> str:
@@ -122,7 +129,7 @@ def _row_to_dict(row):
         }),
         "ingest_mode": getattr(row, "ingest_mode", None) or "replace",
         "extract_zip": bool(getattr(row, "extract_zip", 0)),
-        "interval_hours": _interval_hours(row),
+        "interval_minutes": _interval_minutes(row),
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "next_run": row.next_run,
@@ -154,7 +161,10 @@ def seed_from_config():
             return
 
     now = datetime.now()
-    hours = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2)
+    minutes = getattr(config, "DEFAULT_JOB_INTERVAL_MINUTES", None)
+    if not minutes:
+        minutes = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2) * 60
+    minutes = max(1, int(minutes))
     for f in config.MAIL_FILTERS:
         folder = f.get("folder", f["id"].replace("_", "-").title())
         with engine.begin() as conn:
@@ -167,9 +177,10 @@ def seed_from_config():
                 download_folder=folder,
                 ingest_mode="replace",
                 extract_zip=1 if f.get("extract_zip") else 0,
-                interval_hours=hours,
+                interval_minutes=minutes,
+                interval_hours=max(1, minutes // 60),
                 enabled=1,
-                next_run=now + timedelta(hours=hours),
+                next_run=now + timedelta(minutes=minutes),
                 created_at=now,
             ))
 
@@ -206,7 +217,7 @@ def get_due_jobs(now=None):
 
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
-            interval_hours=2, enabled=True, ingest_mode="replace",
+            interval_minutes=120, enabled=True, ingest_mode="replace",
             download_folder=None, extract_zip=False):
     job_id = _normalize_job_id(job_id)
     if not _slug_ok(job_id):
@@ -219,7 +230,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
         download_folder = job_id.replace("_", "-").title()
     _ensure_tables()
     now = datetime.now()
-    hours = max(1, int(interval_hours))
+    minutes = max(1, int(interval_minutes))
     try:
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
@@ -231,9 +242,10 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
                 download_folder=download_folder,
                 ingest_mode=ingest_mode if ingest_mode in ("replace", "append") else "replace",
                 extract_zip=1 if extract_zip else 0,
-                interval_hours=hours,
+                interval_minutes=minutes,
+                interval_hours=max(1, minutes // 60),
                 enabled=1 if enabled else 0,
-                next_run=now + timedelta(hours=hours),
+                next_run=now + timedelta(minutes=minutes),
                 created_at=now,
             ))
     except Exception as e:
@@ -245,13 +257,15 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
 def update_job(job_id, **fields):
     allowed = {
         "name", "mailbox", "subject_pattern", "target_table",
-        "interval_hours", "enabled", "ingest_mode", "download_folder", "extract_zip",
+        "interval_minutes", "enabled", "ingest_mode", "download_folder", "extract_zip",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return
-    if "interval_hours" in updates:
-        updates["interval_hours"] = max(1, int(updates["interval_hours"]))
+    if "interval_minutes" in updates:
+        minutes = max(1, int(updates["interval_minutes"]))
+        updates["interval_minutes"] = minutes
+        updates["interval_hours"] = max(1, minutes // 60)
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
     if "extract_zip" in updates:
@@ -263,7 +277,7 @@ def update_job(job_id, **fields):
         conn.execute(
             update(mail_jobs).where(mail_jobs.c.job_id == job_id).values(**updates)
         )
-    if "interval_hours" in updates:
+    if "interval_minutes" in updates:
         job = get_job(job_id)
         if job:
             schedule_next(job_id, from_time=datetime.now())
@@ -275,15 +289,15 @@ def delete_job(job_id: str):
         conn.execute(mail_jobs.delete().where(mail_jobs.c.job_id == job_id))
 
 
-def schedule_next(job_id: str, from_time=None, interval_hours=None):
+def schedule_next(job_id: str, from_time=None, interval_minutes=None):
     """Set next_run without running the job (used after create / edit)."""
     job = get_job(job_id)
     if not job:
         return
     base = from_time or datetime.now()
-    hours = interval_hours if interval_hours is not None else job["interval_hours"]
-    hours = max(1, int(hours))
-    nxt = base + timedelta(hours=hours)
+    minutes = interval_minutes if interval_minutes is not None else job["interval_minutes"]
+    minutes = max(1, int(minutes))
+    nxt = base + timedelta(minutes=minutes)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
@@ -298,8 +312,8 @@ def mark_job_finished(job_id: str, status: str, message: str = ""):
     job = get_job(job_id)
     if not job:
         return
-    hours = max(1, int(job["interval_hours"]))
-    nxt = now + timedelta(hours=hours)
+    minutes = max(1, int(job["interval_minutes"]))
+    nxt = now + timedelta(minutes=minutes)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(

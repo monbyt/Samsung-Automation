@@ -46,8 +46,9 @@ HEADLESS = False
 # Jobs do NOT run immediately on startup — configure them in the dashboard.
 SCHEDULER_TICK_SECONDS = 60
 
-# Default interval when seeding jobs from MAIL_FILTERS below (hours).
-DEFAULT_JOB_INTERVAL_HOURS = 2
+# Default interval when seeding jobs from MAIL_FILTERS below (minutes).
+DEFAULT_JOB_INTERVAL_MINUTES = 120
+DEFAULT_JOB_INTERVAL_HOURS = 2  # legacy alias (hours ≈ minutes / 60)
 
 # Each filter = one mailbox + subject pattern → one SQL table.
 # Add more dicts to monitor additional email types.

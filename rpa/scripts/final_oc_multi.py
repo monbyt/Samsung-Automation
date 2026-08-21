@@ -6,7 +6,6 @@ final_oc.py is left untouched.
 """
 import os
 import re
-import time
 from playwright.sync_api import Playwright, sync_playwright
 
 SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
@@ -308,140 +307,32 @@ def _close_extra_pages(page) -> None:
         print(f"[RPA] PDF tab cleanup skipped: {e}")
 
 
-def _chrome_pdf_frame_urls(page) -> set[str]:
-    urls: set[str] = set()
-    for f in page.frames:
-        u = f.url or ""
-        if u.startswith("chrome-extension://"):
-            urls.add(u)
-    return urls
-
-
-def _wait_new_pdf_frame(page, before_urls: set[str], timeout_s: int = 15):
-    """Wait briefly for a chrome-extension PDF frame. Fail fast — do not block the print lock."""
-    deadline = max(1, int(timeout_s * 2))  # 500ms steps
-    for _ in range(deadline):
-        for f in page.frames:
-            u = f.url or ""
-            if not u.startswith("chrome-extension://"):
-                continue
-            if u not in before_urls or not before_urls:
-                return f
-        page.wait_for_timeout(500)
-    for f in page.frames:
-        if (f.url or "").startswith("chrome-extension://"):
-            print("[RPA] WARNING: reusing pre-existing Chrome PDF frame (may be stale)")
-            return f
-    return None
-
-
-class _PdfPrintLock:
-    """Serialize Print→Download briefly so parallel workers don't share zpdf at once.
-
-    Must fail fast: a stuck PDF viewer must NOT hold this lock for minutes
-    (that freezes every other worker).
-    """
-
-    def __init__(self, lock_path: str, timeout_s: float = 120.0):
-        self.lock_path = lock_path
-        self.timeout_s = timeout_s
-        self._fd = None
-
-    def __enter__(self):
-        parent = os.path.dirname(self.lock_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        start = time.time()
-        while True:
-            try:
-                self._fd = os.open(
-                    self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY
-                )
-                os.write(self._fd, f"{os.getpid()}\n".encode())
-                print(f"[RPA] Acquired PDF print lock (pid={os.getpid()})")
-                return self
-            except FileExistsError:
-                if time.time() - start > self.timeout_s:
-                    raise RuntimeError(
-                        f"Timed out waiting for PDF print lock: {self.lock_path}"
-                    )
-                try:
-                    # Stuck viewer used to hold the lock forever; steal after 60s.
-                    age = time.time() - os.path.getmtime(self.lock_path)
-                    if age > 60:
-                        print(f"[RPA] Stealing stale PDF print lock (age={age:.0f}s)")
-                        os.remove(self.lock_path)
-                        continue
-                except OSError:
-                    pass
-                time.sleep(1.0)
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if self._fd is not None:
-                os.close(self._fd)
-        except OSError:
-            pass
-        self._fd = None
-        try:
-            os.remove(self.lock_path)
-            print("[RPA] Released PDF print lock")
-        except OSError:
-            pass
-        return False
-
-
-def _pdf_print_lock():
-    base = (
-        os.environ.get("RPA_DOWNLOAD_DIR")
-        or os.environ.get("RPA_UPLOAD_DIR")
-        or os.getcwd()
-    )
-    parent = os.path.dirname(base.rstrip("\\/")) or base
-    if os.path.basename(base).startswith("_worker_"):
-        lock_dir = parent
-    else:
-        lock_dir = base
-    return _PdfPrintLock(os.path.join(lock_dir, ".pdf_print.lock"))
-
-
-def _download_pdf(page, so_number: str = "", before_urls: set[str] | None = None) -> None:
-    """F8 → Download fast → verify SO. Short timeouts so the print lock is not held forever."""
+def _download_pdf(page, so_number: str = "") -> None:
+    """Simple path (same as original final_oc): F8 → Download → save → light SO check."""
     dest_dir = _pdf_dir()
     if not dest_dir:
         print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
         return
 
-    before_urls = set(before_urls or ())
     _close_extra_pages(page)
-
-    # Old working style: F8 immediately. Do not sit 12s hoping for auto-open.
     page.keyboard.press("F8")
-    pdf_frame = _wait_new_pdf_frame(page, before_urls, timeout_s=15)
-    if not pdf_frame:
-        raise RuntimeError("Chrome PDF viewer frame not found (15s)")
 
-    pdf_page = pdf_frame.page
-    download_btn = pdf_frame.locator("[aria-label='Download'], #save").first
-
-    visible = False
-    for i in range(16):  # max ~8s
-        try:
-            if download_btn.is_visible():
-                visible = True
+    pdf_frame = None
+    for _ in range(30):
+        for f in page.frames:
+            if (f.url or "").startswith("chrome-extension://"):
+                pdf_frame = f
                 break
-        except Exception as e:
-            msg = str(e).lower()
-            if "navigation" in msg or "destroyed" in msg or "target closed" in msg:
-                raise RuntimeError(
-                    f"PDF viewer went away while waiting for Download: {e}"
-                ) from e
+        if pdf_frame:
+            break
         page.wait_for_timeout(500)
-    if not visible:
-        raise RuntimeError("PDF Download button not visible within 8s (viewer error?)")
+    if not pdf_frame:
+        raise RuntimeError("Chrome PDF viewer frame not found")
 
-    with pdf_page.expect_download(timeout=30_000) as pdf_info:
-        download_btn.click(force=True, timeout=8_000)
+    download_btn = pdf_frame.locator("[aria-label='Download']")
+    download_btn.wait_for(state="visible", timeout=20_000)
+    with page.expect_download(timeout=60_000) as pdf_info:
+        download_btn.click()
     pdf_dl = pdf_info.value
 
     suggested = pdf_dl.suggested_filename or "pi.pdf"
@@ -459,6 +350,7 @@ def _download_pdf(page, so_number: str = "", before_urls: set[str] | None = None
     )
 
     try:
+        pdf_page = pdf_frame.page
         if pdf_page != page:
             pdf_page.close()
         else:
@@ -473,23 +365,19 @@ def _download_pdf(page, so_number: str = "", before_urls: set[str] | None = None
         except OSError:
             pass
         raise RuntimeError(
-            f"PDF for SO {so_number} is byte-identical to an earlier print in this run. "
-            "SAP/Chrome reused the same document (wrong vendor). Refusing to keep it."
+            f"PDF for SO {so_number} is byte-identical to an earlier print in this run."
         )
 
-    if so_number and not _pdf_contains_so(path, so_number):
-        if numbers:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            raise RuntimeError(
-                f"PDF content does not contain SO {so_number} "
-                f"(found {numbers[:8]}). Refusing mismatched invoice."
-            )
-        print(
-            f"[RPA] WARNING: no extractable numbers in PDF for SO {so_number} "
-            "(image-only?). Keeping file."
+    # Soft check: refuse obvious wrong spool (e.g. sticky 1360705107) but no locks/retries.
+    if so_number and numbers and not _pdf_contains_so(path, so_number):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"PDF content does not contain SO {so_number} (found {numbers[:8]}). "
+            "Wrong zpdf spool — clear old output in SAP (SP01) for this user, "
+            "or run with RPA_PARALLEL_WORKERS=1."
         )
 
     _PDF_HASHES_THIS_RUN.append(digest)
@@ -583,40 +471,13 @@ def _process_so(page, so_number: str) -> None:
             pass
         page.wait_for_timeout(1000)
     create_pi.first.click()
-    # Hold the print lock for ONE attempt only, then release so other workers
-    # are not frozen behind a stuck PDF viewer / retry loop.
-    last_err: Exception | None = None
-    for attempt in range(1, 3):
-        try:
-            with _pdf_print_lock():
-                _close_extra_pages(page)
-                try:
-                    page.keyboard.press("Escape")
-                except Exception:
-                    pass
-                page.wait_for_timeout(300)
-
-                before_urls = _chrome_pdf_frame_urls(page)
-                shell.get_by_role("button", name="Print P/I").click()
-                shell.get_by_role("textbox", name="Output Device Required").click()
-                shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
-                shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-                page.wait_for_timeout(1500)
-                _download_pdf(page, so_number, before_urls=before_urls)
-            last_err = None
-            break
-        except Exception as e:
-            last_err = e
-            print(f"[RPA] Print/download attempt {attempt}/2 failed for SO {so_number}: {e}")
-            _close_extra_pages(page)
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-            # Lock already released — brief pause before retry so others can print.
-            page.wait_for_timeout(1500)
-    if last_err is not None:
-        raise last_err
+    _close_extra_pages(page)
+    shell.get_by_role("button", name="Print P/I").click()
+    shell.get_by_role("textbox", name="Output Device Required").click()
+    shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
+    shell.get_by_role("textbox", name="Output Device Required").press("Enter")
+    page.wait_for_timeout(1000)
+    _download_pdf(page, so_number)
     print(f"[RPA] Finished SO {so_number}")
 
 

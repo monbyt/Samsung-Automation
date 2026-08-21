@@ -94,9 +94,8 @@ NERP_PROGRAM_PI = "ZSDM31520"
 RPA_SCRIPTS_DIR = os.path.join(BASE_DIR, "rpa", "scripts")
 
 # Max concurrent RPA Chrome windows after mail download (separate processes).
-# Keep at 1 for final_oc_multi: all workers share one SAP user + zpdf spool;
-# parallel F8 was reopening sticky old invoice 1360705107.
-RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "1"))
+# Each worker uses its own Chrome profile + upload/PDF folders.
+RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "4"))
 
 # Email a screenshot + logs if a Live session is still running after this many minutes.
 # Override in Settings → Stuck-session alerts (or env RPA_STUCK_MINUTES).

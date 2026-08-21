@@ -407,29 +407,68 @@ def _pdf_print_lock():
     return _PdfPrintLock(os.path.join(lock_dir, ".pdf_print.lock"))
 
 
-def _download_pdf(page, so_number: str = "") -> None:
-    """F8 → Chrome PDF viewer → Download → verify SO appears in decoded PDF text."""
+def _download_pdf(page, so_number: str = "", before_urls: set[str] | None = None) -> None:
+    """Open the NEW P/I PDF viewer → Download → verify SO in decoded PDF text.
+
+    Prefer an auto-opened viewer after Print (this spool). Only press F8 if nothing
+    appeared — bare F8 often reopens a sticky old zpdf spool (e.g. 1360705107).
+    """
     dest_dir = _pdf_dir()
     if not dest_dir:
         print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
         return
 
+    before_urls = set(before_urls or ())
     _close_extra_pages(page)
-    before_urls = _chrome_pdf_frame_urls(page)
-    if before_urls:
-        print(f"[RPA] Pre-F8 PDF frames still open: {len(before_urls)} (will require new URL)")
 
-    page.keyboard.press("F8")
-    pdf_frame = _wait_new_pdf_frame(page, before_urls)
+    pdf_frame = _wait_new_pdf_frame(page, before_urls, timeout_s=12)
+    if pdf_frame:
+        print("[RPA] Using auto-opened PDF viewer (post-Print)")
+    else:
+        print("[RPA] No auto PDF — pressing F8 for spool display")
+        page.keyboard.press("F8")
+        pdf_frame = _wait_new_pdf_frame(page, before_urls, timeout_s=45)
     if not pdf_frame:
         raise RuntimeError("Chrome PDF viewer frame not found")
 
-    pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
-    # Let the viewer finish swapping to this print before Download.
-    page.wait_for_timeout(2000)
-    with page.expect_download(timeout=60_000) as pdf_info:
-        pdf_frame.locator("[aria-label='Download']").click()
-    pdf_dl = pdf_info.value
+    pdf_page = pdf_frame.page
+    download_btn = pdf_frame.locator("[aria-label='Download'], #save").first
+
+    # Wait until Download is actually usable; avoid hanging through a SAP navigation.
+    visible = False
+    for i in range(40):
+        try:
+            if download_btn.is_visible():
+                visible = True
+                break
+        except Exception as e:
+            msg = str(e).lower()
+            if "navigation" in msg or "destroyed" in msg or "target closed" in msg:
+                raise RuntimeError(
+                    f"PDF viewer went away while waiting for Download: {e}"
+                ) from e
+        page.wait_for_timeout(500)
+        if i in (10, 20, 30):
+            print(f"[RPA] Still waiting for Download button… ({(i + 1) * 0.5:.0f}s)")
+    if not visible:
+        raise RuntimeError("PDF Download button not visible (viewer may have navigated away)")
+
+    # Brief settle so the viewer finishes painting THIS document.
+    page.wait_for_timeout(1500)
+
+    try:
+        with pdf_page.expect_download(timeout=90_000) as pdf_info:
+            download_btn.click(force=True, timeout=15_000)
+        pdf_dl = pdf_info.value
+    except Exception as e:
+        # One more try: re-resolve frame (SAP sometimes swaps the viewer).
+        print(f"[RPA] Download click failed ({e}); re-resolving PDF frame…")
+        pdf_frame = _wait_new_pdf_frame(page, set(), timeout_s=10) or pdf_frame
+        pdf_page = pdf_frame.page
+        download_btn = pdf_frame.locator("[aria-label='Download'], #save").first
+        with pdf_page.expect_download(timeout=90_000) as pdf_info:
+            download_btn.click(force=True, timeout=15_000)
+        pdf_dl = pdf_info.value
 
     suggested = pdf_dl.suggested_filename or "pi.pdf"
     stem, ext = os.path.splitext(suggested)
@@ -446,11 +485,13 @@ def _download_pdf(page, so_number: str = "") -> None:
     )
 
     try:
-        pdf_page = pdf_frame.page
         if pdf_page != page:
             pdf_page.close()
+        else:
+            page.keyboard.press("Escape")
     except Exception:
         pass
+    _close_extra_pages(page)
 
     if digest in _PDF_HASHES_THIS_RUN:
         try:
@@ -568,14 +609,43 @@ def _process_so(page, so_number: str) -> None:
             pass
         page.wait_for_timeout(1000)
     create_pi.first.click()
-    # Only one worker may Print→F8→Download at a time (avoids cross-SO PDF mixups).
+    # Only one worker may Print→download at a time. Same SAP user shares zpdf spool,
+    # so parallel F8 was reopening a sticky old invoice (1360705107).
+    last_err: Exception | None = None
     with _pdf_print_lock():
-        shell.get_by_role("button", name="Print P/I").click()
-        shell.get_by_role("textbox", name="Output Device Required").click()
-        shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
-        shell.get_by_role("textbox", name="Output Device Required").press("Enter")
-        page.wait_for_timeout(1500)
-        _download_pdf(page, so_number)
+        for attempt in range(1, 4):
+            try:
+                _close_extra_pages(page)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+
+                before_urls = _chrome_pdf_frame_urls(page)
+                shell.get_by_role("button", name="Print P/I").click()
+                shell.get_by_role("textbox", name="Output Device Required").click()
+                shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
+                shell.get_by_role("textbox", name="Output Device Required").press("Enter")
+                # Wait for THIS print to hit the spool before opening a viewer.
+                # Sticky old docs show up if we F8 too early.
+                wait_s = 4.0 + (attempt - 1) * 2.0
+                print(f"[RPA] Waiting {wait_s:.0f}s for zpdf spool (attempt {attempt}/3)…")
+                page.wait_for_timeout(int(wait_s * 1000))
+                _download_pdf(page, so_number, before_urls=before_urls)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[RPA] Print/download attempt {attempt}/3 failed for SO {so_number}: {e}")
+                _close_extra_pages(page)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                page.wait_for_timeout(2500)
+        if last_err is not None:
+            raise last_err
     print(f"[RPA] Finished SO {so_number}")
 
 

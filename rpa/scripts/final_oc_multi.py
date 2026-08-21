@@ -357,6 +357,41 @@ def _fill_sales_document(shell, page, so_number: str) -> None:
         )
 
 
+def _click_result_row_for_so(shell, page, so_number: str) -> None:
+    """Select the ZSDM31520 result row for this SO — never blindly click row.first.
+
+    Clicking the first selectable row was creating/printing the wrong P/I
+    (e.g. sticky …5107) while the filename still used the SO we typed.
+    """
+    # 1) Prefer the row that contains the SO, then its row-select cell
+    rows = shell.get_by_role("row").filter(has_text=so_number)
+    if rows.count() > 0:
+        row = rows.first
+        sel = row.get_by_role("gridcell", name=re.compile(r"To select a row", re.I))
+        if sel.count() > 0:
+            sel.first.scroll_into_view_if_needed()
+            sel.first.click()
+            print(f"[RPA] Selected grid row for SO {so_number} (row-select cell)")
+            return
+        row.scroll_into_view_if_needed()
+        row.click()
+        print(f"[RPA] Selected grid row for SO {so_number} (row click)")
+        return
+
+    # 2) Click the SO text cell itself
+    cells = shell.get_by_text(so_number, exact=True)
+    if cells.count() > 0:
+        cells.first.scroll_into_view_if_needed()
+        cells.first.click()
+        print(f"[RPA] Clicked SO text cell {so_number}")
+        return
+
+    raise RuntimeError(
+        f"ZSDM31520 result grid has no row/cell for SO {so_number}. "
+        "Refusing to Create P/I on the first row (wrong invoice)."
+    )
+
+
 def _process_so(page, so_number: str) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
     print(f"[RPA] Processing SO {so_number}")
@@ -369,12 +404,15 @@ def _process_so(page, so_number: str) -> None:
     page.wait_for_timeout(500)
     _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
-    print(f"[RPA] Waiting for ZSDM31520 result row after Execute (SO {so_number})")
-    row = shell.get_by_role("gridcell", name="To select a row, press the")
+    print(f"[RPA] Waiting for ZSDM31520 result row for SO {so_number}")
     ready = False
     for i in range(60):
         try:
-            if row.count() > 0 and row.first.is_visible():
+            if shell.get_by_text(so_number, exact=True).count() > 0:
+                ready = True
+                break
+            # Grid sometimes shows the SO only inside a row without exact text node yet
+            if shell.get_by_role("row").filter(has_text=so_number).count() > 0:
                 ready = True
                 break
         except Exception:
@@ -385,18 +423,15 @@ def _process_so(page, so_number: str) -> None:
                 f"SAP rejected SO {so_number} after Execute: CHECK input s/o no."
             )
         if i in (5, 15, 30):
-            print(f"[RPA] Still waiting for result row… ({i}s)")
+            print(f"[RPA] Still waiting for SO {so_number} in result grid… ({i}s)")
         page.wait_for_timeout(1000)
     if not ready:
         raise RuntimeError(
-            f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
+            f"SO {so_number} not visible in ZSDM31520 result grid within 60s after Execute"
         )
-    # Row visible = Execute returned a selectable document. Do NOT require the SO
-    # digits in body.inner_text() — live WebGUI virtualizes the grid and that
-    # check false-failed even when Document select worked.
     page.wait_for_timeout(500)
-    print(f"[RPA] Result row visible after Execute for SO {so_number} — Create P/I")
-    row.first.click()
+    print(f"[RPA] Result grid shows SO {so_number} — select that row, then Create P/I")
+    _click_result_row_for_so(shell, page, so_number)
     create_pi = shell.get_by_role("button", name="Create P/I")
     for _ in range(30):
         try:

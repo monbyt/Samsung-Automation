@@ -224,11 +224,40 @@ def _pdf_sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _decode_pdf_hex_bytes(data: bytes) -> str:
+    """Decode PDF hex-string payload (ASCII or UTF-16)."""
+    if data.startswith(b"\xfe\xff"):
+        return data[2:].decode("utf-16-be", errors="ignore")
+    if data.startswith(b"\xff\xfe"):
+        return data[2:].decode("utf-16-le", errors="ignore")
+    # UTF-16BE without BOM (null before every ASCII digit is common in SAP PDFs)
+    if len(data) >= 4 and data[0] == 0 and data[2] == 0:
+        try:
+            return data.decode("utf-16-be", errors="ignore")
+        except Exception:
+            pass
+    return data.decode("latin-1", errors="ignore")
+
+
 def _pdf_text_blob(path: str) -> str:
-    """Best-effort text from a PDF without extra deps (literal strings + raw bytes)."""
+    """Extract readable strings from a PDF (literals + hex strings). Never scan raw binary.
+
+    SAP P/I PDFs often store digits as hex, e.g. <31333630373035313037> → '1360705107'.
+    Searching the raw file for SO digits false-fails and invents garbage 'numbers'.
+    """
     with open(path, "rb") as fh:
         raw = fh.read()
     parts: list[str] = []
+
+    for m in re.finditer(rb"<([0-9A-Fa-f\r\n\t ]+)>", raw):
+        hx = re.sub(rb"\s+", b"", m.group(1))
+        if len(hx) < 8 or len(hx) % 2:
+            continue
+        try:
+            parts.append(_decode_pdf_hex_bytes(bytes.fromhex(hx.decode("ascii"))))
+        except ValueError:
+            continue
+
     for m in re.finditer(rb"\((?:\\.|[^\\)]){2,240}\)", raw):
         s = m.group(0)[1:-1].decode("latin-1", errors="ignore")
         s = (
@@ -240,13 +269,29 @@ def _pdf_text_blob(path: str) -> str:
             .replace(r"\\", "\\")
         )
         parts.append(s)
-    parts.append(raw.decode("latin-1", errors="ignore"))
+
     return "\n".join(parts)
 
 
 def _pdf_long_numbers(path: str) -> list[str]:
     blob = _pdf_text_blob(path)
-    return list(dict.fromkeys(SO_RE.findall(blob)))
+    # Prefer real document numbers (10–12 digits); drop longer hex leftovers if any.
+    nums = []
+    for n in SO_RE.findall(blob):
+        if 10 <= len(n) <= 12:
+            nums.append(n)
+    return list(dict.fromkeys(nums))
+
+
+def _pdf_contains_so(path: str, so_number: str) -> bool:
+    if not so_number:
+        return True
+    blob = _pdf_text_blob(path)
+    if so_number in blob:
+        return True
+    # Digits sometimes split by spaces/newlines in extracted text
+    compact = re.sub(r"\D+", "", blob)
+    return so_number in compact
 
 
 def _close_extra_pages(page) -> None:
@@ -363,96 +408,76 @@ def _pdf_print_lock():
 
 
 def _download_pdf(page, so_number: str = "") -> None:
-    """F8 → new chrome-extension PDF viewer → Download → verify SO in PDF text."""
+    """F8 → Chrome PDF viewer → Download → verify SO appears in decoded PDF text."""
     dest_dir = _pdf_dir()
     if not dest_dir:
         print("[RPA] WARNING: RPA_DOWNLOAD_DIR not set — PDF not saved to disk")
         return
 
-    last_err: Exception | None = None
-    for attempt in range(1, 3):
-        _close_extra_pages(page)
-        before_urls = _chrome_pdf_frame_urls(page)
-        if before_urls:
-            print(f"[RPA] Pre-F8 PDF frames still open: {len(before_urls)} (will require new URL)")
+    _close_extra_pages(page)
+    before_urls = _chrome_pdf_frame_urls(page)
+    if before_urls:
+        print(f"[RPA] Pre-F8 PDF frames still open: {len(before_urls)} (will require new URL)")
 
-        page.keyboard.press("F8")
-        pdf_frame = _wait_new_pdf_frame(page, before_urls)
-        if not pdf_frame:
-            last_err = RuntimeError("Chrome PDF viewer frame not found")
-            print(f"[RPA] PDF attempt {attempt}/2 failed: {last_err}")
-            continue
+    page.keyboard.press("F8")
+    pdf_frame = _wait_new_pdf_frame(page, before_urls)
+    if not pdf_frame:
+        raise RuntimeError("Chrome PDF viewer frame not found")
 
+    pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
+    # Let the viewer finish swapping to this print before Download.
+    page.wait_for_timeout(2000)
+    with page.expect_download(timeout=60_000) as pdf_info:
+        pdf_frame.locator("[aria-label='Download']").click()
+    pdf_dl = pdf_info.value
+
+    suggested = pdf_dl.suggested_filename or "pi.pdf"
+    stem, ext = os.path.splitext(suggested)
+    if not ext:
+        ext = ".pdf"
+    fname = f"{stem}_{so_number}{ext}" if so_number else suggested
+    path = _save_playwright_download(pdf_dl, dest_dir, fname)
+    digest = _pdf_sha256(path)
+    size = os.path.getsize(path)
+    numbers = _pdf_long_numbers(path)
+    print(
+        f"[RPA] PDF for SO {so_number or '?'} → {path} "
+        f"({size} bytes, sha={digest[:16]}, nums_in_pdf={numbers[:8]})"
+    )
+
+    try:
+        pdf_page = pdf_frame.page
+        if pdf_page != page:
+            pdf_page.close()
+    except Exception:
+        pass
+
+    if digest in _PDF_HASHES_THIS_RUN:
         try:
-            pdf_frame.locator("[aria-label='Download']").wait_for(state="visible")
-            # Let the viewer finish swapping to this print before Download.
-            page.wait_for_timeout(1500)
-            with page.expect_download(timeout=60_000) as pdf_info:
-                pdf_frame.locator("[aria-label='Download']").click()
-            pdf_dl = pdf_info.value
-        except Exception as e:
-            last_err = e
-            print(f"[RPA] PDF attempt {attempt}/2 download failed: {e}")
-            _close_extra_pages(page)
-            continue
-
-        suggested = pdf_dl.suggested_filename or "pi.pdf"
-        stem, ext = os.path.splitext(suggested)
-        if not ext:
-            ext = ".pdf"
-        fname = f"{stem}_{so_number}{ext}" if so_number else suggested
-        path = _save_playwright_download(pdf_dl, dest_dir, fname)
-        digest = _pdf_sha256(path)
-        size = os.path.getsize(path)
-        numbers = _pdf_long_numbers(path)
-        print(
-            f"[RPA] PDF for SO {so_number or '?'} → {path} "
-            f"({size} bytes, sha={digest[:16]}, nums_in_pdf={numbers[:8]})"
+            os.remove(path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"PDF for SO {so_number} is byte-identical to an earlier print in this run. "
+            "SAP/Chrome reused the same document (wrong vendor). Refusing to keep it."
         )
 
-        try:
-            pdf_page = pdf_frame.page
-            if pdf_page != page:
-                pdf_page.close()
-        except Exception:
-            pass
-
-        if digest in _PDF_HASHES_THIS_RUN:
+    if so_number and not _pdf_contains_so(path, so_number):
+        if numbers:
             try:
                 os.remove(path)
             except OSError:
                 pass
-            last_err = RuntimeError(
-                f"PDF for SO {so_number} is byte-identical to an earlier print in this run. "
-                "SAP/Chrome reused the same document (wrong vendor). Refusing to keep it."
-            )
-            print(f"[RPA] PDF attempt {attempt}/2: {last_err}")
-            continue
-
-        if so_number and numbers and so_number not in numbers:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-            last_err = RuntimeError(
+            raise RuntimeError(
                 f"PDF content does not contain SO {so_number} "
                 f"(found {numbers[:8]}). Refusing mismatched invoice."
             )
-            print(f"[RPA] PDF attempt {attempt}/2: {last_err}")
-            _close_extra_pages(page)
-            page.wait_for_timeout(2000)
-            continue
+        print(
+            f"[RPA] WARNING: no extractable numbers in PDF for SO {so_number} "
+            "(image-only?). Keeping file."
+        )
 
-        if so_number and not numbers:
-            print(
-                f"[RPA] WARNING: no extractable numbers in PDF for SO {so_number} "
-                "(image-only?). Keeping file."
-            )
-
-        _PDF_HASHES_THIS_RUN.append(digest)
-        return
-
-    raise last_err or RuntimeError(f"Failed to download PDF for SO {so_number}")
+    _PDF_HASHES_THIS_RUN.append(digest)
 
 
 def _shell_status_text(shell) -> str:

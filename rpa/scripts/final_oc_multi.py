@@ -360,28 +360,63 @@ def _fill_sales_document(shell, page, so_number: str) -> None:
 
 
 def _select_so_result_row(shell, page, so_number: str) -> None:
-    """Select the actual ZSDM31520 result row for this SO.
+    """Mark the ZSDM31520 grid line for this SO as selected (SAP row-select cell).
 
-    The old code clicked the first generic row-selector cell, which could point
-    at the wrong line. In SAP WebGUI, clicking the SO cell itself and then
-    nudging selection is more reliable than blindly using the first selector.
+    Clicking the SO text alone does NOT select the line — Create P/I then says
+    "no line has been selected". Same as the codegen step: click the
+    "To select a row…" cell, but only on the row that contains this SO.
     """
-    so_cell = shell.get_by_text(so_number, exact=True).first
+    so_pat = re.compile(rf"^{re.escape(so_number)}$")
+    select_name = re.compile(r"To select a row", re.I)
+
+    # Preferred: ARIA row that contains the SO → its select gridcell
+    rows = shell.get_by_role("row").filter(has_text=so_number)
+    n_rows = rows.count()
+    print(f"[RPA] Rows containing SO {so_number}: {n_rows}")
+    if n_rows > 0:
+        row = rows.first
+        sel = row.get_by_role("gridcell", name=select_name)
+        if sel.count() > 0:
+            sel.first.scroll_into_view_if_needed()
+            sel.first.click()
+            page.wait_for_timeout(400)
+            print(f"[RPA] Clicked row-select cell for SO {so_number}")
+            return
+        # Some WebGUI builds expose the selector as a radio inside the row
+        radio = row.get_by_role("radio")
+        if radio.count() > 0:
+            radio.first.click()
+            page.wait_for_timeout(400)
+            print(f"[RPA] Clicked row radio for SO {so_number}")
+            return
+
+    # Fallback: locate SO text, walk to nearest select cell via JS parent row
+    so_cell = shell.get_by_text(so_pat).first
     so_cell.wait_for(state="visible", timeout=10_000)
     so_cell.scroll_into_view_if_needed()
-    so_cell.click()
-    page.wait_for_timeout(300)
-    try:
-        page.keyboard.press("Space")
-        page.wait_for_timeout(200)
-    except Exception:
-        pass
-    status = _shell_status_text(shell)
-    if re.search(r"no line has been selected", status, re.I):
-        raise RuntimeError(
-            f"SAP did not mark SO row {so_number} as selected."
-        )
-    print(f"[RPA] Selected SO row: {so_number}")
+    clicked = so_cell.evaluate(
+        """(el) => {
+          const row = el.closest('[role="row"], tr, .lsTable__row, [id*="Row-"]');
+          if (!row) return false;
+          const sel =
+            row.querySelector('[role="gridcell"][aria-label*="select a row" i]')
+            || row.querySelector('[role="radio"]')
+            || row.querySelector('[id*="SELCOL"]')
+            || row.querySelector('input[type="radio"]');
+          if (!sel) return false;
+          sel.click();
+          return true;
+        }"""
+    )
+    page.wait_for_timeout(400)
+    if clicked:
+        print(f"[RPA] Clicked parent-row select control for SO {so_number}")
+        return
+
+    raise RuntimeError(
+        f"Could not find SAP row-select control for SO {so_number}. "
+        "Refusing Create P/I without a selected line."
+    )
 
 
 def _process_so(page, so_number: str) -> None:
@@ -391,6 +426,7 @@ def _process_so(page, so_number: str) -> None:
     page.wait_for_timeout(8000)
     _open_zsdm31520(page)
     shell = _shell(page)
+    # Mode radio on the selection screen (not the result-grid row radio)
     shell.get_by_role("radio", name="Document select").wait_for(state="visible")
     shell.get_by_role("radio", name="Document select").click()
     page.wait_for_timeout(500)
@@ -417,11 +453,8 @@ def _process_so(page, so_number: str) -> None:
         raise RuntimeError(
             f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
         )
-    # Row visible = Execute returned a selectable document. Do NOT require the SO
-    # digits in body.inner_text() — live WebGUI virtualizes the grid and that
-    # check false-failed even when Document select worked.
     page.wait_for_timeout(500)
-    print(f"[RPA] Result row visible after Execute for SO {so_number} — selecting it")
+    print(f"[RPA] Result row visible after Execute for SO {so_number} — selecting line")
     _select_so_result_row(shell, page, so_number)
     create_pi = shell.get_by_role("button", name="Create P/I")
     for _ in range(30):
@@ -432,6 +465,12 @@ def _process_so(page, so_number: str) -> None:
             pass
         page.wait_for_timeout(1000)
     create_pi.first.click()
+    page.wait_for_timeout(800)
+    status = _shell_status_text(shell)
+    if re.search(r"no line has been selected", status, re.I):
+        raise RuntimeError(
+            f"Create P/I rejected: no line selected for SO {so_number}."
+        )
     shell.get_by_role("button", name="Print P/I").click()
     shell.get_by_role("textbox", name="Output Device Required").click()
     shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")

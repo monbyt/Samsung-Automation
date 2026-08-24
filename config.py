@@ -82,7 +82,7 @@ MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 # or env var NERP_ENV. Scripts/codegen rewrite nerps/nerpsr gotos to match.
 NERP_ENV = (os.environ.get("NERP_ENV") or "prod").strip().lower()
 NERP_URL_PROD = "https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
-NERP_URL_TEST = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
+NERP_URL_TEST = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Utility-home"
 
 
 def nerp_url(env=None):

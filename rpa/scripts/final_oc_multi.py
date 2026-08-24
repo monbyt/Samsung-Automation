@@ -357,6 +357,31 @@ def _fill_sales_document(shell, page, so_number: str) -> None:
         )
 
 
+def _select_so_result_row(shell, page, so_number: str) -> None:
+    """Select the actual ZSDM31520 result row for this SO.
+
+    The old code clicked the first generic row-selector cell, which could point
+    at the wrong line. In SAP WebGUI, clicking the SO cell itself and then
+    nudging selection is more reliable than blindly using the first selector.
+    """
+    so_cell = shell.get_by_text(so_number, exact=True).first
+    so_cell.wait_for(state="visible", timeout=10_000)
+    so_cell.scroll_into_view_if_needed()
+    so_cell.click()
+    page.wait_for_timeout(300)
+    try:
+        page.keyboard.press("Space")
+        page.wait_for_timeout(200)
+    except Exception:
+        pass
+    status = _shell_status_text(shell)
+    if re.search(r"no line has been selected", status, re.I):
+        raise RuntimeError(
+            f"SAP did not mark SO row {so_number} as selected."
+        )
+    print(f"[RPA] Selected SO row: {so_number}")
+
+
 def _process_so(page, so_number: str) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
     print(f"[RPA] Processing SO {so_number}")
@@ -370,11 +395,10 @@ def _process_so(page, so_number: str) -> None:
     _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
     print(f"[RPA] Waiting for ZSDM31520 result row after Execute (SO {so_number})")
-    row = shell.get_by_role("gridcell", name="To select a row, press the")
     ready = False
     for i in range(60):
         try:
-            if row.count() > 0 and row.first.is_visible():
+            if shell.get_by_text(so_number, exact=True).count() > 0:
                 ready = True
                 break
         except Exception:
@@ -395,8 +419,8 @@ def _process_so(page, so_number: str) -> None:
     # digits in body.inner_text() — live WebGUI virtualizes the grid and that
     # check false-failed even when Document select worked.
     page.wait_for_timeout(500)
-    print(f"[RPA] Result row visible after Execute for SO {so_number} — Create P/I")
-    row.first.click()
+    print(f"[RPA] Result row visible after Execute for SO {so_number} — selecting it")
+    _select_so_result_row(shell, page, so_number)
     create_pi = shell.get_by_role("button", name="Create P/I")
     for _ in range(30):
         try:

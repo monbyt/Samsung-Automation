@@ -10,6 +10,15 @@ from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text,
 import config
 from db import engine, init_db
 
+
+def _nerp_start_url() -> str:
+    try:
+        from mail.settings_db import get_nerp_url
+        return get_nerp_url()
+    except Exception:
+        return config.NERP_URL
+
+
 metadata = MetaData()
 
 rpa_jobs = Table(
@@ -59,7 +68,7 @@ def _migrate_rpa_columns():
                 "UPDATE rpa_jobs SET start_url = :url "
                 "WHERE rpa_id = 'nerp_upload_pi' AND (start_url IS NULL OR start_url = '')"
             ),
-            {"url": config.NERP_URL},
+            {"url": _nerp_start_url()},
         )
 
 
@@ -110,7 +119,7 @@ def seed_from_config():
             rpa_id="nerp_upload_pi",
             name="NERP Upload + P/I",
             tool="nerp",
-            start_url=config.NERP_URL,
+            start_url=_nerp_start_url(),
             description=(
                 f"Upload {config.NERP_PROGRAM_UPLOAD} then run "
                 f"{config.NERP_PROGRAM_PI} (P/I print). Uses file from mail job or "
@@ -125,7 +134,7 @@ def seed_from_config():
             rpa_id="final_oc",
             name="Final Order Creation",
             tool="codegen",
-            start_url=config.NERP_URL,
+            start_url=_nerp_start_url(),
             description=(
                 "ZLSDF50270 upload → create sales order → ZSDM31520 zpdf print/download."
             ),
@@ -138,7 +147,7 @@ def seed_from_config():
             rpa_id="final_oc_multi",
             name="Final Order Creation (all SOs)",
             tool="codegen",
-            start_url=config.NERP_URL,
+            start_url=_nerp_start_url(),
             description=(
                 "ZLSDF50270 upload → capture ALL sales orders → ZSDM31520 PDF per SO. "
                 "Upload folder = Excel; Download folder = PDFs only (for email)."

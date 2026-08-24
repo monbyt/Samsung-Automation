@@ -38,9 +38,14 @@ ALERT_KEYS = (
     "stuck_minutes",
 )
 
+NERP_KEYS = (
+    "nerp_env",
+)
+
 DEFAULTS = {
     "agent_mail_component_id": "knox_portal_mail-1irUi",
     "stuck_minutes": "60",
+    "nerp_env": "prod",
 }
 
 
@@ -112,6 +117,35 @@ def save_sso_credentials(username: str, password: str, *, keep_password_if_blank
     except Exception:
         pass
 
+
+def get_nerp_env() -> str:
+    """Active NERP environment: 'prod' or 'test'."""
+    stored = (get_setting("nerp_env", "") or "").strip().lower()
+    if stored in ("test", "testing", "qa", "nerpsr"):
+        return "test"
+    if stored in ("prod", "production", "live", "nerps"):
+        return "prod"
+    import config
+    raw = (getattr(config, "NERP_ENV", None) or "prod").strip().lower()
+    if raw in ("test", "testing", "qa", "nerpsr"):
+        return "test"
+    return "prod"
+
+
+def get_nerp_url() -> str:
+    """FLP start URL for the active NERP environment."""
+    import config
+    return config.nerp_url(get_nerp_env())
+
+
+def save_nerp_env(env: str) -> str:
+    """Persist NERP env (prod/test) and refresh in-process config.NERP_URL."""
+    import config
+    value = "test" if (env or "").strip().lower() in ("test", "testing", "qa", "nerpsr") else "prod"
+    set_setting("nerp_env", value)
+    config.NERP_ENV = value
+    config.NERP_URL = config.nerp_url(value)
+    return value
 
 def _sync_dotenv(updates: dict):
     """Merge key=value pairs into the project .env (create if missing)."""

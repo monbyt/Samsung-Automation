@@ -124,6 +124,10 @@ def settings_page():
                     keep_password_if_blank=True,
                 )
                 msg = "Login credentials saved."
+            elif section == "nerp_env":
+                from mail.settings_db import save_nerp_env, get_nerp_url
+                env = save_nerp_env(form.get("nerp_env", "prod"))
+                msg = f"NERP environment set to {env.upper()} ({get_nerp_url()})."
             elif section == "alerts":
                 set_setting("alert_emails", form.get("alert_emails", ""))
                 set_setting("stuck_minutes", form.get("stuck_minutes", "60"))
@@ -141,9 +145,13 @@ def settings_page():
             msg = f"Failed to save: {e}"
 
     cfg = get_agent_config()
-    from mail.settings_db import get_setting
+    from mail.settings_db import get_setting, get_nerp_env, get_nerp_url
     alert_to = get_setting("alert_emails", "")
     stuck = get_setting("stuck_minutes", "60") or "60"
+    nerp_env = get_nerp_env()
+    nerp_url = get_nerp_url()
+    nerp_prod_sel = "selected" if nerp_env == "prod" else ""
+    nerp_test_sel = "selected" if nerp_env == "test" else ""
     rows = []
     for key in AGENT_KEYS:
         label, hint = _AGENT_LABELS[key]
@@ -165,8 +173,27 @@ def settings_page():
 
     body = f"""
     <h1>Settings</h1>
-    <div class="sub">Samsung SSO login, Agent API, and overnight hang alerts.</div>
+    <div class="sub">Samsung SSO login, NERP environment, Agent API, and overnight hang alerts.</div>
     {_flash(msg, ok)}
+    <div class="panel">
+      <h2>NERP environment</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Switch Final OC / recorded RPA between <b>test</b> (<code>nerpsr</code>) and
+        <b>prod</b> (<code>nerps</code>). Active URL is rewritten into scripts at run time.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="nerp_env">
+        <div class="form-row">
+          <label for="nerp_env">Environment</label>
+          <select id="nerp_env" name="nerp_env">
+            <option value="test" {nerp_test_sel}>TEST — nerpsr (safe for trials)</option>
+            <option value="prod" {nerp_prod_sel}>PROD — nerps (live)</option>
+          </select>
+        </div>
+        <p class="muted" style="margin:8px 0 14px">Current URL: <code>{nerp_url}</code></p>
+        <button type="submit" class="btn-run">Save NERP environment</button>
+      </form>
+    </div>
     <div class="panel">
       <h2>Samsung SSO login</h2>
       <p class="muted" style="margin-bottom:14px;line-height:1.5">

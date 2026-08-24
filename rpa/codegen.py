@@ -224,6 +224,23 @@ def _inject_runtime_preamble(source: str, needs_upload: bool, needs_download: bo
     return header + "\n" + source
 
 
+def _inject_nerp_url(source: str) -> str:
+    """Rewrite hardcoded nerps/nerpsr FLP gotos to the active NERP_URL (test/prod)."""
+    try:
+        from mail.settings_db import get_nerp_url
+        url = get_nerp_url()
+    except Exception:
+        url = getattr(config, "NERP_URL", "") or ""
+    if not url:
+        return source
+    # Match either host and any FLP hash fragment recorded in scripts.
+    return re.sub(
+        r"https://nerpsr?\.sec\.samsung\.net/sap/bc/ui2/flp#[^\s\"']+",
+        url,
+        source,
+    )
+
+
 def _inject_sso_credentials(source: str) -> str:
     """Rewrite hardcoded User Account / Password fills to use RPA_USERNAME / RPA_PASSWORD."""
     out = []
@@ -265,6 +282,7 @@ def prepare_script_source(
 
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
     source = _sanitize_upload_literals(source)
+    source = _inject_nerp_url(source)
     source = _inject_sso_credentials(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     raw_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln]
@@ -650,7 +668,10 @@ def run_recorded_script(
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
-    from mail.settings_db import get_sso_password, get_sso_username
+    from mail.settings_db import get_nerp_env, get_nerp_url, get_sso_password, get_sso_username
+
+    nerp_url = get_nerp_url()
+    _log(f"NERP environment: {get_nerp_env()} → {nerp_url}")
 
     run_globals = {
         "__name__": "__main__",
@@ -659,6 +680,7 @@ def run_recorded_script(
         "RPA_UPLOAD_FILE": os.environ.get("RPA_UPLOAD_FILE", ""),
         "RPA_UPLOAD_DIR": upload_dir or "",
         "RPA_DOWNLOAD_DIR": download_dir or "",
+        "RPA_NERP_URL": nerp_url,
         "RPA_USERNAME": get_sso_username() or config.NERP_USERNAME,
         "RPA_PASSWORD": get_sso_password() or config.NERP_PASSWORD,
         "win_open_file": dismiss_open_file_dialog,

@@ -78,7 +78,22 @@ MAIL_SUBJECT = MAIL_FILTERS[0]["subject"]
 MONITOR_INTERVAL_HOURS = DEFAULT_JOB_INTERVAL_HOURS
 
 # ── NERP RPA ───────────────────────────────────────────────────
-NERP_URL = "https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
+# Switch with NERP_ENV ("prod" | "test"), Settings → NERP environment,
+# or env var NERP_ENV. Scripts/codegen rewrite nerps/nerpsr gotos to match.
+NERP_ENV = (os.environ.get("NERP_ENV") or "prod").strip().lower()
+NERP_URL_PROD = "https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
+NERP_URL_TEST = "https://nerpsr.sec.samsung.net/sap/bc/ui2/flp#Shell-home"
+
+
+def nerp_url(env=None):
+    """Resolve the active NERP FLP URL for prod or test."""
+    e = (env or NERP_ENV or "prod").strip().lower()
+    if e in ("test", "testing", "qa", "nerpsr"):
+        return NERP_URL_TEST
+    return NERP_URL_PROD
+
+
+NERP_URL = nerp_url()
 NERP_PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile-nerp")
 NERP_HEADLESS = False
 

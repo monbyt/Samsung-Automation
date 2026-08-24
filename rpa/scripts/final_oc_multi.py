@@ -8,6 +8,8 @@ import os
 import re
 from playwright.sync_api import Playwright, sync_playwright
 
+from mail.settings_db import get_nerp_url
+
 SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
 
@@ -177,7 +179,7 @@ def _capture_all_so_numbers(page) -> list[str]:
 
 def _open_zsdm31520(page) -> None:
     # Live NERP Shell-home
-    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
+    page.goto(get_nerp_url())
     page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
     _search = page.get_by_role("textbox", name="Search Program")
     _search.click()
@@ -446,7 +448,7 @@ def run(playwright: Playwright) -> None:
     context = browser.new_context()
     page = context.new_page()
     # NERP only — do NOT goto sts.secsso.net
-    page.goto("https://nerps.sec.samsung.net/sap/bc/ui2/flp#Shell-home")
+    page.goto(get_nerp_url())
     page.get_by_role("textbox", name="User Account").click()
     page.get_by_role("textbox", name="User Account").fill("m.tasoglu")
     page.get_by_role("textbox", name="Password").click()

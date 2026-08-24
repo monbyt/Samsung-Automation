@@ -1163,10 +1163,11 @@ def rpa_list():
 def rpa_new():
     seed_rpa()
     error = None
+    from mail.settings_db import get_nerp_url
     form = {
         "rpa_id": "",
         "name": "",
-        "start_url": config.NERP_URL,
+        "start_url": get_nerp_url(),
         "description": "",
         "trigger_mail_job": "",
         "next_rpa": "",

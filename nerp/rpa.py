@@ -30,9 +30,10 @@ def run(upload_file=None) -> None:
         context.set_default_navigation_timeout(0)
         page = context.new_page()
 
-        page.goto(config.NERP_URL)
+        from mail.settings_db import get_nerp_url, get_sso_password, get_sso_username
 
-        from mail.settings_db import get_sso_password, get_sso_username
+        page.goto(get_nerp_url())
+
         username = get_sso_username() or config.NERP_USERNAME
         password = get_sso_password() or config.NERP_PASSWORD
 

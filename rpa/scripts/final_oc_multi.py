@@ -177,14 +177,98 @@ def _capture_all_so_numbers(page) -> list[str]:
     return so_numbers
 
 
+def _find_search_program(page):
+    """Locate the FLP Search Program box (name varies slightly by theme/home)."""
+    for name in ("Search Program", "Search", "Search Transactions"):
+        loc = page.get_by_role("textbox", name=name)
+        try:
+            if loc.count() > 0 and loc.first.is_visible():
+                return loc.first
+        except Exception:
+            continue
+    return None
+
+
+def _open_tcode(page, tcode: str) -> None:
+    """Leave current GUI app, open FLP home, type T-code into Search Program → Go.
+
+    On test (Utility-home) Search is often missing until the shell settles; a bare
+    goto + immediate fill was skipping the second T-code (ZSDM31520).
+    """
+    url = get_nerp_url()
+    print(f"[RPA] Opening T-code {tcode} via {url}")
+    page.goto(url)
+    try:
+        page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+
+    search = None
+    for i in range(30):
+        search = _find_search_program(page)
+        if search:
+            break
+        # Nudge FLP shell — Utility-home / open GUI apps hide Search until Escape/home.
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        try:
+            canvas = page.locator("#canvas")
+            if canvas.count() > 0:
+                canvas.first.click(timeout=1000)
+        except Exception:
+            pass
+        if i in (5, 15, 25):
+            print(f"[RPA] Still waiting for Search Program… ({i}s) before {tcode}")
+            # Re-hit home hash in case the GUI app ate the first navigation
+            try:
+                page.goto(url)
+            except Exception:
+                pass
+        page.wait_for_timeout(1000)
+
+    if not search:
+        raise RuntimeError(
+            f"FLP Search Program not found — cannot open T-code {tcode}. "
+            f"Check NERP env URL ({url})."
+        )
+
+    search.click()
+    page.wait_for_timeout(200)
+    try:
+        search.fill("")
+    except Exception:
+        pass
+    search.fill(tcode)
+    print(f"[RPA] Typed T-code into Search: {tcode}")
+    go = page.get_by_role("button", name="Go")
+    try:
+        if go.count() > 0 and go.first.is_visible():
+            go.first.click()
+        else:
+            search.press("Enter")
+    except Exception:
+        search.press("Enter")
+    print(f"[RPA] Submitted T-code {tcode}")
+    page.wait_for_timeout(2000)
+
+
 def _open_zsdm31520(page) -> None:
-    # Live NERP Shell-home
-    page.goto(get_nerp_url())
-    page.get_by_role("textbox", name="Search Program").wait_for(state="visible")
-    _search = page.get_by_role("textbox", name="Search Program")
-    _search.click()
-    _search.fill("ZSDM31520")
-    page.get_by_role("button", name="Go").click()
+    _open_tcode(page, "ZSDM31520")
+    # Confirm the P/I selection screen actually opened (not still on 50270).
+    shell = _shell(page)
+    try:
+        shell.get_by_role("radio", name="Document select").wait_for(
+            state="visible", timeout=60_000
+        )
+        print("[RPA] ZSDM31520 ready (Document select visible)")
+    except Exception as e:
+        raise RuntimeError(
+            "ZSDM31520 did not open — Document select not visible after Search. "
+            f"({e})"
+        ) from e
 
 
 def _save_playwright_download(dl, dest_dir: str, filename: str | None = None) -> str:
@@ -493,9 +577,8 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill("Pass2002?")
     page.get_by_role("button", name="Login").click()
-    page.get_by_role("textbox", name="Search Program").click()
-    page.get_by_role("textbox", name="Search Program").fill("ZLSDF50270")
-    page.get_by_role("button", name="Go").click()
+    # First T-code — same robust Search path as ZSDM31520
+    _open_tcode(page, "ZLSDF50270")
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").fill("7101")
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()

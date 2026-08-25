@@ -145,6 +145,22 @@ def save_nerp_env(env: str) -> str:
     set_setting("nerp_env", value)
     config.NERP_ENV = value
     config.NERP_URL = config.nerp_url(value)
+    # Keep RPA job start_url rows in sync so the dashboard doesn't show stale prod/test.
+    try:
+        from sqlalchemy import text as sqltext
+        from db import engine
+        with engine.begin() as conn:
+            conn.execute(
+                sqltext(
+                    "UPDATE rpa_jobs SET start_url = :url "
+                    "WHERE rpa_id IN ('final_oc', 'final_oc_multi', 'nerp_upload_pi') "
+                    "   OR start_url LIKE '%nerps.sec.samsung.net%' "
+                    "   OR start_url LIKE '%nerpsr.sec.samsung.net%'"
+                ),
+                {"url": config.NERP_URL},
+            )
+    except Exception as e:
+        print(f"[settings] Could not sync RPA start_url rows: {e}")
     return value
 
 def _sync_dotenv(updates: dict):

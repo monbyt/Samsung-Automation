@@ -293,8 +293,13 @@ def run_rpa(
     _log(f"Tool type: {job['tool']}")
     if job.get("trigger_mail_job"):
         _log(f"Linked mail job: {job['trigger_mail_job']}")
+    try:
+        from mail.settings_db import get_nerp_env, get_nerp_url
+        _log(f"NERP environment: {get_nerp_env()} → {get_nerp_url()}")
+    except Exception as e:
+        _log(f"NERP environment lookup failed: {e}")
     if job.get("start_url"):
-        _log(f"Start URL: {job['start_url']}")
+        _log(f"Job start_url (ignored for NERP gotos; env switch wins): {job['start_url']}")
     result = {"rpa_id": rpa_id, "status": "ok", "message": ""}
     used_path = None
     resolved_upload_dir = ""

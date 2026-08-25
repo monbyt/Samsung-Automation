@@ -185,9 +185,13 @@ def _inject_step_logging(source: str) -> str:
     for line in source.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("page.goto("):
-            url = stripped.split("(", 1)[-1].rstrip(")").strip("\"'")
             indent = line[: len(line) - len(stripped)]
-            out.append(f'{indent}print("[RPA] Navigate:", {url!r})')
+            # Don't mis-log page.goto(get_nerp_url()) as Navigate: get_nerp_url(
+            if "get_nerp_url" in stripped:
+                out.append(f'{indent}print("[RPA] Navigate: active NERP URL (test/prod switch)")')
+            else:
+                url = stripped.split("(", 1)[-1].rstrip(")").strip("\"'")
+                out.append(f'{indent}print("[RPA] Navigate:", {url!r})')
         elif any(
             token in stripped
             for token in (

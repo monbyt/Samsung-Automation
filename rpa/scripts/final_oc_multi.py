@@ -189,45 +189,46 @@ def _find_search_program(page):
     return None
 
 
-def _open_tcode(page, tcode: str) -> None:
+def _open_tcode(page, tcode: str, *, force_home: bool = True) -> None:
     """Leave current GUI app, open FLP home, type T-code into Search Program → Go.
 
     On test (Utility-home) Search is often missing until the shell settles; a bare
     goto + immediate fill was skipping the second T-code (ZSDM31520).
+    After login, pass force_home=False if Search is already visible.
     """
     url = get_nerp_url()
-    print(f"[RPA] Opening T-code {tcode} via {url}")
-    page.goto(url)
-    try:
-        page.wait_for_load_state("domcontentloaded")
-    except Exception:
-        pass
-    page.wait_for_timeout(1500)
+    print(f"[RPA] Opening T-code {tcode} via {url} (force_home={force_home})")
 
-    search = None
-    for i in range(30):
-        search = _find_search_program(page)
-        if search:
-            break
-        # Nudge FLP shell — Utility-home / open GUI apps hide Search until Escape/home.
+    search = None if force_home else _find_search_program(page)
+    if not search:
+        page.goto(url)
         try:
-            page.keyboard.press("Escape")
+            page.wait_for_load_state("domcontentloaded")
         except Exception:
             pass
-        try:
-            canvas = page.locator("#canvas")
-            if canvas.count() > 0:
-                canvas.first.click(timeout=1000)
-        except Exception:
-            pass
-        if i in (5, 15, 25):
-            print(f"[RPA] Still waiting for Search Program… ({i}s) before {tcode}")
-            # Re-hit home hash in case the GUI app ate the first navigation
+        page.wait_for_timeout(1500)
+
+        for i in range(30):
+            search = _find_search_program(page)
+            if search:
+                break
             try:
-                page.goto(url)
+                page.keyboard.press("Escape")
             except Exception:
                 pass
-        page.wait_for_timeout(1000)
+            try:
+                canvas = page.locator("#canvas")
+                if canvas.count() > 0:
+                    canvas.first.click(timeout=1000)
+            except Exception:
+                pass
+            if i in (5, 15, 25):
+                print(f"[RPA] Still waiting for Search Program… ({i}s) before {tcode}")
+                try:
+                    page.goto(url)
+                except Exception:
+                    pass
+            page.wait_for_timeout(1000)
 
     if not search:
         raise RuntimeError(
@@ -405,14 +406,62 @@ def _download_pdf(page, so_number: str = "") -> None:
 
 
 def _shell_status_text(shell) -> str:
-    """Best-effort SAP status / shell text for error detection."""
-    try:
-        return (shell.locator("body").inner_text(timeout=2000) or "")[:4000]
-    except Exception:
+    """Best-effort SAP status line — avoid full-body inner_text (hangs on heavy WebGUI)."""
+    for sel in (
+        '[id*="msgty"]',
+        '[id*="msgtext"]',
+        ".lsMessageBar",
+        '[role="status"]',
+        "#msgarea",
+        '[class*="Message"]',
+    ):
         try:
-            return (shell.locator(":root").inner_text(timeout=2000) or "")[:4000]
+            loc = shell.locator(sel)
+            if loc.count() == 0:
+                continue
+            t = (loc.first.inner_text(timeout=800) or "").strip()
+            if t:
+                return t[:800]
         except Exception:
-            return ""
+            continue
+    return ""
+
+
+def _create_pi_button(shell):
+    """Create P/I label varies slightly (slash / spacing) across FLP themes."""
+    return shell.get_by_role("button", name=re.compile(r"Create\s*P\s*/?\s*I", re.I))
+
+
+def _print_pi_button(shell):
+    return shell.get_by_role("button", name=re.compile(r"Print\s*P\s*/?\s*I", re.I))
+
+
+def _row_select_cells(shell):
+    return shell.get_by_role("gridcell", name=re.compile(r"To select a row", re.I))
+
+
+def _zsdm_result_ready(shell, so_number: str) -> str | None:
+    """True when Execute has produced a selectable result (not just the SO input field)."""
+    try:
+        btn = _create_pi_button(shell)
+        if btn.count() > 0 and btn.first.is_visible():
+            return "create_pi_visible"
+    except Exception:
+        pass
+    try:
+        sel = _row_select_cells(shell)
+        if sel.count() > 0 and sel.first.is_visible():
+            return "select_cell_visible"
+    except Exception:
+        pass
+    # SO inside a gridcell — NOT the Sales Document textbox (exact get_by_text matched that)
+    try:
+        cells = shell.get_by_role("gridcell").filter(has_text=so_number)
+        if cells.count() > 0:
+            return "so_in_gridcell"
+    except Exception:
+        pass
+    return None
 
 
 def _fill_sales_document(shell, page, so_number: str) -> None:
@@ -443,69 +492,223 @@ def _fill_sales_document(shell, page, so_number: str) -> None:
         )
 
 
-def _select_so_result_row(shell, page, so_number: str) -> None:
-    """Mark the ZSDM31520 grid line for this SO as selected (SAP row-select cell).
+def _normalize_sap_num(value: str) -> str:
+    return re.sub(r"\D", "", str(value or ""))
 
-    Clicking the SO text alone does NOT select the line — Create P/I then says
-    "no line has been selected". Same as the codegen step: click the
-    "To select a row…" cell, but only on the row that contains this SO.
+
+def _sold_tos_from_upload_excel() -> list[str]:
+    """Pull Sold-to party numbers from the mail Excel (RPA_UPLOAD_FILE)."""
+    path = os.environ.get("RPA_UPLOAD_FILE") or ""
+    if not path or not os.path.isfile(path):
+        print("[RPA] No RPA_UPLOAD_FILE — cannot pre-load Sold-to values")
+        return []
+    try:
+        import pandas as pd
+    except Exception as e:
+        print(f"[RPA] pandas unavailable for Sold-to parse: {e}")
+        return []
+
+    found: list[str] = []
+    try:
+        sheets = pd.read_excel(path, sheet_name=None, dtype=str, header=None)
+    except Exception as e:
+        print(f"[RPA] Could not read upload Excel for Sold-to: {e}")
+        return []
+
+    header_re = re.compile(r"sold[\s_-]*to|soldto|kunag", re.I)
+    for sheet_name, df in (sheets or {}).items():
+        if df is None or df.empty:
+            continue
+        sold_cols: list[int] = []
+        header_row = None
+        for r in range(min(20, len(df))):
+            row_vals = [str(c).strip() if pd.notna(c) else "" for c in df.iloc[r].tolist()]
+            hits = [i for i, v in enumerate(row_vals) if header_re.search(v or "")]
+            if hits:
+                sold_cols = hits
+                header_row = r
+                break
+        if header_row is None or not sold_cols:
+            continue
+        for r in range(header_row + 1, len(df)):
+            for c in sold_cols:
+                if c >= len(df.columns):
+                    continue
+                raw = df.iloc[r, c]
+                if pd.isna(raw):
+                    continue
+                num = _normalize_sap_num(raw)
+                if 5 <= len(num) <= 12 and num not in found:
+                    found.append(num)
+        if found:
+            print(
+                f"[RPA] Sold-to from Excel sheet={sheet_name!r} "
+                f"cols={sold_cols}: {found}"
+            )
+            return found
+
+    print("[RPA] No Sold-to column found in upload Excel headers")
+    return []
+
+
+def _row_text_for_select_cell(cell) -> str:
+    try:
+        return (
+            cell.evaluate(
+                """(el) => {
+                  const row = el.closest('[role="row"], tr, .lsTable__row, [id*="Row-"]');
+                  return row ? (row.innerText || row.textContent || '') : '';
+                }"""
+            )
+            or ""
+        )
+    except Exception:
+        return ""
+
+
+def _select_so_result_row(
+    shell,
+    page,
+    so_number: str,
+    sold_to: str | None = None,
+    sold_tos: list[str] | None = None,
+) -> None:
+    """Select the correct ZSDM31520 result line for Create P/I.
+
+    Core bug: Document select can return multiple P/I / doc-flow rows. Clicking
+    .first prints the wrong Sold-to. Prefer the selectable row whose text
+    contains the order's Sold-to party number; fall back to SO match, then
+    sole select cell.
     """
-    so_pat = re.compile(rf"^{re.escape(so_number)}$")
-    select_name = re.compile(r"To select a row", re.I)
+    candidates = []
+    if sold_to:
+        candidates.append(_normalize_sap_num(sold_to))
+    for s in sold_tos or []:
+        n = _normalize_sap_num(s)
+        if n and n not in candidates:
+            candidates.append(n)
 
-    # Preferred: ARIA row that contains the SO → its select gridcell
-    rows = shell.get_by_role("row").filter(has_text=so_number)
-    n_rows = rows.count()
-    print(f"[RPA] Rows containing SO {so_number}: {n_rows}")
-    if n_rows > 0:
-        row = rows.first
-        sel = row.get_by_role("gridcell", name=select_name)
-        if sel.count() > 0:
-            sel.first.scroll_into_view_if_needed()
-            sel.first.click()
-            page.wait_for_timeout(400)
-            print(f"[RPA] Clicked row-select cell for SO {so_number}")
-            return
-        # Some WebGUI builds expose the selector as a radio inside the row
-        radio = row.get_by_role("radio")
-        if radio.count() > 0:
-            radio.first.click()
-            page.wait_for_timeout(400)
-            print(f"[RPA] Clicked row radio for SO {so_number}")
-            return
-
-    # Fallback: locate SO text, walk to nearest select cell via JS parent row
-    so_cell = shell.get_by_text(so_pat).first
-    so_cell.wait_for(state="visible", timeout=10_000)
-    so_cell.scroll_into_view_if_needed()
-    clicked = so_cell.evaluate(
-        """(el) => {
-          const row = el.closest('[role="row"], tr, .lsTable__row, [id*="Row-"]');
-          if (!row) return false;
-          const sel =
-            row.querySelector('[role="gridcell"][aria-label*="select a row" i]')
-            || row.querySelector('[role="radio"]')
-            || row.querySelector('[id*="SELCOL"]')
-            || row.querySelector('input[type="radio"]');
-          if (!sel) return false;
-          sel.click();
-          return true;
-        }"""
+    exact = shell.get_by_role("gridcell", name="To select a row, press the")
+    try:
+        n_exact = exact.count()
+    except Exception:
+        n_exact = 0
+    print(
+        f"[RPA] Selectable rows ('To select a row, press the'): {n_exact} "
+        f"(SO={so_number} sold_to_candidates={candidates or ['-']})"
     )
-    page.wait_for_timeout(400)
-    if clicked:
-        print(f"[RPA] Clicked parent-row select control for SO {so_number}")
+
+    def _click(cell, why: str) -> None:
+        cell.scroll_into_view_if_needed()
+        cell.click()
+        page.wait_for_timeout(500)
+        print(f"[RPA] Selected result row via {why}")
+
+    if n_exact > 0:
+        rows_info: list[tuple[int, str]] = []
+        for i in range(min(n_exact, 30)):
+            txt = _row_text_for_select_cell(exact.nth(i))
+            rows_info.append((i, txt))
+            compact = " ".join(txt.split())
+            if compact:
+                print(f"[RPA]   row#{i}: {compact[:180]!r}")
+
+        so_norm = _normalize_sap_num(so_number)
+
+        if candidates:
+            matched: list[tuple[int, str]] = []
+            for i, txt in rows_info:
+                compact_nums = _normalize_sap_num(txt)
+                for sold in candidates:
+                    if sold and sold in compact_nums:
+                        matched.append((i, sold))
+                        break
+            if len(matched) == 1:
+                i, sold = matched[0]
+                _click(exact.nth(i), f"Sold-to match {sold} on row#{i}")
+                return
+            if len(matched) > 1:
+                # Prefer a row that also mentions the SO when several Sold-tos hit
+                for i, sold in matched:
+                    if so_norm and so_norm in _normalize_sap_num(rows_info[i][1]):
+                        _click(
+                            exact.nth(i),
+                            f"Sold-to {sold} + SO on row#{i} "
+                            f"(from {len(matched)} Sold-to hits)",
+                        )
+                        return
+                i, sold = matched[0]
+                _click(
+                    exact.nth(i),
+                    f"first Sold-to match {sold} on row#{i} "
+                    f"(from {len(matched)} Sold-to hits)",
+                )
+                return
+            print(f"[RPA] No selectable row contained Sold-to candidates {candidates}")
+
+        if so_norm:
+            for i, txt in rows_info:
+                if so_norm in _normalize_sap_num(txt):
+                    _click(exact.nth(i), f"SO match {so_norm} on row#{i}")
+                    return
+
+        if n_exact == 1:
+            _click(exact.first, "sole selectable row")
+            return
+
+        # Multiple rows, no Sold-to/SO match — do NOT silently take .first
+        raise RuntimeError(
+            f"ZSDM31520 has {n_exact} selectable rows for SO {so_number} but none "
+            f"matched Sold-to={candidates or '(unknown)'}. Refusing Create P/I to avoid "
+            "printing the wrong vendor."
+        )
+
+    # Fuzzy fallbacks (theme variants / older WebGUI labels)
+    select_name = re.compile(r"To select a row", re.I)
+    for sold in candidates:
+        rows = shell.get_by_role("row").filter(has_text=re.compile(re.escape(sold)))
+        if rows.count() > 0:
+            sel = rows.first.get_by_role("gridcell", name=select_name)
+            if sel.count() > 0:
+                _click(sel.first, f"fuzzy Sold-to row {sold}")
+                return
+
+    rows = shell.get_by_role("row").filter(has_text=so_number)
+    if rows.count() > 0:
+        sel = rows.first.get_by_role("gridcell", name=select_name)
+        if sel.count() > 0:
+            _click(sel.first, f"fuzzy SO row {so_number}")
+            return
+
+    all_sel = _row_select_cells(shell)
+    n_sel = all_sel.count()
+    print(f"[RPA] Fuzzy row-select cells: {n_sel}")
+    if n_sel == 1:
+        _click(all_sel.first, "sole fuzzy select cell")
         return
+    if n_sel > 1:
+        raise RuntimeError(
+            f"Found {n_sel} fuzzy select cells for SO {so_number} without Sold-to "
+            f"match ({candidates or 'unknown'}). Refusing Create P/I."
+        )
 
     raise RuntimeError(
-        f"Could not find SAP row-select control for SO {so_number}. "
+        f"Could not find 'To select a row, press the' for SO {so_number}. "
         "Refusing Create P/I without a selected line."
     )
 
 
-def _process_so(page, so_number: str) -> None:
+def _process_so(
+    page,
+    so_number: str,
+    sold_to: str | None = None,
+    sold_tos: list[str] | None = None,
+) -> None:
     """ZSDM31520 Document select → fill SO → Create P/I → Print → PDF download."""
-    print(f"[RPA] Processing SO {so_number}")
+    print(
+        f"[RPA] Processing SO {so_number} "
+        f"(Sold-to={sold_to or 'unknown'}; candidates={sold_tos or []})"
+    )
     print("[RPA] Waiting 8s for live SO to be available in ZSDM31520…")
     page.wait_for_timeout(8000)
     _open_zsdm31520(page)
@@ -516,38 +719,62 @@ def _process_so(page, so_number: str) -> None:
     page.wait_for_timeout(500)
     _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
-    print(f"[RPA] Waiting for ZSDM31520 result row after Execute (SO {so_number})")
-    ready = False
-    for i in range(60):
-        try:
-            if shell.get_by_text(so_number, exact=True).count() > 0:
-                ready = True
-                break
-        except Exception:
-            pass
-        status = _shell_status_text(shell)
-        if re.search(r"CHECK\s+input\s+s/?o", status, re.I):
-            raise RuntimeError(
-                f"SAP rejected SO {so_number} after Execute: CHECK input s/o no."
+    print(f"[RPA] Waiting for ZSDM31520 result UI after Execute (SO {so_number})")
+    # Do NOT use get_by_text(SO) — Sales Document input still contains the SO and
+    # fooled the old wait into thinking the result grid was ready (or never ready
+    # when test WebGUI only exposes the SO inside gridcells / Create P/I).
+    ready_reason = None
+    for i in range(90):  # test env can be slow after Execute
+        ready_reason = _zsdm_result_ready(shell, so_number)
+        if ready_reason:
+            break
+        if i in (5, 15, 30, 60):
+            status = _shell_status_text(shell)
+            if status:
+                print(f"[RPA] Status bar @ {i}s: {status[:200]!r}")
+            if re.search(r"CHECK\s+input\s+s/?o", status, re.I):
+                raise RuntimeError(
+                    f"SAP rejected SO {so_number} after Execute: CHECK input s/o no."
+                )
+            if re.search(r"no\s+(relevant\s+)?documents?\s+found", status, re.I):
+                raise RuntimeError(
+                    f"ZSDM31520 found no documents for SO {so_number} after Execute."
+                )
+            try:
+                n_sel = _row_select_cells(shell).count()
+                n_pi = _create_pi_button(shell).count()
+            except Exception:
+                n_sel, n_pi = -1, -1
+            print(
+                f"[RPA] Still waiting for result UI… ({i}s) "
+                f"select_cells={n_sel} create_pi={n_pi}"
             )
-        if i in (5, 15, 30):
-            print(f"[RPA] Still waiting for result row… ({i}s)")
         page.wait_for_timeout(1000)
-    if not ready:
+    if not ready_reason:
+        status = _shell_status_text(shell)
         raise RuntimeError(
-            f"ZSDM31520 result row not visible within 60s after Execute for SO {so_number}"
+            f"ZSDM31520 result UI not ready within 90s after Execute for SO {so_number}. "
+            f"status={status[:300]!r}"
         )
     page.wait_for_timeout(500)
-    print(f"[RPA] Result row visible after Execute for SO {so_number} — selecting line")
-    _select_so_result_row(shell, page, so_number)
-    create_pi = shell.get_by_role("button", name="Create P/I")
-    for _ in range(30):
+    print(f"[RPA] Result UI ready ({ready_reason}) for SO {so_number} — selecting line")
+    _select_so_result_row(
+        shell, page, so_number, sold_to=sold_to, sold_tos=sold_tos
+    )
+
+    create_pi = _create_pi_button(shell)
+    for i in range(30):
         try:
             if create_pi.count() > 0 and create_pi.first.is_visible():
                 break
         except Exception:
             pass
+        if i in (5, 15):
+            print(f"[RPA] Waiting for Create P/I button… ({i}s)")
         page.wait_for_timeout(1000)
+    if create_pi.count() == 0:
+        raise RuntimeError(f"Create P/I button not found after selecting SO {so_number}")
+    print(f"[RPA] Clicking Create P/I for SO {so_number}")
     create_pi.first.click()
     page.wait_for_timeout(800)
     status = _shell_status_text(shell)
@@ -555,10 +782,24 @@ def _process_so(page, so_number: str) -> None:
         raise RuntimeError(
             f"Create P/I rejected: no line selected for SO {so_number}."
         )
-    shell.get_by_role("button", name="Print P/I").click()
-    shell.get_by_role("textbox", name="Output Device Required").click()
-    shell.get_by_role("textbox", name="Output Device Required").fill("zpdf")
-    shell.get_by_role("textbox", name="Output Device Required").press("Enter")
+
+    print_pi = _print_pi_button(shell)
+    for i in range(20):
+        try:
+            if print_pi.count() > 0 and print_pi.first.is_visible():
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    if print_pi.count() == 0:
+        raise RuntimeError(f"Print P/I button not found after Create P/I for SO {so_number}")
+    print(f"[RPA] Clicking Print P/I for SO {so_number}")
+    print_pi.first.click()
+    out_dev = shell.get_by_role("textbox", name=re.compile(r"Output Device", re.I))
+    out_dev.first.click()
+    out_dev.first.fill("zpdf")
+    print("[RPA] Output device set to zpdf")
+    out_dev.first.press("Enter")
     page.wait_for_timeout(1500)
     _download_pdf(page, so_number)
     print(f"[RPA] Finished SO {so_number}")
@@ -577,8 +818,8 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("textbox", name="Password").click()
     page.get_by_role("textbox", name="Password").fill("Pass2002?")
     page.get_by_role("button", name="Login").click()
-    # First T-code — same robust Search path as ZSDM31520
-    _open_tcode(page, "ZLSDF50270")
+    # After login Search is usually already there — don't force another Utility-home load.
+    _open_tcode(page, "ZLSDF50270", force_home=False)
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").fill("7101")
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
@@ -607,9 +848,11 @@ def run(playwright: Playwright) -> None:
     if not so_numbers:
         raise RuntimeError("No sales order numbers found in the result grid")
 
+    sold_tos = _sold_tos_from_upload_excel()
     # Process each SO one by one (re-open ZSDM31520 each time for a clean screen)
     for so in so_numbers:
-        _process_so(page, so)
+        sold = sold_tos[0] if len(sold_tos) == 1 else None
+        _process_so(page, so, sold_to=sold, sold_tos=sold_tos)
 
     page.close()
 

@@ -428,12 +428,13 @@ def _shell_status_text(shell) -> str:
 
 
 def _create_pi_button(shell):
-    """Create P/I label varies slightly (slash / spacing) across FLP themes."""
-    return shell.get_by_role("button", name=re.compile(r"Create\s*P\s*/?\s*I", re.I))
+    """Exact codegen/SAP label — do NOT put '/' inside a Playwright name regex
+    (it terminates the /.../ selector and throws InvalidSelectorError on '?')."""
+    return shell.get_by_role("button", name="Create P/I")
 
 
 def _print_pi_button(shell):
-    return shell.get_by_role("button", name=re.compile(r"Print\s*P\s*/?\s*I", re.I))
+    return shell.get_by_role("button", name="Print P/I")
 
 
 def _row_select_cells(shell):

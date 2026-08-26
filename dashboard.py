@@ -4,6 +4,7 @@ Mail reader + database dashboard — LAN-accessible.
 Run:  python dashboard.py   (or double-click run_dashboard.bat)
 Open:  http://<this-pc-ip>:5000  from any machine on the network.
 """
+import logging
 import os
 import re
 import socket
@@ -15,6 +16,7 @@ from datetime import datetime
 
 import pandas as pd
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from werkzeug.serving import WSGIRequestHandler
 
 import config
 from db import init_db
@@ -31,6 +33,31 @@ from sqlalchemy import create_engine, inspect, text
 app = Flask(__name__)
 from mail.email_web import email_bp
 app.register_blueprint(email_bp)
+
+
+class _SkipPipelinePoll(logging.Filter):
+    """The live panel polls /api/pipeline/active every 1–5s. Logging each hit
+    drowns RPA output in the console and dashboard log file."""
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        return "/api/pipeline/active" not in msg
+
+
+logging.getLogger("werkzeug").addFilter(_SkipPipelinePoll())
+
+
+class _QuietPollHandler(WSGIRequestHandler):
+    def log_request(self, code="-", size="-"):
+        path = (getattr(self, "path", None) or "").split("?", 1)[0]
+        if path == "/api/pipeline/active":
+            return
+        super().log_request(code, size)
+
+
 init_db()
 engine = create_engine(
     config.DB_URL,
@@ -373,6 +400,10 @@ _PIPELINE_PANEL = """
     }
     async function tick() {
       try {
+        if (document.hidden) {
+          setTimeout(tick, 5000);
+          return;
+        }
         const r = await fetch("/api/pipeline/active");
         const data = await r.json();
         const runs = data.runs || [];
@@ -1475,4 +1506,10 @@ if __name__ == "__main__":
     print(f"           http://127.0.0.1:{config.DASHBOARD_PORT}  (local)")
     print("Manage mail cron jobs at /jobs")
     print("Manage RPA tools at /rpa")
-    app.run(host=config.DASHBOARD_HOST, port=config.DASHBOARD_PORT, debug=False, threaded=True)
+    app.run(
+        host=config.DASHBOARD_HOST,
+        port=config.DASHBOARD_PORT,
+        debug=False,
+        threaded=True,
+        request_handler=_QuietPollHandler,
+    )

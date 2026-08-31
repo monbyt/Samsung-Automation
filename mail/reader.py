@@ -287,7 +287,10 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
             except Exception as e:
                 print(f"[{filter_id}] on_download failed for {save_path}: {e}")
 
+        # Back to the mailbox list — re-apply Filter → Unread each time,
+        # because opening a mail clears the filter in W1.
         _open_mailbox(mail, mailbox)
+        _apply_unread_filter(mail)
 
     return downloaded
 

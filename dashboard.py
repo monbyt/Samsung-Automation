@@ -540,7 +540,7 @@ def jobs_list():
 
     body = """
   <h1>Mail Jobs</h1>
-  <div class="sub">Cron jobs snap to the clock (:00 and :30) and are staggered so they don’t overlap — e.g. 12:00, 12:30, 1:00, 1:30. Scheduler checks every {{ tick }}s.</div>
+  <div class="sub">Cron jobs snap to a 5-minute clock grid and are staggered so they don’t overlap — e.g. 12:00, 12:15, 12:30, 12:45. Scheduler checks every {{ tick }}s.</div>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """
@@ -571,7 +571,7 @@ def jobs_list():
   </div></div>
   <div class="panel"><h2>How a job runs</h2>
     <p class="muted" style="line-height:1.6">
-      1. Scheduler checks if <b>next run</b> time has passed (clock slots: 12:00, 12:30, 1:00, 1:30…)<br>
+      1. Scheduler checks if <b>next run</b> time has passed (5-minute clock grid: 12:00, 12:15, 12:30…)<br>
       2. Chrome opens W1 → clicks your <b>mailbox</b> button<br>
       3. Finds the newest email matching your <b>subject</b> regex<br>
       4. Downloads the Excel attachment<br>
@@ -683,8 +683,8 @@ def jobs_new():
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly (e.g. C:/Users/you/Documents/Reports).</p>
     <div class="form-row"><label>Check every (minutes)</label>
-      <input type="number" name="interval_minutes" value="{{ form.interval_minutes }}" min="1" required></div>
-    <p class="muted">Jobs run on the clock at :00 and :30, staggered so they don’t overlap (12:00, 12:30, 1:00, 1:30…).</p>
+      <input type="number" name="interval_minutes" value="{{ form.interval_minutes }}" min="5" step="5" required></div>
+    <p class="muted">Snaps to the clock on a 5-minute grid (5, 10, 15, 30…). Stagger jobs with different clock slots.</p>
     <div class="form-row"><label>Clock slot</label>
       <select name="schedule_offset_minutes">
         {% for off, label in slots %}
@@ -818,8 +818,8 @@ def jobs_edit(job_id):
         placeholder="e.g. Product-Extract  or  C:/Users/you/Documents/Reports"></div>
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly.</p>
     <div class="form-row"><label>Every (minutes)</label>
-      <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
-    <p class="muted">Jobs run on the clock at :00 and :30, staggered so they don’t overlap (12:00, 12:30, 1:00, 1:30…).</p>
+      <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="5" step="5" required></div>
+    <p class="muted">Snaps to the clock on a 5-minute grid (5, 10, 15, 30…). Stagger jobs with different clock slots.</p>
     <div class="form-row"><label>Clock slot</label>
       <select name="schedule_offset_minutes">
         {% for off, label in slots %}

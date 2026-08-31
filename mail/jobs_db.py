@@ -89,33 +89,38 @@ def _migrate_jobs_columns():
 
 
 def _slot_minutes():
-    return max(1, int(getattr(config, "SCHEDULER_SLOT_MINUTES", 30) or 30))
+    return max(1, int(getattr(config, "SCHEDULER_SLOT_MINUTES", 5) or 5))
+
+
+def _min_interval_minutes():
+    return max(_slot_minutes(), int(getattr(config, "SCHEDULER_MIN_INTERVAL_MINUTES", 5) or 5))
+
+
+def _snap_interval_minutes(interval_minutes):
+    """Snap interval to the clock grid (min 5m, multiples of 5)."""
+    slot = _slot_minutes()
+    minutes = max(_min_interval_minutes(), int(interval_minutes or slot))
+    rem = minutes % slot
+    if rem:
+        minutes += slot - rem
+    return minutes
 
 
 def _cycle_minutes(interval_minutes):
-    """Repeat cycle snapped to the clock grid (e.g. 120 → 120, 45 → 30)."""
-    slot = _slot_minutes()
-    minutes = max(1, int(interval_minutes or slot))
-    if minutes < slot:
-        return minutes
-    return max(slot, (minutes // slot) * slot)
+    """Repeat cycle snapped to the clock grid (e.g. 120 → 120, 15 → 15)."""
+    return _snap_interval_minutes(interval_minutes)
 
 
 def next_clock_run(from_time, interval_minutes, offset_minutes=0):
-    """Next clock time on the :00/:30 grid matching this job's stagger offset.
+    """Next clock time on the 5-minute grid matching this job's stagger offset.
 
-    Example with a 120-minute cycle:
-      offset 0  → 12:00, 14:00, 16:00, …
-      offset 30 → 12:30, 14:30, 16:30, …
-      offset 60 → 13:00, 15:00, 17:00, …
-      offset 90 → 13:30, 15:30, 17:30, …
+    Example with a 15-minute cycle:
+      offset 0  → 12:00, 12:15, 12:30, …
+      offset 5  → 12:05, 12:20, 12:35, …
+      offset 10 → 12:10, 12:25, 12:40, …
     """
     slot = _slot_minutes()
-    interval = max(1, int(interval_minutes or slot))
-    if interval < slot:
-        nxt = (from_time or datetime.now()) + timedelta(minutes=interval)
-        return nxt.replace(second=0, microsecond=0)
-
+    interval = _snap_interval_minutes(interval_minutes)
     cycle = _cycle_minutes(interval)
     offset = int(offset_minutes or 0)
     offset = (offset // slot) * slot
@@ -136,12 +141,8 @@ def next_clock_run(from_time, interval_minutes, offset_minutes=0):
 
 
 def slot_label(offset_minutes, interval_minutes):
-    """Human label like '12:00, 2:00…' using noon as the example clock."""
-    slot = _slot_minutes()
-    interval = max(1, int(interval_minutes or slot))
-    if interval < slot:
-        return f"every {interval}m"
-    cycle = _cycle_minutes(interval)
+    """Human label like '12:00, 12:15…' using noon as the example clock."""
+    cycle = _cycle_minutes(interval_minutes)
     offset = int(offset_minutes or 0) % cycle
     examples = []
     noon = 12 * 60
@@ -157,21 +158,16 @@ def slot_label(offset_minutes, interval_minutes):
 def slot_options(interval_minutes):
     """Dropdown choices for clock slots within one cycle."""
     slot = _slot_minutes()
-    interval = max(1, int(interval_minutes or slot))
-    if interval < slot:
-        return [(0, f"every {interval}m (not clock-aligned)")]
-    cycle = _cycle_minutes(interval)
+    cycle = _cycle_minutes(interval_minutes)
     opts = []
     for off in range(0, cycle, slot):
-        opts.append((off, slot_label(off, interval)))
+        opts.append((off, slot_label(off, interval_minutes)))
     return opts
 
 
 def _next_free_offset(interval_minutes, exclude_job_id=None):
     slot = _slot_minutes()
     cycle = _cycle_minutes(interval_minutes)
-    if cycle < slot:
-        return 0
     used = set()
     for job in list_jobs():
         if exclude_job_id and job["job_id"] == exclude_job_id:
@@ -184,7 +180,7 @@ def _next_free_offset(interval_minutes, exclude_job_id=None):
 
 
 def restagger_jobs(from_time=None):
-    """Give each job a unique :00/:30 slot and snap next_run to the clock."""
+    """Give each job a unique clock slot and snap next_run to the grid."""
     from_time = from_time or datetime.now()
     slot = _slot_minutes()
     with engine.connect() as conn:
@@ -194,7 +190,7 @@ def restagger_jobs(from_time=None):
     for i, row in enumerate(rows):
         minutes = _interval_minutes(row)
         cycle = _cycle_minutes(minutes)
-        offset = (i * slot) % cycle if cycle >= slot else 0
+        offset = (i * slot) % cycle
         nxt = next_clock_run(from_time, minutes, offset)
         with engine.begin() as conn:
             conn.execute(
@@ -296,12 +292,12 @@ def seed_from_config():
     minutes = getattr(config, "DEFAULT_JOB_INTERVAL_MINUTES", None)
     if not minutes:
         minutes = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2) * 60
-    minutes = max(1, int(minutes))
+    minutes = _snap_interval_minutes(minutes)
     slot = _slot_minutes()
     cycle = _cycle_minutes(minutes)
     for i, f in enumerate(config.MAIL_FILTERS):
         folder = f.get("folder", f["id"].replace("_", "-").title())
-        offset = (i * slot) % cycle if cycle >= slot else 0
+        offset = (i * slot) % cycle
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
                 job_id=f["id"],
@@ -366,7 +362,7 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
         download_folder = job_id.replace("_", "-").title()
     _ensure_tables()
     now = datetime.now()
-    minutes = max(1, int(interval_minutes))
+    minutes = _snap_interval_minutes(interval_minutes)
     if schedule_offset_minutes is None:
         offset = _next_free_offset(minutes)
     else:
@@ -405,7 +401,7 @@ def update_job(job_id, **fields):
     if not updates:
         return
     if "interval_minutes" in updates:
-        minutes = max(1, int(updates["interval_minutes"]))
+        minutes = _snap_interval_minutes(updates["interval_minutes"])
         updates["interval_minutes"] = minutes
         updates["interval_hours"] = max(1, minutes // 60)
     if "schedule_offset_minutes" in updates:
@@ -438,7 +434,7 @@ def schedule_next(job_id: str, from_time=None, interval_minutes=None):
         return
     base = from_time or datetime.now()
     minutes = interval_minutes if interval_minutes is not None else job["interval_minutes"]
-    minutes = max(1, int(minutes))
+    minutes = _snap_interval_minutes(minutes)
     nxt = next_clock_run(base, minutes, job.get("schedule_offset_minutes") or 0)
     _ensure_tables()
     with engine.begin() as conn:
@@ -454,7 +450,7 @@ def mark_job_finished(job_id: str, status: str, message: str = ""):
     job = get_job(job_id)
     if not job:
         return
-    minutes = max(1, int(job["interval_minutes"]))
+    minutes = _snap_interval_minutes(job["interval_minutes"])
     nxt = next_clock_run(now, minutes, job.get("schedule_offset_minutes") or 0)
     _ensure_tables()
     with engine.begin() as conn:

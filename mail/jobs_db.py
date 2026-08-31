@@ -27,6 +27,7 @@ mail_jobs = Table(
     Column("extract_zip", Integer, default=0),
     Column("interval_hours", Integer, default=2),  # legacy — prefer interval_minutes
     Column("interval_minutes", Integer, default=120),
+    Column("schedule_offset_minutes", Integer, default=0),
     Column("enabled", Integer, default=1),
     Column("last_run", DateTime),
     Column("next_run", DateTime),
@@ -75,6 +76,132 @@ def _migrate_jobs_columns():
             conn.execute(sqltext(
                 "ALTER TABLE mail_jobs ADD COLUMN extract_zip INTEGER DEFAULT 0"
             ))
+        if "schedule_offset_minutes" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE mail_jobs ADD COLUMN schedule_offset_minutes INTEGER DEFAULT 0"
+            ))
+            cols.add("schedule_offset_minutes")
+            need_stagger = True
+        else:
+            need_stagger = False
+    if need_stagger:
+        restagger_jobs()
+
+
+def _slot_minutes():
+    return max(1, int(getattr(config, "SCHEDULER_SLOT_MINUTES", 30) or 30))
+
+
+def _cycle_minutes(interval_minutes):
+    """Repeat cycle snapped to the clock grid (e.g. 120 → 120, 45 → 30)."""
+    slot = _slot_minutes()
+    minutes = max(1, int(interval_minutes or slot))
+    if minutes < slot:
+        return minutes
+    return max(slot, (minutes // slot) * slot)
+
+
+def next_clock_run(from_time, interval_minutes, offset_minutes=0):
+    """Next clock time on the :00/:30 grid matching this job's stagger offset.
+
+    Example with a 120-minute cycle:
+      offset 0  → 12:00, 14:00, 16:00, …
+      offset 30 → 12:30, 14:30, 16:30, …
+      offset 60 → 13:00, 15:00, 17:00, …
+      offset 90 → 13:30, 15:30, 17:30, …
+    """
+    slot = _slot_minutes()
+    interval = max(1, int(interval_minutes or slot))
+    if interval < slot:
+        nxt = (from_time or datetime.now()) + timedelta(minutes=interval)
+        return nxt.replace(second=0, microsecond=0)
+
+    cycle = _cycle_minutes(interval)
+    offset = int(offset_minutes or 0)
+    offset = (offset // slot) * slot
+    offset = offset % cycle
+
+    t = from_time or datetime.now()
+    t = t.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    rem = t.minute % slot
+    if rem:
+        t += timedelta(minutes=slot - rem)
+    t = t.replace(second=0, microsecond=0)
+
+    for _ in range((cycle // slot) + 96):
+        if (t.hour * 60 + t.minute) % cycle == offset:
+            return t
+        t += timedelta(minutes=slot)
+    return (from_time or datetime.now()) + timedelta(minutes=interval)
+
+
+def slot_label(offset_minutes, interval_minutes):
+    """Human label like '12:00, 2:00…' using noon as the example clock."""
+    slot = _slot_minutes()
+    interval = max(1, int(interval_minutes or slot))
+    if interval < slot:
+        return f"every {interval}m"
+    cycle = _cycle_minutes(interval)
+    offset = int(offset_minutes or 0) % cycle
+    examples = []
+    noon = 12 * 60
+    for i in range(2):
+        tot = noon + offset + i * cycle
+        hh = (tot // 60) % 24
+        mm = tot % 60
+        h12 = hh % 12 or 12
+        examples.append(f"{h12}:{mm:02d}")
+    return f"{examples[0]}, {examples[1]}…"
+
+
+def slot_options(interval_minutes):
+    """Dropdown choices for clock slots within one cycle."""
+    slot = _slot_minutes()
+    interval = max(1, int(interval_minutes or slot))
+    if interval < slot:
+        return [(0, f"every {interval}m (not clock-aligned)")]
+    cycle = _cycle_minutes(interval)
+    opts = []
+    for off in range(0, cycle, slot):
+        opts.append((off, slot_label(off, interval)))
+    return opts
+
+
+def _next_free_offset(interval_minutes, exclude_job_id=None):
+    slot = _slot_minutes()
+    cycle = _cycle_minutes(interval_minutes)
+    if cycle < slot:
+        return 0
+    used = set()
+    for job in list_jobs():
+        if exclude_job_id and job["job_id"] == exclude_job_id:
+            continue
+        used.add(int(job.get("schedule_offset_minutes") or 0) % cycle)
+    for off in range(0, cycle, slot):
+        if off not in used:
+            return off
+    return (len(list_jobs()) * slot) % cycle
+
+
+def restagger_jobs(from_time=None):
+    """Give each job a unique :00/:30 slot and snap next_run to the clock."""
+    from_time = from_time or datetime.now()
+    slot = _slot_minutes()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(mail_jobs).order_by(mail_jobs.c.job_id)
+        ).fetchall()
+    for i, row in enumerate(rows):
+        minutes = _interval_minutes(row)
+        cycle = _cycle_minutes(minutes)
+        offset = (i * slot) % cycle if cycle >= slot else 0
+        nxt = next_clock_run(from_time, minutes, offset)
+        with engine.begin() as conn:
+            conn.execute(
+                update(mail_jobs)
+                .where(mail_jobs.c.job_id == row.job_id)
+                .values(schedule_offset_minutes=offset, next_run=nxt)
+            )
 
 
 def resolve_download_dir(job: dict) -> str:
@@ -130,6 +257,11 @@ def _row_to_dict(row):
         "ingest_mode": getattr(row, "ingest_mode", None) or "replace",
         "extract_zip": bool(getattr(row, "extract_zip", 0)),
         "interval_minutes": _interval_minutes(row),
+        "schedule_offset_minutes": int(getattr(row, "schedule_offset_minutes", None) or 0),
+        "slot_label": slot_label(
+            getattr(row, "schedule_offset_minutes", None) or 0,
+            _interval_minutes(row),
+        ),
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "next_run": row.next_run,
@@ -165,8 +297,11 @@ def seed_from_config():
     if not minutes:
         minutes = getattr(config, "DEFAULT_JOB_INTERVAL_HOURS", 2) * 60
     minutes = max(1, int(minutes))
-    for f in config.MAIL_FILTERS:
+    slot = _slot_minutes()
+    cycle = _cycle_minutes(minutes)
+    for i, f in enumerate(config.MAIL_FILTERS):
         folder = f.get("folder", f["id"].replace("_", "-").title())
+        offset = (i * slot) % cycle if cycle >= slot else 0
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
                 job_id=f["id"],
@@ -179,8 +314,9 @@ def seed_from_config():
                 extract_zip=1 if f.get("extract_zip") else 0,
                 interval_minutes=minutes,
                 interval_hours=max(1, minutes // 60),
+                schedule_offset_minutes=offset,
                 enabled=1,
-                next_run=now + timedelta(minutes=minutes),
+                next_run=next_clock_run(now, minutes, offset),
                 created_at=now,
             ))
 
@@ -218,7 +354,7 @@ def get_due_jobs(now=None):
 
 def add_job(job_id, name, mailbox, subject_pattern, target_table,
             interval_minutes=120, enabled=True, ingest_mode="replace",
-            download_folder=None, extract_zip=False):
+            download_folder=None, extract_zip=False, schedule_offset_minutes=None):
     job_id = _normalize_job_id(job_id)
     if not _slug_ok(job_id):
         raise ValueError(
@@ -231,6 +367,10 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
     _ensure_tables()
     now = datetime.now()
     minutes = max(1, int(interval_minutes))
+    if schedule_offset_minutes is None:
+        offset = _next_free_offset(minutes)
+    else:
+        offset = max(0, int(schedule_offset_minutes))
     try:
         with engine.begin() as conn:
             conn.execute(mail_jobs.insert().values(
@@ -244,8 +384,9 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
                 extract_zip=1 if extract_zip else 0,
                 interval_minutes=minutes,
                 interval_hours=max(1, minutes // 60),
+                schedule_offset_minutes=offset,
                 enabled=1 if enabled else 0,
-                next_run=now + timedelta(minutes=minutes),
+                next_run=next_clock_run(now, minutes, offset),
                 created_at=now,
             ))
     except Exception as e:
@@ -257,7 +398,8 @@ def add_job(job_id, name, mailbox, subject_pattern, target_table,
 def update_job(job_id, **fields):
     allowed = {
         "name", "mailbox", "subject_pattern", "target_table",
-        "interval_minutes", "enabled", "ingest_mode", "download_folder", "extract_zip",
+        "interval_minutes", "schedule_offset_minutes", "enabled",
+        "ingest_mode", "download_folder", "extract_zip",
     }
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
@@ -266,6 +408,8 @@ def update_job(job_id, **fields):
         minutes = max(1, int(updates["interval_minutes"]))
         updates["interval_minutes"] = minutes
         updates["interval_hours"] = max(1, minutes // 60)
+    if "schedule_offset_minutes" in updates:
+        updates["schedule_offset_minutes"] = max(0, int(updates["schedule_offset_minutes"]))
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
     if "extract_zip" in updates:
@@ -277,10 +421,8 @@ def update_job(job_id, **fields):
         conn.execute(
             update(mail_jobs).where(mail_jobs.c.job_id == job_id).values(**updates)
         )
-    if "interval_minutes" in updates:
-        job = get_job(job_id)
-        if job:
-            schedule_next(job_id, from_time=datetime.now())
+    if "interval_minutes" in updates or "schedule_offset_minutes" in updates:
+        schedule_next(job_id, from_time=datetime.now())
 
 
 def delete_job(job_id: str):
@@ -290,14 +432,14 @@ def delete_job(job_id: str):
 
 
 def schedule_next(job_id: str, from_time=None, interval_minutes=None):
-    """Set next_run without running the job (used after create / edit)."""
+    """Set next_run to the next clock slot for this job (used after create / edit)."""
     job = get_job(job_id)
     if not job:
         return
     base = from_time or datetime.now()
     minutes = interval_minutes if interval_minutes is not None else job["interval_minutes"]
     minutes = max(1, int(minutes))
-    nxt = base + timedelta(minutes=minutes)
+    nxt = next_clock_run(base, minutes, job.get("schedule_offset_minutes") or 0)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
@@ -313,7 +455,7 @@ def mark_job_finished(job_id: str, status: str, message: str = ""):
     if not job:
         return
     minutes = max(1, int(job["interval_minutes"]))
-    nxt = now + timedelta(minutes=minutes)
+    nxt = next_clock_run(now, minutes, job.get("schedule_offset_minutes") or 0)
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(

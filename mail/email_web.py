@@ -5,6 +5,8 @@ Wire into dashboard.py with:
     from mail.email_web import email_bp
     app.register_blueprint(email_bp)
 """
+from html import escape as html_escape
+
 from flask import Blueprint, redirect, render_template_string, request, url_for
 
 from mail.email_jobs_db import (
@@ -57,6 +59,13 @@ button { background: #232a38; color: #e6e9ef; border: 1px solid #3a4458;
   background: #232a38; color: #b7c0d0; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 720px) { .grid-2 { grid-template-columns: 1fr; } }
+.tokens { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.token { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: pointer;
+  background: #0d1017; border: 1px solid #3a4458; color: #8ab4ff; }
+.token:hover { border-color: #8ab4ff; color: #fff; }
+.token-help { margin-top: 10px; padding: 12px; border-radius: 8px;
+  background: #0d1017; border: 1px dashed #232a38; }
 """
 
 
@@ -293,25 +302,30 @@ def email_jobs_page():
             last_status = j.get("last_status") or "—"
             last_status_cls = "ok" if last_status == "ok" else ("err" if last_status == "error" else "muted")
             last_when = j["last_sent_at"].strftime("%Y-%m-%d %H:%M") if j.get("last_sent_at") else "—"
+            attach_note = (
+                "all files" if int(j.get("attach_count") or 0) == 0
+                else f"latest {j['attach_count']}"
+            )
+            attach_folder = _fh(j.get("attach_folder") or "") or '<span class="muted">auto (RPA folder)</span>'
             rows_html.append(f"""
             <tr>
-              <td><b>{j['rpa_id']}</b> {enabled_pill}</td>
+              <td><b>{_fh(j['rpa_id'])}</b> {enabled_pill}</td>
               <td>
-                <div><span class="muted">To</span> {j['to_emails']}</div>
-                <div><span class="muted">Cc</span> {j['cc_emails'] or '—'}</div>
+                <div><span class="muted">To</span> {_fh(j['to_emails'])}</div>
+                <div><span class="muted">Cc</span> {_fh(j['cc_emails'] or '—')}</div>
               </td>
-              <td>{j['subject'] or '—'}</td>
-              <td>{j['attach_folder'] or '<span class="muted">auto (RPA folder)</span>'}<br>
-                  <span class="muted">{"all files" if int(j.get("attach_count") or 0) == 0 else f"latest {j['attach_count']}"}</span></td>
-              <td><span class="{last_status_cls}">{last_status}</span><br>
+              <td>{_fh(j['subject'] or '—')}</td>
+              <td>{attach_folder}<br>
+                  <span class="muted">{attach_note}</span></td>
+              <td><span class="{last_status_cls}">{_fh(last_status)}</span><br>
                   <span class="muted">{last_when}</span></td>
               <td>
-                <form method="post" action="/email-jobs/{j['rpa_id']}/send-now" style="display:inline">
+                <form method="post" action="/email-jobs/{_fh(j['rpa_id'])}/send-now" style="display:inline">
                   <button type="submit" class="btn-run btn-sm">Send now</button>
                 </form>
-                <a href="/email-jobs/{j['rpa_id']}/edit"><button class="btn-sm">Edit</button></a>
-                <form method="post" action="/email-jobs/{j['rpa_id']}/delete" style="display:inline"
-                      onsubmit="return confirm('Delete email job for {j['rpa_id']}?');">
+                <a href="/email-jobs/{_fh(j['rpa_id'])}/edit"><button class="btn-sm">Edit</button></a>
+                <form method="post" action="/email-jobs/{_fh(j['rpa_id'])}/delete" style="display:inline"
+                      onsubmit="return confirm('Delete email job for {_fh(j['rpa_id'])}?');">
                   <button type="submit" class="btn-danger btn-sm">Delete</button>
                 </form>
               </td>
@@ -337,7 +351,8 @@ def email_jobs_page():
     body = f"""
     <h1>Email jobs</h1>
     <div class="sub">Send an email with attachments — manually, or from any RPA script via
-      <code>send_for_rpa("rpa_id")</code>.</div>
+      <code>send_for_rpa("rpa_id")</code>. Subject and body support tokens such as
+      <code>{{original_file}}</code> so each send names the Excel that produced it.</div>
     {warn}
     {_flash(msg, ok)}
     <div class="panel">
@@ -349,6 +364,11 @@ def email_jobs_page():
     </div>
     """
     return _shell("Email Jobs", "email", body)
+
+
+def _fh(value) -> str:
+    """Escape user text for HTML attributes / table cells."""
+    return html_escape(str(value or ""), quote=True)
 
 
 def _rpa_selector(selected: str = "") -> str:
@@ -363,14 +383,73 @@ def _rpa_selector(selected: str = "") -> str:
     for r in rpa_jobs:
         rid = r.get("rpa_id", "")
         sel = " selected" if rid == selected else ""
-        opts.append(f'<option value="{rid}"{sel}>{rid} — {r.get("name", "")}</option>')
+        opts.append(f'<option value="{_fh(rid)}"{sel}>{_fh(rid)} — {_fh(r.get("name", ""))}</option>')
     return f'<select name="rpa_id" required>{"".join(opts)}</select>'
+
+
+_PLACEHOLDER_CHIPS = [
+    ("{original_file}", "Inbound Excel filename"),
+    ("{original_stem}", "Excel name without extension"),
+    ("{mail_subject}", "Original inbound email subject"),
+    ("{file}", "First attached PDF"),
+    ("{files}", "All attached PDF names"),
+    ("{file_list}", "Attached PDFs, one per line"),
+    ("{file_count}", "Number of attachments"),
+    ("{rpa_name}", "RPA job name"),
+    ("{mail_job_name}", "Linked mail job name"),
+    ("{date}", "Send date YYYY-MM-DD"),
+    ("{time}", "Send time HH:MM"),
+    ("{datetime}", "Send timestamp"),
+]
+
+
+def _placeholder_help() -> str:
+    chips = "".join(
+        f'<button type="button" class="token" data-token="{html_escape(token, quote=True)}" '
+        f'title="{html_escape(hint, quote=True)}">{html_escape(token)}</button>'
+        for token, hint in _PLACEHOLDER_CHIPS
+    )
+    return f"""
+    <div class="token-help">
+      <div class="muted" style="margin-bottom:8px;line-height:1.5">
+        Click a token to insert it into the subject or body. At send time it is
+        replaced with the real value for that run — so recipients can match the
+        email to the original Excel / inbound mail.
+      </div>
+      <div class="tokens">{chips}</div>
+      <div class="muted" style="margin-top:8px">
+        Example subject: <code>P/I — {{original_file}}</code>
+        &nbsp;·&nbsp; Example body: <code>Please find the print for {{original_file}}.
+        Attached: {{file_list}}</code>
+      </div>
+    </div>
+    <script>
+    (function() {{
+      var last = null;
+      document.querySelectorAll('input[name=subject], textarea[name=body]').forEach(function(el) {{
+        el.addEventListener('focus', function() {{ last = el; }});
+      }});
+      document.querySelectorAll('[data-token]').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          var t = btn.getAttribute('data-token');
+          var el = last || document.querySelector('input[name=subject]');
+          if (!el) return;
+          var start = el.selectionStart, end = el.selectionEnd, v = el.value;
+          el.value = v.slice(0, start) + t + v.slice(end);
+          el.focus();
+          var pos = start + t.length;
+          try {{ el.setSelectionRange(pos, pos); }} catch (e) {{}}
+        }});
+      }});
+    }})();
+    </script>
+    """
 
 
 def _render_form(job=None, is_edit=False) -> str:
     j = job or {}
     rpa_id = j.get("rpa_id", "")
-    rpa_input = (f'<input type="text" name="rpa_id" value="{rpa_id}" readonly>'
+    rpa_input = (f'<input type="text" name="rpa_id" value="{_fh(rpa_id)}" readonly>'
                  if is_edit else _rpa_selector(rpa_id))
     checked = "checked" if j.get("enabled", True) else ""
     return f"""
@@ -381,32 +460,37 @@ def _render_form(job=None, is_edit=False) -> str:
     <div class="grid-2">
       <div class="form-row">
         <label>To (comma or semicolon separated)</label>
-        <input type="text" name="to_emails" value="{j.get('to_emails', '')}" required
+        <input type="text" name="to_emails" value="{_fh(j.get('to_emails', ''))}" required
                placeholder="alice@samsung.com, bob@samsung.com">
       </div>
       <div class="form-row">
         <label>Cc (optional — same separators)</label>
-        <input type="text" name="cc_emails" value="{j.get('cc_emails', '')}"
+        <input type="text" name="cc_emails" value="{_fh(j.get('cc_emails', ''))}"
                placeholder="manager@samsung.com; team@samsung.com">
       </div>
     </div>
     <div class="form-row">
-      <label>Subject</label>
-      <input type="text" name="subject" value="{j.get('subject', '')}">
+      <label>Subject — use {{tokens}} for per-file details</label>
+      <input type="text" name="subject" value="{_fh(j.get('subject', ''))}"
+             placeholder="P/I — {{original_file}}">
     </div>
     <div class="form-row">
       <label>Body (plain text or HTML — detected automatically)</label>
-      <textarea name="body">{j.get('body', '')}</textarea>
+      <textarea name="body" placeholder="Please find the P/I for {{original_file}}.
+
+Attached:
+{{file_list}}">{_fh(j.get('body', ''))}</textarea>
+      {_placeholder_help()}
     </div>
     <div class="grid-2">
       <div class="form-row">
         <label>Attach folder (blank = auto-pick from RPA download folder)</label>
-        <input type="text" name="attach_folder" value="{j.get('attach_folder', '')}"
+        <input type="text" name="attach_folder" value="{_fh(j.get('attach_folder', ''))}"
                placeholder="C:/Users/you/Desktop/Reports">
       </div>
       <div class="form-row">
         <label>How many latest files to attach (0 = all files in folder)</label>
-        <input type="number" name="attach_count" min="0" value="{j.get('attach_count', 0)}">
+        <input type="number" name="attach_count" min="0" value="{int(j.get('attach_count') or 0)}">
       </div>
     </div>
     <div class="form-row">
@@ -441,8 +525,10 @@ def email_job_new():
 
     body = f"""
     <h1>New email job</h1>
-    <div class="sub">Link a recipient list + template to an RPA. Trigger via the dashboard
-      or from Python: <code>from mail.sender import send_for_rpa</code>.</div>
+    <div class="sub">Link a recipient list + template to an RPA. Use tokens like
+      <code>{{original_file}}</code> in the subject/body so each send names the Excel
+      that produced it. Trigger via the dashboard or
+      <code>from mail.sender import send_for_rpa</code>.</div>
     {_flash(msg, ok)}
     <div class="panel">
       <form method="post">

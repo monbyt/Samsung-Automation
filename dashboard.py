@@ -21,7 +21,8 @@ from werkzeug.serving import WSGIRequestHandler
 import config
 from db import init_db
 from mail.jobs_db import (
-    add_job, delete_job, get_job, list_jobs, seed_from_config, update_job,
+    add_job, delete_job, get_job, list_jobs, seed_from_config, slot_options,
+    update_job,
 )
 from rpa.jobs_db import (
     add_rpa_job, delete_rpa_job, get_rpa_job, list_rpa_jobs, rpa_by_mail_job,
@@ -539,7 +540,7 @@ def jobs_list():
 
     body = """
   <h1>Mail Jobs</h1>
-  <div class="sub">Cron jobs run automatically when due — nothing runs on startup. Scheduler checks every {{ tick }}s.</div>
+  <div class="sub">Cron jobs snap to the clock (:00 and :30) and are staggered so they don’t overlap — e.g. 12:00, 12:30, 1:00, 1:30. Scheduler checks every {{ tick }}s.</div>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """
@@ -556,9 +557,9 @@ def jobs_list():
       <td>{{ j.target_table }}</td>
       <td><span class="pill">{{ j.download_folder or '—' }}</span></td>
       <td>{% if rpa_map.get(j.job_id) %}{% for n in rpa_map[j.job_id] %}<span class="pill">{{ n }}</span> {% endfor %}{% else %}<span class="muted">—</span>{% endif %}</td>
-      <td>{{ j.interval_minutes }}m</td>
-      <td>{{ j.next_run or '—' }}</td>
-      <td>{{ j.last_run or '—' }}</td>
+      <td>{{ j.interval_minutes }}m<br><span class="muted">{{ j.slot_label }}</span></td>
+      <td>{% if j.next_run %}{{ j.next_run.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+      <td>{% if j.last_run %}{{ j.last_run.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
       <td class="{{ 'ok' if j.last_status=='ok' else 'err' if j.last_status else '' }}">{{ j.last_status or '—' }}</td>
       <td style="white-space:nowrap">
         <form method="post" action="/jobs/{{ j.job_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run now</button></form>
@@ -570,7 +571,7 @@ def jobs_list():
   </div></div>
   <div class="panel"><h2>How a job runs</h2>
     <p class="muted" style="line-height:1.6">
-      1. Scheduler checks if <b>next run</b> time has passed<br>
+      1. Scheduler checks if <b>next run</b> time has passed (clock slots: 12:00, 12:30, 1:00, 1:30…)<br>
       2. Chrome opens W1 → clicks your <b>mailbox</b> button<br>
       3. Finds the newest email matching your <b>subject</b> regex<br>
       4. Downloads the Excel attachment<br>
@@ -611,10 +612,13 @@ def jobs_new():
         "target_table": "",
         "download_folder": "Order-Extract",
         "interval_minutes": "120",
+        "schedule_offset_minutes": "0",
         "ingest_mode": "replace",
         "enabled": True,
         "extract_zip": False,
     }
+    from mail.jobs_db import _next_free_offset
+    form["schedule_offset_minutes"] = str(_next_free_offset(int(form["interval_minutes"])))
 
     if request.method == "POST":
         form = {
@@ -625,6 +629,7 @@ def jobs_new():
             "target_table": request.form.get("target_table", ""),
             "download_folder": request.form.get("download_folder", ""),
             "interval_minutes": request.form.get("interval_minutes", "120"),
+            "schedule_offset_minutes": request.form.get("schedule_offset_minutes", "0"),
             "ingest_mode": request.form.get("ingest_mode", "replace"),
             "enabled": request.form.get("enabled") == "on",
             "extract_zip": request.form.get("extract_zip") == "on",
@@ -644,6 +649,7 @@ def jobs_new():
                 target_table=form["target_table"],
                 download_folder=form["download_folder"].strip(),
                 interval_minutes=int(form["interval_minutes"] or 120),
+                schedule_offset_minutes=int(form["schedule_offset_minutes"] or 0),
                 enabled=form["enabled"],
                 ingest_mode=form["ingest_mode"],
                 extract_zip=form["extract_zip"],
@@ -678,6 +684,13 @@ def jobs_new():
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly (e.g. C:/Users/you/Documents/Reports).</p>
     <div class="form-row"><label>Check every (minutes)</label>
       <input type="number" name="interval_minutes" value="{{ form.interval_minutes }}" min="1" required></div>
+    <p class="muted">Jobs run on the clock at :00 and :30, staggered so they don’t overlap (12:00, 12:30, 1:00, 1:30…).</p>
+    <div class="form-row"><label>Clock slot</label>
+      <select name="schedule_offset_minutes">
+        {% for off, label in slots %}
+        <option value="{{ off }}" {{ 'selected' if form.schedule_offset_minutes|string == off|string else '' }}>{{ label }}</option>
+        {% endfor %}
+      </select></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" {{ 'selected' if form.ingest_mode=='replace' else '' }}>Replace — swap old rows (recommended)</option>
@@ -689,7 +702,10 @@ def jobs_new():
     <a href="/jobs"><button type="button">Cancel</button></a>
   </form>
 """
-    return _layout("New Job", "jobs", body, error=error, form=form)
+    return _layout(
+        "New Job", "jobs", body, error=error, form=form,
+        slots=slot_options(int(form["interval_minutes"] or 120)),
+    )
 
 
 @app.route("/jobs/parse", methods=["GET", "POST"])
@@ -776,6 +792,7 @@ def jobs_edit(job_id):
                 target_table=request.form.get("target_table", "").strip().lower(),
                 download_folder=request.form.get("download_folder", "").strip(),
                 interval_minutes=int(request.form.get("interval_minutes", 120)),
+                schedule_offset_minutes=int(request.form.get("schedule_offset_minutes", 0)),
                 enabled=request.form.get("enabled") == "on",
                 ingest_mode=request.form.get("ingest_mode", "replace"),
                 extract_zip=request.form.get("extract_zip") == "on",
@@ -802,6 +819,13 @@ def jobs_edit(job_id):
     <p class="muted">Folder name → saves to Desktop/&lt;folder&gt;. Full Windows path → saves there directly.</p>
     <div class="form-row"><label>Every (minutes)</label>
       <input type="number" name="interval_minutes" value="{{ job.interval_minutes }}" min="1" required></div>
+    <p class="muted">Jobs run on the clock at :00 and :30, staggered so they don’t overlap (12:00, 12:30, 1:00, 1:30…).</p>
+    <div class="form-row"><label>Clock slot</label>
+      <select name="schedule_offset_minutes">
+        {% for off, label in slots %}
+        <option value="{{ off }}" {{ 'selected' if job.schedule_offset_minutes == off else '' }}>{{ label }}</option>
+        {% endfor %}
+      </select></div>
     <div class="form-row"><label>When a newer file arrives</label>
       <select name="ingest_mode">
         <option value="replace" {{ 'selected' if job.ingest_mode=='replace' else '' }}>Replace old rows</option>
@@ -816,7 +840,10 @@ def jobs_edit(job_id):
     <button type="submit" class="btn-danger">Delete job</button>
   </form>
 """
-    return _layout("Edit Job", "jobs", body, job=job, error=error)
+    return _layout(
+        "Edit Job", "jobs", body, job=job, error=error,
+        slots=slot_options(job["interval_minutes"]),
+    )
 
 
 @app.route("/jobs/<job_id>/run", methods=["POST"])

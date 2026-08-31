@@ -46,6 +46,10 @@ HEADLESS = False
 # Jobs do NOT run immediately on startup — configure them in the dashboard.
 SCHEDULER_TICK_SECONDS = 60
 
+# Clock grid for mail cron (minutes). Jobs snap to :00 / :30 and are staggered
+# so they don't overlap: 12:00, 12:30, 1:00, 1:30, …
+SCHEDULER_SLOT_MINUTES = 30
+
 # Default interval when seeding jobs from MAIL_FILTERS below (minutes).
 DEFAULT_JOB_INTERVAL_MINUTES = 120
 DEFAULT_JOB_INTERVAL_HOURS = 2  # legacy alias (hours ≈ minutes / 60)

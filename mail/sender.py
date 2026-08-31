@@ -14,7 +14,10 @@ Entry points:
 import json
 import mimetypes
 import os
+import re
 import time
+from datetime import datetime
+from html import escape as html_escape
 from typing import Iterable, Optional, Set
 from urllib.parse import urlparse
 
@@ -324,6 +327,151 @@ def _dedupe_files_by_content(paths: list[str]) -> list[str]:
     return unique
 
 
+_TEMPLATE_TOKEN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _basename(path: str) -> str:
+    return os.path.basename(path or "").strip()
+
+
+def _stem(path: str) -> str:
+    return os.path.splitext(_basename(path))[0]
+
+
+def _looks_like_html(text: str) -> bool:
+    return bool(text) and "<" in text and ">" in text
+
+
+def render_email_template(template: str, values: dict, *, html: bool = False) -> str:
+    """Replace {tokens} in subject/body. Unknown tokens are left unchanged."""
+    if not template:
+        return ""
+
+    def repl(match: re.Match) -> str:
+        key = match.group(1)
+        if key not in values:
+            return match.group(0)
+        raw = values[key]
+        val = "" if raw is None else str(raw)
+        if html:
+            val = html_escape(val).replace("\n", "<br>\n")
+        return val
+
+    return _TEMPLATE_TOKEN.sub(repl, template)
+
+
+def _last_rpa_upload_name(rpa_id: str) -> str:
+    if not rpa_id:
+        return ""
+    try:
+        from sqlalchemy import select
+
+        from db import engine, init_db, rpa_runs
+
+        init_db()
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(rpa_runs.c.upload_file)
+                .where(rpa_runs.c.rpa_id == rpa_id)
+                .where(rpa_runs.c.upload_file.isnot(None))
+                .where(rpa_runs.c.upload_file != "")
+                .order_by(rpa_runs.c.id.desc())
+                .limit(1)
+            ).first()
+        return (row[0] if row else "") or ""
+    except Exception:
+        return ""
+
+
+def _lookup_mail_subject(source_file: str, filter_id: str = "") -> str:
+    """Inbound mail subject from the last ingest of this Excel (or this mail job)."""
+    try:
+        from sqlalchemy import select
+
+        from db import engine, ingestion_log, init_db
+
+        init_db()
+        name = _basename(source_file)
+        if not name and not filter_id:
+            return ""
+        with engine.connect() as conn:
+            stmt = select(ingestion_log.c.mail_subject).where(
+                ingestion_log.c.status == "success"
+            )
+            if name:
+                stmt = stmt.where(ingestion_log.c.source_file == name)
+            else:
+                stmt = stmt.where(ingestion_log.c.filter_id == filter_id)
+            row = conn.execute(
+                stmt.order_by(ingestion_log.c.id.desc()).limit(1)
+            ).first()
+        return ((row[0] if row else "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _rpa_context(rpa_id: str) -> dict:
+    ctx = {"rpa_id": rpa_id or "", "rpa_name": "", "mail_job": "", "mail_job_name": ""}
+    if not rpa_id:
+        return ctx
+    try:
+        from rpa.jobs_db import get_rpa_job
+
+        job = get_rpa_job(rpa_id) or {}
+    except Exception:
+        job = {}
+    ctx["rpa_name"] = (job.get("name") or "") if job else ""
+    mail_id = (job.get("trigger_mail_job") or "") if job else ""
+    ctx["mail_job"] = mail_id
+    if mail_id:
+        try:
+            from mail.jobs_db import get_job
+
+            mj = get_job(mail_id) or {}
+            ctx["mail_job_name"] = mj.get("name") or mail_id
+        except Exception:
+            ctx["mail_job_name"] = mail_id
+    return ctx
+
+
+def build_email_template_values(
+    rpa_id: str,
+    attach_files: Iterable[str],
+    source_upload_file: str = "",
+) -> dict:
+    """Values for {placeholders} in the email-job subject and body."""
+    names = [_basename(p) for p in (attach_files or []) if _basename(p)]
+    original = _basename(source_upload_file) or _last_rpa_upload_name(rpa_id)
+    now = datetime.now()
+    ctx = _rpa_context(rpa_id)
+    mail_subject = _lookup_mail_subject(original, ctx.get("mail_job") or "")
+    first = names[0] if names else ""
+    files_joined = ", ".join(names)
+    file_list = "\n".join(names)
+    return {
+        "file": first,
+        "filename": first,
+        "file_name": first,
+        "file_stem": _stem(first),
+        "files": files_joined,
+        "file_names": files_joined,
+        "file_list": file_list,
+        "file_count": str(len(names)),
+        "original_file": original,
+        "original_stem": _stem(original),
+        "source_file": original,
+        "upload_file": original,
+        "rpa_id": ctx["rpa_id"],
+        "rpa_name": ctx["rpa_name"],
+        "mail_job": ctx["mail_job"],
+        "mail_job_name": ctx["mail_job_name"],
+        "mail_subject": mail_subject,
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M"),
+        "datetime": now.strftime("%Y-%m-%d %H:%M"),
+    }
+
+
 def _normalize_folder_path(raw: str) -> str:
     """Expand and normalize a configured folder path (file → parent dir)."""
     folder = (raw or "").strip().strip('"')
@@ -419,10 +567,23 @@ def send_for_rpa(
             flush=True,
         )
 
+    values = build_email_template_values(
+        rpa_id, files, source_upload_file=source_upload_file or "",
+    )
+    raw_subject = job.get("subject", "") or ""
+    raw_body = job.get("body", "") or ""
+    subject = render_email_template(raw_subject, values)
+    body = render_email_template(raw_body, values, html=_looks_like_html(raw_body))
+    print(
+        f"[mail] Template original_file={values.get('original_file')!r} "
+        f"files={values.get('files')!r} subject={subject!r}",
+        flush=True,
+    )
+
     result = send_email(
         to=job["to_emails"],
-        subject=job.get("subject", "") or "",
-        body=job.get("body", "") or "",
+        subject=subject,
+        body=body,
         files=files,
         cc=job.get("cc_emails", "") or "",
     )

@@ -19,6 +19,7 @@ import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
 MAX_MAILS_PER_TICK = 20
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -236,6 +237,65 @@ def _click_unread_email(mail, subject: str) -> bool:
     return False
 
 
+def _read_email_link_text(mail) -> str:
+    """Read the address on View User Info. Do not click it (opens a popup)."""
+    try:
+        links = mail.locator("a").filter(has_text=_EMAIL_RE)
+        n = min(links.count(), 8)
+    except Exception:
+        n = 0
+    for i in range(n):
+        try:
+            text = (links.nth(i).inner_text(timeout=1000) or "").strip()
+        except Exception:
+            continue
+        m = _EMAIL_RE.search(text)
+        if m:
+            return m.group(0).lower()
+    return ""
+
+
+def _capture_open_mail_sender(mail, page) -> str:
+    """Click only button.btn-sender-info (the From chip in .sender-info)."""
+    chip = mail.locator("div.sender-info button.btn-sender-info").first
+    try:
+        chip.wait_for(state="visible", timeout=5000)
+        name = ""
+        try:
+            name = (chip.locator(".sender-name").inner_text(timeout=1000) or "").strip()
+        except Exception:
+            pass
+        print(f"  Clicking From chip button.btn-sender-info: {name!r}")
+        chip.click(timeout=4000)
+        time.sleep(0.4)
+    except Exception as e:
+        print(f"  From chip button.btn-sender-info not clicked: {e}")
+        return ""
+
+    try:
+        mail.locator("a").filter(has_text="View User Info").click(timeout=5000)
+        print("  Clicked View User Info")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"  View User Info click failed: {e}")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return ""
+
+    sender = _read_email_link_text(mail)
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    if sender:
+        print(f"  Sender from View User Info: {sender}")
+    else:
+        print("  View User Info had no email link")
+    return sender
+
+
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
     """Open the mailbox and download unread matching emails only."""
     filter_id = mail_filter["id"]
@@ -266,6 +326,12 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_MAILS_PER_TICK}")
         time.sleep(1.0)
 
+        from_email = ""
+        try:
+            from_email = _capture_open_mail_sender(mail, page)
+        except Exception as e:
+            print(f"[{filter_id}] Sender capture failed (download continues): {e}")
+
         save_path = _download_attachment(page, mail, download_dir)
 
         try:
@@ -289,6 +355,13 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         }
         downloaded.append(item)
         print(f"[{filter_id}] Saved to {save_path}")
+        if from_email:
+            try:
+                from mail.mail_meta import write_mail_meta
+                write_mail_meta(save_path, from_email=from_email, subject=subject)
+                print(f"[{filter_id}] Sender saved: {from_email}")
+            except Exception as e:
+                print(f"[{filter_id}] Could not write sender sidecar: {e}")
 
         if on_download:
             try:

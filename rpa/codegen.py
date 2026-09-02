@@ -661,6 +661,11 @@ def stage_upload_for_script(rpa_id: str, upload_path: str) -> list[str]:
         if parent:
             os.makedirs(parent, exist_ok=True)
         shutil.copy2(upload_path, dest)
+        try:
+            from mail.mail_meta import copy_mail_meta
+            copy_mail_meta(upload_path, dest)
+        except Exception:
+            pass
         staged.append(dest)
         _log(f"Staged copy → {dest}")
     return staged
@@ -700,6 +705,11 @@ def run_recorded_script(
             dest = os.path.join(upload_dir, os.path.basename(upload_abs))
             if os.path.abspath(dest) != upload_abs:
                 shutil.copy2(upload_abs, dest)
+            try:
+                from mail.mail_meta import copy_mail_meta
+                copy_mail_meta(upload_abs, dest)
+            except Exception:
+                pass
             sap_upload = dest
             staged = [dest]
         else:

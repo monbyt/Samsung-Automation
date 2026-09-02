@@ -466,7 +466,6 @@ def build_email_template_values(
         "mail_job": ctx["mail_job"],
         "mail_job_name": ctx["mail_job_name"],
         "mail_subject": mail_subject,
-        "mail_from": "",
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M"),
         "datetime": now.strftime("%Y-%m-%d %H:%M"),
@@ -571,16 +570,6 @@ def send_for_rpa(
     values = build_email_template_values(
         rpa_id, files, source_upload_file=source_upload_file or "",
     )
-    sender = ""
-    try:
-        from mail.mail_meta import read_mail_meta
-        meta = read_mail_meta(source_upload_file or "") or {}
-        if not meta.get("from"):
-            meta = read_mail_meta(os.environ.get("RPA_UPLOAD_FILE") or "") or meta
-        sender = (meta.get("from") or "").strip()
-    except Exception:
-        sender = ""
-    values["mail_from"] = sender
     raw_subject = job.get("subject", "") or ""
     raw_body = job.get("body", "") or ""
     subject = render_email_template(raw_subject, values)
@@ -591,14 +580,8 @@ def send_for_rpa(
         flush=True,
     )
 
-    to_addr = sender or (job.get("to_emails") or "")
-    if sender:
-        print(f"[mail] To original sender {sender} (Email Job To is fallback only)", flush=True)
-    else:
-        print("[mail] No captured sender — using Email Job To", flush=True)
-
     result = send_email(
-        to=to_addr,
+        to=job["to_emails"],
         subject=subject,
         body=body,
         files=files,

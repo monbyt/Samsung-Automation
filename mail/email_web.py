@@ -392,7 +392,6 @@ _PLACEHOLDER_CHIPS = [
     ("{original_file}", "Inbound Excel filename"),
     ("{original_stem}", "Excel name without extension"),
     ("{mail_subject}", "Original inbound email subject"),
-    ("{mail_from}", "Original sender address (if captured)"),
     ("{file}", "First attached PDF"),
     ("{files}", "All attached PDF names"),
     ("{file_list}", "Attached PDFs, one per line"),
@@ -464,7 +463,6 @@ def _render_form(job=None, is_edit=False) -> str:
         <label>To (comma or semicolon separated)</label>
         <input type="text" name="to_emails" value="{_fh(j.get('to_emails', ''))}" required
                placeholder="alice@samsung.com, bob@samsung.com">
-        <p class="muted" style="margin-top:6px">If W1 From was captured, the P/I goes to that sender. This list is the fallback.</p>
       </div>
       <div class="form-row">
         <label>Cc (optional — same separators)</label>

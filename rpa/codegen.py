@@ -700,11 +700,6 @@ def run_recorded_script(
             dest = os.path.join(upload_dir, os.path.basename(upload_abs))
             if os.path.abspath(dest) != upload_abs:
                 shutil.copy2(upload_abs, dest)
-            try:
-                from mail.mail_meta import copy_mail_meta
-                copy_mail_meta(upload_abs, dest)
-            except Exception:
-                pass
             sap_upload = dest
             staged = [dest]
         else:

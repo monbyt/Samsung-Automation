@@ -19,14 +19,6 @@ import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
 MAX_MAILS_PER_TICK = 20
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-# Toolbar / folder names — never click these for sender capture.
-_TOOLBAR_BTN = re.compile(
-    r"^(OC|Mail|New Mail|New|Compose|Write|Write Mail|Filter|Unread|Download|"
-    r"Close|Reply|Reply All|Forward|Delete|Print|Move|Search|Inbox|OK|Cancel|"
-    r"Yes|No|Send|Attach|Extract|Product Extract)$",
-    re.I,
-)
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -244,108 +236,6 @@ def _click_unread_email(mail, subject: str) -> bool:
     return False
 
 
-def _toolbar_name(name: str) -> bool:
-    t = " ".join((name or "").split())
-    if not t:
-        return True
-    if _TOOLBAR_BTN.match(t):
-        return True
-    low = t.lower()
-    return "new mail" in low or low.startswith("new ")
-
-
-def _click_open_mail_from(mail) -> bool:
-    """Click the From name on the already-open message.
-
-    Codegen: get_by_role('button', name='Abrar Yaqub Order Management').click()
-    Name changes per sender, so pick the person chip in the reading pane
-    (right of the folder list, below the toolbar) — never New Mail / OC.
-    """
-    buttons = mail.get_by_role("button")
-    try:
-        n = min(buttons.count(), 80)
-    except Exception:
-        return False
-    best = None  # (y, x, index, name)
-    for i in range(n):
-        btn = buttons.nth(i)
-        try:
-            if not btn.is_visible():
-                continue
-            box = btn.bounding_box()
-            if not box or box["width"] < 10:
-                continue
-            name = (
-                btn.get_attribute("aria-label")
-                or btn.inner_text(timeout=300)
-                or ""
-            )
-            name = " ".join(name.split())
-        except Exception:
-            continue
-        if _toolbar_name(name) or " " not in name:
-            continue
-        # Folder list + New Mail sit on the left / top of the iframe.
-        if box["x"] < 240 or box["y"] < 56:
-            continue
-        if best is None or (box["y"], box["x"]) < (best[0], best[1]):
-            best = (box["y"], box["x"], i, name)
-    if best is None:
-        print("  No From chip in the open-mail pane")
-        return False
-    _y, _x, idx, name = best
-    print(f"  Clicking From on open mail: {name!r}")
-    buttons.nth(idx).click(timeout=4000)
-    time.sleep(0.4)
-    return True
-
-
-def _read_sender_after_user_info(mail) -> str:
-    """Codegen shows the address as a.filter(has_text='abrar.y@…') — read it, don't click (popup)."""
-    try:
-        links = mail.locator("a").filter(has_text=_EMAIL_RE)
-        n = min(links.count(), 8)
-    except Exception:
-        n = 0
-    for i in range(n):
-        try:
-            text = (links.nth(i).inner_text(timeout=1000) or "").strip()
-        except Exception:
-            continue
-        m = _EMAIL_RE.search(text)
-        if m:
-            return m.group(0).lower()
-    return ""
-
-
-def _capture_open_mail_sender(mail, page) -> str:
-    """From chip → View User Info → read email. Download path is unchanged."""
-    if not _click_open_mail_from(mail):
-        return ""
-    try:
-        mail.locator("a").filter(has_text="View User Info").click(timeout=5000)
-        print("  Clicked View User Info")
-        time.sleep(0.5)
-    except Exception as e:
-        print(f"  View User Info click failed: {e}")
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-        return ""
-
-    sender = _read_sender_after_user_info(mail)
-    try:
-        page.keyboard.press("Escape")
-    except Exception:
-        pass
-    if sender:
-        print(f"  Sender from View User Info: {sender}")
-    else:
-        print("  View User Info had no email link")
-    return sender
-
-
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
     """Open the mailbox and download unread matching emails only."""
     filter_id = mail_filter["id"]
@@ -376,12 +266,6 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_MAILS_PER_TICK}")
         time.sleep(1.0)
 
-        from_email = ""
-        try:
-            from_email = _capture_open_mail_sender(mail, page)
-        except Exception as e:
-            print(f"[{filter_id}] Sender capture failed (download continues): {e}")
-
         save_path = _download_attachment(page, mail, download_dir)
 
         try:
@@ -405,13 +289,6 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         }
         downloaded.append(item)
         print(f"[{filter_id}] Saved to {save_path}")
-        if from_email:
-            try:
-                from mail.mail_meta import write_mail_meta
-                write_mail_meta(save_path, from_email=from_email, subject=subject)
-                print(f"[{filter_id}] Sender saved: {from_email}")
-            except Exception as e:
-                print(f"[{filter_id}] Could not write sender sidecar: {e}")
 
         if on_download:
             try:

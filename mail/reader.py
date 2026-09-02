@@ -106,7 +106,15 @@ def _open_mail(page):
 
 
 def _subject_pattern(subject: str):
-    return re.compile(rf"^{re.escape(subject)}$")
+    """Case-insensitive substring match against the W1 subject line.
+
+    The mail-job field is the text to find inside the title, not an exact
+    title and not a regex. 'Order Creation' matches 'FW: Order Creation — AE'.
+    """
+    text = (subject or "").strip()
+    if not text:
+        return re.compile(r"(?!)")
+    return re.compile(re.escape(text), re.IGNORECASE)
 
 
 def _download_attachment(page, mail, download_dir):
@@ -193,14 +201,15 @@ _IS_UNREAD_JS = """
 
 
 def _click_unread_email(mail, subject: str) -> bool:
-    """Click the first unread row with this subject. Read rows are skipped."""
-    rows = mail.locator("div").filter(has_text=_subject_pattern(subject))
+    """Click the first unread row whose subject contains *subject*."""
+    pattern = _subject_pattern(subject)
+    rows = mail.get_by_text(pattern)
     n = rows.count()
-    print(f"  Subject rows: {n}")
+    print(f"  Subject rows containing {subject!r}: {n}")
     if n == 0:
-        rows = mail.get_by_text(subject, exact=True)
+        rows = mail.locator("div").filter(has_text=pattern)
         n = rows.count()
-        print(f"  get_by_text rows: {n}")
+        print(f"  div rows containing {subject!r}: {n}")
 
     limit = min(n, MAX_MAILS_PER_TICK)
     for i in range(limit):
@@ -220,10 +229,10 @@ def _click_unread_email(mail, subject: str) -> bool:
             continue
         row.scroll_into_view_if_needed()
         row.click(timeout=10_000)
-        print(f"  Clicked unread email: {subject}")
+        print(f"  Clicked unread email containing {subject!r}")
         return True
 
-    print("  No unread email with that subject.")
+    print("  No unread email whose subject contains that text.")
     return False
 
 
@@ -239,7 +248,7 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     _set_cdp_download(page, download_dir)
 
     downloaded = []
-    print(f"[{filter_id}] Mailbox '{mailbox}' → subject '{subject}'")
+    print(f"[{filter_id}] Mailbox '{mailbox}' → subject contains {subject!r}")
     print(f"[{filter_id}] Saving to: {download_dir}")
 
     mail = _mail(page)

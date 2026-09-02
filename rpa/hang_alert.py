@@ -37,6 +37,47 @@ def _log(msg: str) -> None:
     print(f"[alert {datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+def _secret_values() -> List[str]:
+    vals: List[str] = []
+    try:
+        from mail.settings_db import get_sso_password, get_sso_username
+        vals.extend([get_sso_username(), get_sso_password()])
+    except Exception:
+        pass
+    vals.extend([
+        getattr(config, "NERP_USERNAME", "") or "",
+        getattr(config, "NERP_PASSWORD", "") or "",
+        os.environ.get("RPA_USERNAME", "") or "",
+        os.environ.get("RPA_PASSWORD", "") or "",
+        os.environ.get("NERP_USERNAME", "") or "",
+        os.environ.get("NERP_PASSWORD", "") or "",
+    ])
+    out: List[str] = []
+    seen = set()
+    for raw in vals:
+        s = (raw or "").strip()
+        if len(s) < 3:
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def redact_secrets(text: str) -> str:
+    """Strip SSO username/password from log text before it goes in an alert email."""
+    if not text:
+        return text
+    redacted = text
+    for secret in _secret_values():
+        if secret and secret in redacted:
+            redacted = redacted.replace(secret, "[redacted]")
+    return redacted
+
+
 def log_dir() -> str:
     path = getattr(config, "LOG_DIR", None) or os.path.join(config.BASE_DIR, "logs")
     os.makedirs(path, exist_ok=True)
@@ -382,8 +423,14 @@ def _write_text(path: str, body: str) -> str:
     return path
 
 
-def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, List[str]]:
-    """Build email body + attachment paths for one stuck session."""
+def gather_evidence(
+    run: Optional[dict],
+    worker: Optional[dict],
+    *,
+    headline: Optional[str] = None,
+    extra_files: Optional[List[str]] = None,
+) -> tuple[str, List[str]]:
+    """Build email body + attachment paths for one stuck or failed session."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = os.path.join(log_dir(), "alerts", stamp)
     os.makedirs(out_dir, exist_ok=True)
@@ -413,11 +460,16 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
         elif (run or {}).get("kind") == "rpa":
             port = 9329
 
-    lines = [
-        "STUCK SESSION ALERT",
-        "This Live run has been going for about an hour and is still marked running.",
-        "The job was NOT stopped — this is only an alert.",
-        "",
+    if headline:
+        lines = [headline, ""]
+    else:
+        lines = [
+            "STUCK SESSION ALERT",
+            "This Live run has been going for about an hour and is still marked running.",
+            "The job was NOT stopped — this is only an alert.",
+            "",
+        ]
+    lines.extend([
         f"Time:     {datetime.now():%Y-%m-%d %H:%M:%S}",
         f"Label:    {label}",
         f"Kind:     {(run or {}).get('kind') or 'worker'}",
@@ -432,7 +484,7 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
         f"Download dir: {(worker or {}).get('download_dir') or '-'}",
         f"Worker log:   {(worker or {}).get('log_path') or '-'}",
         "",
-    ]
+    ])
 
     if run:
         lines.append("Pipeline steps:")
@@ -467,6 +519,20 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
         else:
             lines.append(f"Browser screenshot (port {p}): none (window busy or port closed)")
 
+    for path in extra_files or []:
+        if path and os.path.isfile(path) and os.path.abspath(path) not in {
+            os.path.abspath(p) for p in attachments
+        }:
+            attachments.append(path)
+            lines.append(f"Error screenshot: {os.path.basename(path)}")
+
+    env_shot = (os.environ.get("RPA_ERROR_SCREENSHOT") or "").strip()
+    if env_shot and os.path.isfile(env_shot):
+        ap = os.path.abspath(env_shot)
+        if ap not in {os.path.abspath(p) for p in attachments}:
+            attachments.append(env_shot)
+            lines.append(f"Error screenshot: {os.path.basename(env_shot)}")
+
     log_chunks = []
     worker_log = (worker or {}).get("log_path") or ""
     if worker_log:
@@ -478,7 +544,7 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
     for title, path, text in log_chunks:
         lines.append("")
         lines.append(f"===== {title}: {path} =====")
-        lines.append(text or "(empty)")
+        lines.append(redact_secrets(text or "(empty)"))
 
     upload_dir = (worker or {}).get("upload_dir") or ""
     download_dir = (worker or {}).get("download_dir") or ""
@@ -494,9 +560,9 @@ def gather_evidence(run: Optional[dict], worker: Optional[dict]) -> tuple[str, L
     if run:
         lines.append("")
         lines.append("===== Pipeline run =====")
-        lines.append(json.dumps(run, indent=2, default=str)[:4000])
+        lines.append(redact_secrets(json.dumps(run, indent=2, default=str)[:4000]))
 
-    body = "\n".join(lines)
+    body = redact_secrets("\n".join(lines))
     body_path = _write_text(os.path.join(out_dir, "alert-body.txt"), body)
     attachments.append(body_path)
 
@@ -532,6 +598,7 @@ def _send(subject: str, body: str, files: List[str]) -> None:
         )
     from mail.sender import SendError, send_email
 
+    body = redact_secrets(body or "")
     short = body if len(body) <= _BODY_CHARS else body[:_BODY_CHARS] + "\n\n[... truncated; full text in alert-body.txt ...]"
     pngs = [p for p in (files or []) if str(p).lower().endswith((".png", ".jpg", ".jpeg"))]
     attempts = [
@@ -550,6 +617,112 @@ def _send(subject: str, body: str, files: List[str]) -> None:
             last_err = e
             _log(f"Hang alert send attempt {i}/3 failed: {e}")
     raise last_err or RuntimeError("Hang alert send failed")
+
+
+def save_page_screenshot(page) -> str:
+    """Capture the SAP window while Playwright still has the page open."""
+    dest_dir = os.path.join(log_dir(), "alerts")
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, f"rpa-error-{datetime.now():%Y%m%d-%H%M%S}.png")
+    page.screenshot(path=path, timeout=8000)
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        os.environ["RPA_ERROR_SCREENSHOT"] = path
+        return path
+    return ""
+
+
+def _worker_stub_from_env() -> dict:
+    log_path = ""
+    try:
+        log_path = getattr(sys.stdout, "path", "") or ""
+    except Exception:
+        log_path = ""
+    return {
+        "pid": os.getpid(),
+        "chrome_port": os.environ.get("RPA_CHROME_DEBUG_PORT") or "",
+        "log_path": log_path,
+        "upload_file": os.environ.get("RPA_UPLOAD_FILE") or "",
+        "upload_dir": os.environ.get("RPA_UPLOAD_DIR") or "",
+        "download_dir": os.environ.get("RPA_DOWNLOAD_DIR") or "",
+        "label": os.path.basename(os.environ.get("RPA_UPLOAD_FILE") or "") or "RPA worker",
+    }
+
+
+def _worker_for_this_process() -> Optional[dict]:
+    pid = os.getpid()
+    try:
+        _load_live()
+    except Exception:
+        pass
+    for w in live_workers():
+        if int(w.get("pid") or 0) == pid:
+            return w
+    try:
+        with open(_registry_path(), encoding="utf-8") as fh:
+            rows = json.load(fh)
+        for row in rows or []:
+            if isinstance(row, dict) and int(row.get("pid") or 0) == pid:
+                return row
+    except Exception:
+        pass
+    return None
+
+
+def send_error_alert(
+    error: str,
+    *,
+    extra_files: Optional[List[str]] = None,
+    worker: Optional[dict] = None,
+) -> None:
+    """Email screenshots + logs when an RPA worker fails (not a hang)."""
+    to = alert_emails()
+    if not to:
+        _log("RPA failed but no alert emails in Settings — skipping error email")
+        return
+    found = _worker_for_this_process()
+    if worker and found:
+        merged = dict(found)
+        merged.update({k: v for k, v in worker.items() if v not in (None, "")})
+        worker = merged
+    elif found:
+        worker = found
+    elif not worker:
+        worker = _worker_stub_from_env()
+    run = None
+    try:
+        from pipeline_progress import current_run_id, get_run
+        rid = current_run_id()
+        if rid:
+            run = get_run(rid)
+    except Exception:
+        run = None
+    shots = [p for p in (extra_files or []) if p]
+    env_shot = (os.environ.get("RPA_ERROR_SCREENSHOT") or "").strip()
+    if env_shot:
+        shots.append(env_shot)
+    headline = (
+        "RPA JOB FAILED\n"
+        "The worker exited with an error. Screenshots and logs are below.\n"
+        f"Error: {redact_secrets(str(error or '')[:800])}"
+    )
+    try:
+        body, files = gather_evidence(
+            run,
+            worker,
+            headline=headline,
+            extra_files=shots,
+        )
+        label = (
+            (run or {}).get("label")
+            or (worker or {}).get("label")
+            or (worker or {}).get("rpa_id")
+            or "RPA"
+        )
+        subject = f"[ALERT] RPA failed — {label}"
+        _send(subject, body, files)
+        _log(f"Sent error alert for {label} to {to}")
+    except Exception:
+        _log("Error alert send failed:\n" + traceback.format_exc()[-800:])
 
 
 def send_test_alert() -> str:

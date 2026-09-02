@@ -4,6 +4,7 @@ Run RPA tools — manually or after a mail job finishes.
 import json
 import os
 import shutil
+import sys
 import traceback
 from datetime import datetime
 from typing import Optional, Tuple
@@ -421,6 +422,23 @@ def run_rpa(
         finish_step("rpa", "error", str(e))
         if owns_run:
             finish_run("error", str(e))
+        try:
+            from rpa.hang_alert import send_error_alert
+            send_error_alert(
+                str(e),
+                worker={
+                    "pid": os.getpid(),
+                    "chrome_port": os.environ.get("RPA_CHROME_DEBUG_PORT") or "",
+                    "log_path": getattr(sys.stdout, "path", "") or "",
+                    "label": job.get("name") or rpa_id,
+                    "rpa_id": rpa_id,
+                    "upload_file": used_path or upload_file,
+                    "upload_dir": resolved_upload_dir,
+                    "download_dir": resolved_download_dir,
+                },
+            )
+        except Exception as alert_err:
+            _log(f"Error alert skipped: {alert_err}")
         raise
 
     return result

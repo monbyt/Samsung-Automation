@@ -497,6 +497,16 @@ def _normalize_sap_num(value: str) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 
+def _sales_org_from_upload_excel() -> str:
+    """7101 or 7104 from the mail Excel — must match what SAP will validate on upload."""
+    from rpa.excel_meta import detect_sales_org
+
+    path = os.environ.get("RPA_UPLOAD_FILE") or ""
+    org = detect_sales_org(path)
+    print(f"[RPA] Filling Sales Org. with {org}")
+    return org
+
+
 def _sold_tos_from_upload_excel() -> list[str]:
     """Pull Sold-to party numbers from the mail Excel (RPA_UPLOAD_FILE)."""
     path = os.environ.get("RPA_UPLOAD_FILE") or ""
@@ -552,19 +562,139 @@ def _sold_tos_from_upload_excel() -> list[str]:
     return []
 
 
+def _text_has_sap_num(text: str, num: str) -> bool:
+    if not num:
+        return False
+    raw = text or ""
+    if num in raw:
+        return True
+    compact = _normalize_sap_num(raw)
+    return bool(compact) and num in compact
+
+
+def _grid_rows_by_index(shell) -> dict[int, str]:
+    """Group visible grid#C cells by SAP row index — sold-to lives here, not on the select cell."""
+    grouped: dict[int, list[str]] = {}
+    try:
+        cells = _read_grid_cells(shell)
+    except Exception as e:
+        print(f"[RPA] Grid cell dump failed: {e}")
+        return {}
+    for cid, text in cells:
+        row, col = _parse_row_col(cid)
+        if row is None or not (text or "").strip():
+            continue
+        grouped.setdefault(row, []).append(text.strip())
+    out = {r: " | ".join(vals) for r, vals in grouped.items()}
+    if out:
+        print(f"[RPA] Grid data rows: {len(out)}")
+        for r in sorted(out)[:30]:
+            compact = " ".join(out[r].split())
+            print(f"[RPA]   grid-row#{r}: {compact[:180]!r}")
+    else:
+        print("[RPA] Grid data rows: 0")
+    return out
+
+
 def _row_text_for_select_cell(cell) -> str:
+    """Full row contents next to a 'To select a row' cell.
+
+    SAP WebGUI select-cell ids often contain 'Row-', so closest('[id*=\"Row-\"]')
+    used to return the cell itself (only the space-bar hint) and Sold-to matching
+    always failed even when NERP showed the vendor on screen.
+    """
     try:
         return (
             cell.evaluate(
-                """(el) => {
-                  const row = el.closest('[role="row"], tr, .lsTable__row, [id*="Row-"]');
-                  return row ? (row.innerText || row.textContent || '') : '';
+                r"""(el) => {
+                  const cellText = (el.innerText || el.textContent || '').trim();
+                  const a11y = el.closest('[role="row"], tr, .lsTable__row');
+                  if (a11y && a11y !== el) {
+                    const t = (a11y.innerText || a11y.textContent || '').trim();
+                    if (t && t !== cellText) return t;
+                  }
+                  const parse = (id) => {
+                    const m = String(id || '').match(/^grid#C\d+#(\d+),(\d+)(?:@[\w-]+)?$/);
+                    return m ? {row: m[1], col: m[2]} : null;
+                  };
+                  const rowFrom = (id) => {
+                    const m = String(id || '').match(/grid#C\d+#(\d+),/);
+                    return m ? m[1] : null;
+                  };
+                  let rowIdx = rowFrom(el.id);
+                  let n = el;
+                  for (let i = 0; i < 8 && n && rowIdx == null; i++) {
+                    rowIdx = rowFrom(n.id);
+                    if (rowIdx == null && n.querySelector) {
+                      const g = n.querySelector('[id*="grid#"]');
+                      if (g) rowIdx = rowFrom(g.id);
+                    }
+                    n = n.parentElement;
+                  }
+                  if (rowIdx != null) {
+                    const texts = [];
+                    for (const node of document.querySelectorAll('[id^="grid#"]')) {
+                      const hit = parse(node.id);
+                      if (!hit || hit.row !== rowIdx) continue;
+                      const t = (node.innerText || node.textContent || '').trim();
+                      if (t) texts.push(t);
+                    }
+                    if (texts.length) return texts.join(' | ');
+                  }
+                  let p = el.parentElement;
+                  for (let i = 0; i < 10 && p; i++) {
+                    const t = (p.innerText || p.textContent || '').trim();
+                    if (t && t !== cellText && t.length > cellText.length + 5) return t;
+                    p = p.parentElement;
+                  }
+                  return cellText;
                 }"""
             )
             or ""
         )
     except Exception:
         return ""
+
+
+def _select_cell_row_index(cell) -> int | None:
+    try:
+        raw = cell.evaluate(
+            r"""(el) => {
+              const rowFrom = (id) => {
+                const m = String(id || '').match(/grid#C\d+#(\d+),/);
+                return m ? Number(m[1]) : null;
+              };
+              let n = el;
+              for (let i = 0; i < 8 && n; i++) {
+                const r = rowFrom(n.id);
+                if (r != null) return r;
+                if (n.querySelector) {
+                  const g = n.querySelector('[id*="grid#"]');
+                  if (g) {
+                    const r2 = rowFrom(g.id);
+                    if (r2 != null) return r2;
+                  }
+                }
+                n = n.parentElement;
+              }
+              return null;
+            }"""
+        )
+        if raw is None:
+            return None
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _save_failure_screenshot(page) -> None:
+    try:
+        from rpa.hang_alert import save_page_screenshot
+        path = save_page_screenshot(page)
+        if path:
+            print(f"[RPA] Saved error screenshot: {path}")
+    except Exception as e:
+        print(f"[RPA] Error screenshot failed: {e}")
 
 
 def _select_so_result_row(
@@ -606,22 +736,37 @@ def _select_so_result_row(
         print(f"[RPA] Selected result row via {why}")
 
     if n_exact > 0:
-        rows_info: list[tuple[int, str]] = []
+        grid_rows = _grid_rows_by_index(shell)
+        rows_info: list[tuple[int, str, int | None]] = []
         for i in range(min(n_exact, 30)):
             txt = _row_text_for_select_cell(exact.nth(i))
-            rows_info.append((i, txt))
-            compact = " ".join(txt.split())
-            if compact:
-                print(f"[RPA]   row#{i}: {compact[:180]!r}")
+            grid_i = _select_cell_row_index(exact.nth(i))
+            extra = grid_rows.get(grid_i, "") if grid_i is not None else ""
+            if extra and extra not in (txt or ""):
+                combined = f"{txt} | {extra}".strip(" |")
+            else:
+                combined = txt or extra
+            rows_info.append((i, combined, grid_i))
+            compact = " ".join((combined or "").split())
+            print(
+                f"[RPA]   row#{i} (grid#{grid_i if grid_i is not None else '-'}): "
+                f"{compact[:180]!r}"
+            )
 
         so_norm = _normalize_sap_num(so_number)
 
+        def _click_grid_row(ridx: int, why: str) -> bool:
+            for i, _txt, g in rows_info:
+                if g == ridx:
+                    _click(exact.nth(i), why)
+                    return True
+            return False
+
         if candidates:
             matched: list[tuple[int, str]] = []
-            for i, txt in rows_info:
-                compact_nums = _normalize_sap_num(txt)
+            for i, txt, _g in rows_info:
                 for sold in candidates:
-                    if sold and sold in compact_nums:
+                    if _text_has_sap_num(txt, sold):
                         matched.append((i, sold))
                         break
             if len(matched) == 1:
@@ -629,9 +774,8 @@ def _select_so_result_row(
                 _click(exact.nth(i), f"Sold-to match {sold} on row#{i}")
                 return
             if len(matched) > 1:
-                # Prefer a row that also mentions the SO when several Sold-tos hit
                 for i, sold in matched:
-                    if so_norm and so_norm in _normalize_sap_num(rows_info[i][1]):
+                    if so_norm and _text_has_sap_num(rows_info[i][1], so_norm):
                         _click(
                             exact.nth(i),
                             f"Sold-to {sold} + SO on row#{i} "
@@ -645,13 +789,64 @@ def _select_so_result_row(
                     f"(from {len(matched)} Sold-to hits)",
                 )
                 return
+
+            grid_hits: list[tuple[int, str]] = []
+            for ridx, gtxt in grid_rows.items():
+                for sold in candidates:
+                    if _text_has_sap_num(gtxt, sold):
+                        grid_hits.append((ridx, sold))
+                        break
+            pick = None
+            for ridx, sold in grid_hits:
+                if so_norm and _text_has_sap_num(grid_rows[ridx], so_norm):
+                    pick = (ridx, sold)
+                    break
+            if pick is None and grid_hits:
+                pick = grid_hits[0]
+            if pick:
+                ridx, sold = pick
+                if _click_grid_row(ridx, f"grid-row#{ridx} Sold-to {sold}"):
+                    return
+                print(
+                    f"[RPA] Sold-to {sold} is on grid-row#{ridx} "
+                    "but no matching select cell — trying JS click"
+                )
+                try:
+                    clicked = shell.locator(":root").evaluate(
+                        r"""(root, rowIdx) => {
+                          const want = String(rowIdx);
+                          const cells = Array.from(document.querySelectorAll('[role="gridcell"]'));
+                          const sel = cells.find(el => {
+                            const name = el.getAttribute('aria-label') || el.innerText || '';
+                            if (!/To select a row/i.test(name)) return false;
+                            const m = String(el.id || '').match(/grid#C\d+#(\d+),/);
+                            return m && m[1] === want;
+                          });
+                          if (!sel) return false;
+                          sel.click();
+                          return true;
+                        }""",
+                        ridx,
+                    )
+                    if clicked:
+                        page.wait_for_timeout(500)
+                        print(
+                            f"[RPA] Selected result row via JS grid-row#{ridx} Sold-to {sold}"
+                        )
+                        return
+                except Exception as e:
+                    print(f"[RPA] JS row click failed: {e}")
             print(f"[RPA] No selectable row contained Sold-to candidates {candidates}")
 
         if so_norm:
-            for i, txt in rows_info:
-                if so_norm in _normalize_sap_num(txt):
+            for i, txt, _g in rows_info:
+                if _text_has_sap_num(txt, so_norm):
                     _click(exact.nth(i), f"SO match {so_norm} on row#{i}")
                     return
+            for ridx, gtxt in grid_rows.items():
+                if _text_has_sap_num(gtxt, so_norm):
+                    if _click_grid_row(ridx, f"grid-row#{ridx} SO {so_norm}"):
+                        return
 
         if n_exact == 1:
             _click(exact.first, "sole selectable row")
@@ -812,6 +1007,27 @@ def run(playwright: Playwright) -> None:
     browser = playwright.chromium.launch(channel="chrome", headless=False)
     context = browser.new_context()
     page = context.new_page()
+    try:
+        _run_after_login(page)
+    except Exception:
+        _save_failure_screenshot(page)
+        raise
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+        try:
+            context.close()
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+
+def _run_after_login(page) -> None:
     # NERP only — do NOT goto sts.secsso.net
     page.goto(get_nerp_url())
     page.get_by_role("textbox", name="User Account").click()
@@ -821,8 +1037,9 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("button", name="Login").click()
     # After login Search is usually already there — don't force another Utility-home load.
     _open_tcode(page, "ZLSDF50270", force_home=False)
+    _sales_org = _sales_org_from_upload_excel()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
-    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").fill("7101")
+    page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").fill(_sales_org)
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Sales Org.").click()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("textbox", name="Upload file Required").click()
     page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.locator("#ls-inputfieldhelpbutton").click()
@@ -854,12 +1071,6 @@ def run(playwright: Playwright) -> None:
     for so in so_numbers:
         sold = sold_tos[0] if len(sold_tos) == 1 else None
         _process_so(page, so, sold_to=sold, sold_tos=sold_tos)
-
-    page.close()
-
-    # ---------------------
-    context.close()
-    browser.close()
 
 
 with sync_playwright() as playwright:

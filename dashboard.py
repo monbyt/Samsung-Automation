@@ -573,7 +573,7 @@ def jobs_list():
     <p class="muted" style="line-height:1.6">
       1. Scheduler checks if <b>next run</b> time has passed (5-minute clock grid: 12:00, 12:15, 12:30…)<br>
       2. Chrome opens W1 → clicks your <b>mailbox</b> button<br>
-      3. Finds the newest email matching your <b>subject</b> regex<br>
+      3. Finds unread emails whose <b>subject contains</b> your pattern (not an exact title)<br>
       4. Downloads the Excel attachment<br>
       5. Decrypts via Excel COM → loads into your <b>SQL table</b><br>
       6. Linked RPA runs, email sends, then the attach folder is cleaned up<br>
@@ -583,7 +583,7 @@ def jobs_list():
   <div class="panel"><h2>Recording a new mail type</h2>
     <p class="muted">Use Playwright codegen to find mailbox/subject selectors, then add a job here:</p>
     <pre style="background:#0d1017;padding:12px;border-radius:8px;font-size:12px">python -m playwright codegen --channel chrome http://w1.samsung.net</pre>
-    <p class="muted">Note the <b>mailbox</b> button name and email <b>subject</b> text, then create a job with those values.</p>
+    <p class="muted">Note the <b>mailbox</b> button name and a <b>subject fragment</b> (e.g. Order Creation — any title that contains it will match), then create a job with those values.</p>
   </div>
   <div class="panel"><h2>Recent runs</h2><div class="scroll">
     {% if runs %}<table>
@@ -662,7 +662,7 @@ def jobs_new():
 
     body = """
   <h1>New mail job</h1>
-  <div class="sub">Job ID is auto-lowercased (spaces → underscores). Subject is a regex matched against email titles.</div>
+  <div class="sub">Job ID is auto-lowercased (spaces → underscores). Subject is a case-insensitive substring of the email title (e.g. Order Creation matches FW: Order Creation — AE).</div>
   {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
   <form method="post" class="panel" novalidate>
     <div class="form-row"><label>Job ID (e.g. order_extract)</label>
@@ -673,9 +673,9 @@ def jobs_new():
         placeholder="Order Extract"></div>
     <div class="form-row"><label>W1 mailbox button name</label>
       <input type="text" name="mailbox" required value="{{ form.mailbox }}"></div>
-    <div class="form-row"><label>Subject pattern (regex)</label>
+    <div class="form-row"><label>Subject contains</label>
       <input type="text" name="subject_pattern" required value="{{ form.subject_pattern }}"
-        placeholder="Order Extract - AE/GCC"></div>
+        placeholder="Order Creation"></div>
     <div class="form-row"><label>SQL table name <span class="muted">(optional — leave blank to download only)</span></label>
       <input type="text" name="target_table" value="{{ form.target_table }}" placeholder="e.g. orders"></div>
     <div class="form-row"><label>Download folder</label>
@@ -809,8 +809,10 @@ def jobs_edit(job_id):
       <input type="text" name="name" value="{{ job.name }}" required></div>
     <div class="form-row"><label>Mailbox</label>
       <input type="text" name="mailbox" value="{{ job.mailbox }}" required></div>
-    <div class="form-row"><label>Subject pattern</label>
-      <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required></div>
+    <div class="form-row"><label>Subject contains</label>
+      <input type="text" name="subject_pattern" value="{{ job.subject_pattern }}" required>
+      <p class="muted">Matched if this text appears anywhere in the subject (case-insensitive). Example: Order Creation also matches FW: Order Creation — Abrar.</p>
+    </div>
     <div class="form-row"><label>SQL table <span class="muted">(optional — leave blank to download only)</span></label>
       <input type="text" name="target_table" value="{{ job.target_table }}" placeholder="e.g. orders"></div>
     <div class="form-row"><label>Download folder</label>

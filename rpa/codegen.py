@@ -204,6 +204,8 @@ def _inject_step_logging(source: str) -> str:
         ) and "print(" not in stripped:
             indent = line[: len(line) - len(stripped)]
             snippet = stripped[:100].replace('"', "'")
+            if "Password" in snippet or "User Account" in snippet:
+                snippet = re.sub(r"\.fill\([^)]*\)", ".fill('[redacted]')", snippet)
             out.append(f'{indent}print("[RPA] Step:", {snippet!r})')
         out.append(line)
     return "\n".join(out)
@@ -277,6 +279,36 @@ def _inject_sso_credentials(source: str) -> str:
     return "\n".join(out)
 
 
+_SALES_ORG_FILL_RE = re.compile(r'\.fill\(\s*(["\'])(7101|7104)\1\s*\)')
+
+
+def _inject_sales_org(source: str) -> str:
+    """Rewrite recorded Sales Org fills (7101/7104) to RPA_SALES_ORG from the Excel."""
+    out = []
+    pending = False
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        looks_like_sales_org = (
+            "Sales Org" in stripped
+            or "name='Sales Org" in stripped
+            or 'name="Sales Org' in stripped
+        )
+        if looks_like_sales_org:
+            if ".fill(" in stripped:
+                line = _SALES_ORG_FILL_RE.sub(".fill(RPA_SALES_ORG)", line)
+                pending = False
+            else:
+                pending = True
+        elif pending and ".fill(" in stripped and "print(" not in stripped:
+            line = _SALES_ORG_FILL_RE.sub(".fill(RPA_SALES_ORG)", line)
+            pending = False
+        elif stripped and not stripped.startswith("#"):
+            if pending and ".click(" not in stripped and ".fill(" not in stripped:
+                pending = False
+        out.append(line)
+    return "\n".join(out)
+
+
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
@@ -288,6 +320,7 @@ def prepare_script_source(
     source = _sanitize_upload_literals(source)
     source = _inject_nerp_url(source)
     source = _inject_sso_credentials(source)
+    source = _inject_sales_org(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     raw_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln]
     # region agent log
@@ -473,6 +506,25 @@ def _patch_playwright_no_timeout() -> None:
     _PLAYWRIGHT_PATCHED = True
 
 
+def _fill_is_secret(locator, value) -> bool:
+    loc = str(locator)
+    if re.search(r"Password|User Account", loc, re.I):
+        return True
+    if not isinstance(value, str) or len(value) < 3:
+        return False
+    try:
+        from rpa.hang_alert import _secret_values
+        return value in set(_secret_values())
+    except Exception:
+        secrets = {
+            os.environ.get("RPA_USERNAME", ""),
+            os.environ.get("RPA_PASSWORD", ""),
+            getattr(config, "NERP_USERNAME", "") or "",
+            getattr(config, "NERP_PASSWORD", "") or "",
+        }
+        return value in {s for s in secrets if s}
+
+
 def _patch_playwright_logging() -> None:
     global _LOG_PATCHED
     if _LOG_PATCHED:
@@ -489,7 +541,10 @@ def _patch_playwright_logging() -> None:
         def wrapper(self, *args, **kwargs):
             label = name
             if args and name in ("fill", "press"):
-                label = f"{name} {args[0]!r}"
+                shown = args[0]
+                if name == "fill" and _fill_is_secret(self, shown):
+                    shown = "[redacted]"
+                label = f"{name} {shown!r}"
             elif args and name == "goto":
                 label = f"goto {args[0]!r}"
             elif name == "set_input_files" and args:
@@ -673,9 +728,12 @@ def run_recorded_script(
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
     from mail.settings_db import get_nerp_env, get_nerp_url, get_sso_password, get_sso_username
+    from rpa.excel_meta import detect_sales_org
 
     nerp_url = get_nerp_url()
+    sales_org = detect_sales_org(sap_upload or upload_file)
     _log(f"NERP environment: {get_nerp_env()} → {nerp_url}")
+    _log(f"Sales Org from Excel: {sales_org}")
 
     run_globals = {
         "__name__": "__main__",
@@ -685,6 +743,7 @@ def run_recorded_script(
         "RPA_UPLOAD_DIR": upload_dir or "",
         "RPA_DOWNLOAD_DIR": download_dir or "",
         "RPA_NERP_URL": nerp_url,
+        "RPA_SALES_ORG": sales_org,
         "RPA_USERNAME": get_sso_username() or config.NERP_USERNAME,
         "RPA_PASSWORD": get_sso_password() or config.NERP_PASSWORD,
         "win_open_file": dismiss_open_file_dialog,

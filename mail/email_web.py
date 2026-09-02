@@ -244,8 +244,9 @@ def settings_page():
         If a Live mail or RPA session is still running after this many minutes
         (overnight hang, SAP dialog, dead click), send one email with screenshots
         and logs, then close that session and clean its upload/PDF files.
-        Other parallel workers keep running. Set your own address here —
-        do not use the customer Email Job.
+        The same email (screenshots + logs, username/password stripped) is also
+        sent when an RPA worker fails. Other parallel workers keep running.
+        Set your own address here — do not use the customer Email Job.
       </p>
       <form method="post">
         <input type="hidden" name="section" value="alerts">

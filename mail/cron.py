@@ -140,9 +140,11 @@ def run_job(job_id: str) -> dict:
             results = trigger_for_mail_job(job_id, upload_files=paths)
             errs = [r for r in (results or []) if r.get("status") == "error"]
             if errs:
+                messages = [e.get("message", "error") for e in errs]
+                summary.setdefault("errors", []).extend(messages)
                 finish_step(
                     "rpa", "error",
-                    "; ".join(e.get("message", "error") for e in errs),
+                    "; ".join(messages),
                 )
                 finish_run("error", "RPA failed", run_id=run_id)
             elif not results:

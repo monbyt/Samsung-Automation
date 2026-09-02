@@ -246,7 +246,8 @@ def settings_page():
         and logs, then close that session and clean its upload/PDF files.
         The same email (screenshots + logs, username/password stripped) is also
         sent when an RPA worker fails. Other parallel workers keep running.
-        Set your own address here — do not use the customer Email Job.
+        <b>To</b> is you (this field). If W1 From was captured, that sender is
+        <b>Cc</b> on hang/fail alerts so they see it too. Test alert stays To-only.
       </p>
       <form method="post">
         <input type="hidden" name="section" value="alerts">

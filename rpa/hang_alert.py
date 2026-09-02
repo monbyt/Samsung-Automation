@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -639,7 +640,7 @@ def gather_evidence(
 # ── send ──────────────────────────────────────────────────────────────────
 
 
-def _send(subject: str, body: str, files: List[str]) -> None:
+def _send(subject: str, body: str, files: List[str], cc: str = "") -> None:
     to = alert_emails()
     if not to:
         raise RuntimeError(
@@ -655,10 +656,14 @@ def _send(subject: str, body: str, files: List[str]) -> None:
         (short[:4000], pngs[:2]),
         (short[:2500], []),
     ]
+    cc_addr = (cc or "").strip()
+    to_set = {p.strip().lower() for p in re.split(r"[\s,;]+", to) if p.strip()}
+    if cc_addr.lower() in to_set:
+        cc_addr = ""
     last_err: Optional[Exception] = None
     for i, (text, attach) in enumerate(attempts, start=1):
         try:
-            send_email(to=to, subject=subject, body=text, files=attach)
+            send_email(to=to, subject=subject, body=text, files=attach, cc=cc_addr)
             if i > 1:
                 _log(f"Hang alert sent on fallback attempt {i} (attachments={len(attach)})")
             return
@@ -770,8 +775,11 @@ def send_error_alert(
             or "RPA"
         )
         subject = f"[ALERT] RPA failed — {label}"
-        _send(subject, body, files)
-        _log(f"Sent error alert for {label} to {to}")
+        _send(subject, body, files, cc=mail_from)
+        _log(
+            f"Sent error alert for {label} to {to}"
+            + (f" cc {mail_from}" if mail_from else "")
+        )
     except Exception:
         _log("Error alert send failed:\n" + traceback.format_exc()[-800:])
 
@@ -956,7 +964,7 @@ def check_once() -> List[str]:
             body, files = gather_evidence(run, worker)
             mins = round(dur / 60, 1)
             subject = f"[ALERT] RPA still running {mins:.0f} min — {run.get('label') or run.get('ref_id')}"
-            _send(subject, body, files)
+            _send(subject, body, files, cc=_mail_from_for_alert(worker))
             sent.append(run.get("label") or run["id"])
             _log(f"Sent hang alert for {run.get('label')} ({mins} min) to {to}")
         except Exception:
@@ -983,7 +991,7 @@ def check_once() -> List[str]:
                 f"[ALERT] RPA worker PID {pid} still running "
                 f"{mins:.0f} min — {worker.get('label') or worker.get('rpa_id')}"
             )
-            _send(subject, body, files)
+            _send(subject, body, files, cc=_mail_from_for_alert(worker))
             sent.append(worker.get("label") or str(pid))
             _log(f"Sent hang alert for worker PID {pid} to {to}")
         except Exception:

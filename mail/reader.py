@@ -19,18 +19,6 @@ import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
 MAX_MAILS_PER_TICK = 20
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_CHROME_BTN = re.compile(
-    r"^(OC|Mail|New Mail|New|Compose|Write|Write Mail|Filter|Unread|Download|Close|"
-    r"Reply|Reply All|Forward|Delete|Print|Move|Search|Inbox|OK|Cancel|Yes|No|"
-    r"Send|Attach|Extract|Product Extract)$",
-    re.I,
-)
-_VIEW_USER_INFO = re.compile(r"View User Info", re.I)
-_SKIP_BTN_SUBSTR = (
-    "new mail", "compose", "write mail", "download", "filter", "unread",
-    "mailbox",
-)
 
 
 def _configure_downloads(profile_dir, download_dir):
@@ -248,235 +236,6 @@ def _click_unread_email(mail, subject: str) -> bool:
     return False
 
 
-def _emails_from_dom(mail) -> list[str]:
-    """Collect addresses already visible in the Mail iframe (no extra clicks)."""
-    try:
-        found = mail.locator(":root").evaluate(
-            """() => {
-              const re = /[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}/g;
-              const seen = new Set();
-              const out = [];
-              const add = (s) => {
-                if (!s) return;
-                const t = String(s);
-                const m = t.match(/mailto:([^?\\s]+)/i);
-                if (m) {
-                  try {
-                    const e = decodeURIComponent(m[1]).trim().toLowerCase();
-                    if (e && !seen.has(e)) { seen.add(e); out.push(e); }
-                  } catch (err) {}
-                }
-                const hits = t.match(re) || [];
-                for (const e of hits) {
-                  const k = e.toLowerCase();
-                  if (!seen.has(k)) { seen.add(k); out.push(k); }
-                }
-              };
-              const nodes = document.querySelectorAll(
-                'a[href], button, [title], [aria-label], .user-info, .mail-read, .read-area'
-              );
-              for (const el of nodes) {
-                add(el.getAttribute('href'));
-                add(el.getAttribute('title'));
-                add(el.getAttribute('aria-label'));
-                add(el.innerText);
-              }
-              return out;
-            }"""
-        )
-    except Exception:
-        found = []
-    out = []
-    for raw in found or []:
-        m = _EMAIL_RE.search(str(raw) or "")
-        if m:
-            e = m.group(0).lower()
-            if e not in out:
-                out.append(e)
-    return out
-
-
-def _emails_from_user_info_links(mail) -> list[str]:
-    """Addresses shown as links on the View User Info card — do not click them."""
-    out = []
-    try:
-        links = mail.locator("a").filter(has_text=_EMAIL_RE)
-        n = min(links.count(), 10)
-    except Exception:
-        n = 0
-    for i in range(n):
-        try:
-            text = (links.nth(i).inner_text(timeout=800) or "").strip()
-        except Exception:
-            continue
-        m = _EMAIL_RE.search(text)
-        if m:
-            e = m.group(0).lower()
-            if e not in out:
-                out.append(e)
-    return out
-
-
-def _is_chrome_or_compose(label: str) -> bool:
-    t = " ".join((label or "").split())
-    if not t:
-        return True
-    if _CHROME_BTN.match(t):
-        return True
-    low = t.lower()
-    return any(s in low for s in _SKIP_BTN_SUBSTR)
-
-
-def _close_compose_if_open(mail, page) -> None:
-    """New Mail / compose covering the message — close that dialog only."""
-    try:
-        dlg = mail.get_by_role("dialog")
-        if dlg.count() == 0:
-            return
-        for name in ("New Mail", "Compose", "Write Mail"):
-            try:
-                if dlg.get_by_text(name, exact=False).count() == 0:
-                    continue
-                dlg.get_by_role("button", name="Close").first.click(timeout=1200)
-                print("  Closed compose/New Mail dialog")
-                time.sleep(0.3)
-                return
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-
-def _dismiss_user_info(mail, page) -> None:
-    """Close the View User Info card only. Never click the mailbox toolbar (New Mail)."""
-    try:
-        page.keyboard.press("Escape")
-        time.sleep(0.2)
-    except Exception:
-        pass
-    try:
-        card = mail.locator("a").filter(has_text=_VIEW_USER_INFO)
-        if card.count() == 0:
-            return
-        mail.get_by_role("dialog").get_by_role("button", name="Close").first.click(timeout=800)
-        time.sleep(0.2)
-    except Exception:
-        pass
-
-
-def _click_from_chip_in_open_mail(mail) -> bool:
-    """Click the sender name on the open message (codegen: From person button, twice)."""
-    # Prefer the button sitting next to a From / Sender label — not the folder list.
-    for label in ("From", "Sender"):
-        try:
-            btn = mail.get_by_text(label, exact=True).locator("xpath=following::button[1]")
-            if btn.count() == 0 or not btn.first.is_visible():
-                continue
-            name = (btn.first.get_attribute("aria-label") or btn.first.inner_text(timeout=800) or "")
-            name = " ".join(name.split())
-            if _is_chrome_or_compose(name):
-                print(f"  Skipping chrome button next to {label}: {name!r}")
-                continue
-            print(f"  Clicking open-mail From chip: {name!r}")
-            btn.first.click(timeout=3000)
-            time.sleep(0.3)
-            btn.first.click(timeout=3000)
-            time.sleep(0.4)
-            return True
-        except Exception as e:
-            print(f"  From label {label!r} click skipped: {e}")
-
-    # Fallback: JS From/Sender label → nearby person button (never New Mail).
-    try:
-        name = mail.locator(":root").evaluate(
-            """() => {
-              const skip = /new mail|compose|download|filter|unread|^mail$|^oc$|^close$/i;
-              const nodes = Array.from(document.querySelectorAll('span, div, label, th, dt, td'));
-              for (const el of nodes) {
-                const t = (el.innerText || '').trim();
-                if (!/^(From|Sender)$/i.test(t)) continue;
-                const root = el.closest('tr, li, div, dl') || el.parentElement;
-                if (!root) continue;
-                const btn = root.querySelector('button, [role="button"]');
-                if (!btn) continue;
-                const n = (btn.getAttribute('aria-label') || btn.innerText || '').trim();
-                if (!n || skip.test(n)) continue;
-                btn.click();
-                btn.click();
-                return n;
-              }
-              return '';
-            }"""
-        )
-        if name:
-            print(f"  Clicked From chip via header scan: {name!r}")
-            time.sleep(0.4)
-            return True
-    except Exception as e:
-        print(f"  From header scan skipped: {e}")
-    return False
-
-
-def _open_from_user_info(mail) -> bool:
-    """From chip on the open mail → View User Info. Never click New Mail / mailbox."""
-    view = mail.locator("a").filter(has_text=_VIEW_USER_INFO)
-    try:
-        if view.count() > 0 and view.first.is_visible():
-            view.first.click(timeout=3000)
-            time.sleep(0.5)
-            return True
-    except Exception:
-        pass
-
-    if not _click_from_chip_in_open_mail(mail):
-        print("  Could not click From chip on the open message")
-        return False
-
-    view = mail.locator("a").filter(has_text=_VIEW_USER_INFO)
-    try:
-        view.first.wait_for(state="visible", timeout=5000)
-        view.first.click(timeout=3000)
-        time.sleep(0.5)
-        print("  Clicked View User Info")
-        return True
-    except Exception as e:
-        print(f"  View User Info not visible after From click: {e}")
-        return False
-
-
-def _capture_open_mail_sender(mail, page) -> tuple[str, list[str]]:
-    """Read From from the already-open message via View User Info.
-
-    Mailbox / unread / subject / download logic is unchanged. Failure here
-    must not abort the download. Must never click New Mail / folder buttons.
-    """
-    _close_compose_if_open(mail, page)
-
-    emails = _emails_from_user_info_links(mail) or _emails_from_dom(mail)
-    if len(emails) == 1:
-        print(f"  Sender from open mail: {emails[0]}")
-        return emails[0], []
-
-    print("  Opening From → View User Info on the open message (not the mailbox list)")
-    emails = []
-    try:
-        if _open_from_user_info(mail):
-            emails = _emails_from_user_info_links(mail) or _emails_from_dom(mail)
-        else:
-            print("  View User Info not found")
-    except Exception as e:
-        print(f"  Sender capture skipped: {e}")
-    finally:
-        _dismiss_user_info(mail, page)
-
-    if emails:
-        sender, cc = emails[0], emails[1:]
-        print(f"  Sender from View User Info: {sender}" + (f" cc={cc}" if cc else ""))
-        return sender, cc
-    print("  Could not read sender email — Email Job To will be used")
-    return "", []
-
-
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
     """Open the mailbox and download unread matching emails only."""
     filter_id = mail_filter["id"]
@@ -507,12 +266,6 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         print(f"[{filter_id}] Processing unread mail {i + 1}/{MAX_MAILS_PER_TICK}")
         time.sleep(1.0)
 
-        from_email, cc_emails = "", []
-        try:
-            from_email, cc_emails = _capture_open_mail_sender(mail, page)
-        except Exception as e:
-            print(f"[{filter_id}] Sender capture failed (download continues): {e}")
-
         save_path = _download_attachment(page, mail, download_dir)
 
         try:
@@ -531,25 +284,11 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
             "filter_id": filter_id,
             "table": mail_filter["table"],
             "subject": subject,
-            "from_email": from_email,
-            "cc_emails": cc_emails,
             "ingest_mode": mail_filter.get("ingest_mode", "replace"),
             "extract_zip": mail_filter.get("extract_zip", False),
         }
         downloaded.append(item)
         print(f"[{filter_id}] Saved to {save_path}")
-        if from_email:
-            try:
-                from mail.mail_meta import write_mail_meta
-                write_mail_meta(
-                    save_path,
-                    from_email=from_email,
-                    cc_emails=cc_emails,
-                    subject=subject,
-                )
-                print(f"[{filter_id}] Sender saved: {from_email}")
-            except Exception as e:
-                print(f"[{filter_id}] Could not write sender sidecar: {e}")
 
         if on_download:
             try:

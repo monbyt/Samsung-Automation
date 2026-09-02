@@ -237,26 +237,60 @@ def _click_unread_email(mail, subject: str) -> bool:
     return False
 
 
-def _read_email_link_text(mail) -> str:
-    """Read the address on View User Info. Do not click it (opens a popup)."""
+def _read_email_from_user_info_modal(mail) -> str:
+    """Read <dt>E-mail</dt> → <span class="text"> in the emp-tab-panel. Do not click the <a>."""
+    panel = mail.locator("div.emp-tab-panel, #profileDetailTab, div.emp-profile").first
     try:
-        links = mail.locator("a").filter(has_text=_EMAIL_RE)
-        n = min(links.count(), 8)
+        panel.wait_for(state="visible", timeout=5000)
+    except Exception as e:
+        print(f"  User info panel not visible: {e}")
+        return ""
+    row = mail.locator("dl").filter(
+        has=mail.locator("dt", has_text=re.compile(r"^E-mail$", re.I))
+    )
+    text = ""
+    try:
+        text = (row.locator("dd span.text").first.inner_text(timeout=3000) or "").strip()
+    except Exception:
+        try:
+            text = (row.locator("dd").first.inner_text(timeout=2000) or "").strip()
+        except Exception as e:
+            print(f"  E-mail row not read: {e}")
+            return ""
+    m = _EMAIL_RE.search(text)
+    return m.group(0).lower() if m else ""
+
+
+def _close_user_info_modal(mail, page) -> None:
+    """Click the modal X (button.pt-btn with i.ic-close). Not the Mail toolbar."""
+    close_btn = mail.locator("div.btn-set.al-right button.pt-btn").filter(
+        has=mail.locator("i.ic-close")
+    )
+    try:
+        n = min(close_btn.count(), 8)
     except Exception:
         n = 0
-    for i in range(n):
+    for i in range(n - 1, -1, -1):
+        btn = close_btn.nth(i)
         try:
-            text = (links.nth(i).inner_text(timeout=1000) or "").strip()
+            if not btn.is_visible():
+                continue
+            btn.click(timeout=2000)
+            print("  Closed user info modal (ic-close)")
+            time.sleep(0.3)
+            return
         except Exception:
             continue
-        m = _EMAIL_RE.search(text)
-        if m:
-            return m.group(0).lower()
-    return ""
+    try:
+        page.keyboard.press("Escape")
+        print("  Closed user info with Escape")
+        time.sleep(0.3)
+    except Exception:
+        pass
 
 
 def _capture_open_mail_sender(mail, page) -> str:
-    """Click only button.btn-sender-info (the From chip in .sender-info)."""
+    """From chip → View User Info → read E-mail in the modal → close."""
     chip = mail.locator("div.sender-info button.btn-sender-info").first
     try:
         chip.wait_for(state="visible", timeout=5000)
@@ -278,21 +312,15 @@ def _capture_open_mail_sender(mail, page) -> str:
         time.sleep(0.5)
     except Exception as e:
         print(f"  View User Info click failed: {e}")
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+        _close_user_info_modal(mail, page)
         return ""
 
-    sender = _read_email_link_text(mail)
-    try:
-        page.keyboard.press("Escape")
-    except Exception:
-        pass
+    sender = _read_email_from_user_info_modal(mail)
+    _close_user_info_modal(mail, page)
     if sender:
         print(f"  Sender from View User Info: {sender}")
     else:
-        print("  View User Info had no email link")
+        print("  View User Info had no E-mail row")
     return sender
 
 

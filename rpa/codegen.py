@@ -204,6 +204,8 @@ def _inject_step_logging(source: str) -> str:
         ) and "print(" not in stripped:
             indent = line[: len(line) - len(stripped)]
             snippet = stripped[:100].replace('"', "'")
+            if "Password" in snippet or "User Account" in snippet:
+                snippet = re.sub(r"\.fill\([^)]*\)", ".fill('[redacted]')", snippet)
             out.append(f'{indent}print("[RPA] Step:", {snippet!r})')
         out.append(line)
     return "\n".join(out)
@@ -504,6 +506,25 @@ def _patch_playwright_no_timeout() -> None:
     _PLAYWRIGHT_PATCHED = True
 
 
+def _fill_is_secret(locator, value) -> bool:
+    loc = str(locator)
+    if re.search(r"Password|User Account", loc, re.I):
+        return True
+    if not isinstance(value, str) or len(value) < 3:
+        return False
+    try:
+        from rpa.hang_alert import _secret_values
+        return value in set(_secret_values())
+    except Exception:
+        secrets = {
+            os.environ.get("RPA_USERNAME", ""),
+            os.environ.get("RPA_PASSWORD", ""),
+            getattr(config, "NERP_USERNAME", "") or "",
+            getattr(config, "NERP_PASSWORD", "") or "",
+        }
+        return value in {s for s in secrets if s}
+
+
 def _patch_playwright_logging() -> None:
     global _LOG_PATCHED
     if _LOG_PATCHED:
@@ -520,7 +541,10 @@ def _patch_playwright_logging() -> None:
         def wrapper(self, *args, **kwargs):
             label = name
             if args and name in ("fill", "press"):
-                label = f"{name} {args[0]!r}"
+                shown = args[0]
+                if name == "fill" and _fill_is_secret(self, shown):
+                    shown = "[redacted]"
+                label = f"{name} {shown!r}"
             elif args and name == "goto":
                 label = f"goto {args[0]!r}"
             elif name == "set_input_files" and args:

@@ -423,6 +423,54 @@ def _write_text(path: str, body: str) -> str:
     return path
 
 
+def _mail_from_for_alert(worker: Optional[dict] = None) -> str:
+    """Original W1 From address saved next to the mail Excel."""
+    w = worker or {}
+    paths: List[str] = []
+    for p in (
+        w.get("upload_file"),
+        w.get("source_upload_file"),
+        os.environ.get("RPA_UPLOAD_FILE") or "",
+    ):
+        if (p or "").strip():
+            paths.append(p.strip())
+    upload_dir = (w.get("upload_dir") or os.environ.get("RPA_UPLOAD_DIR") or "").strip()
+    if upload_dir and os.path.isdir(upload_dir):
+        try:
+            for name in os.listdir(upload_dir):
+                if name.endswith(".mail.json"):
+                    paths.append(os.path.join(upload_dir, name[: -len(".mail.json")]))
+        except OSError:
+            pass
+    try:
+        from mail.mail_meta import read_mail_meta
+    except Exception:
+        return ""
+    seen = set()
+    for path in paths:
+        ap = os.path.abspath(path)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        try:
+            sender = ((read_mail_meta(ap) or {}).get("from") or "").strip()
+        except Exception:
+            sender = ""
+        if sender:
+            return sender
+        parent = os.path.dirname(ap)
+        grand = os.path.dirname(parent)
+        if os.path.basename(parent).startswith("_worker_") and grand:
+            orig = os.path.join(grand, os.path.basename(ap))
+            try:
+                sender = ((read_mail_meta(orig) or {}).get("from") or "").strip()
+            except Exception:
+                sender = ""
+            if sender:
+                return sender
+    return ""
+
+
 def gather_evidence(
     run: Optional[dict],
     worker: Optional[dict],
@@ -479,6 +527,7 @@ def gather_evidence(
         f"Duration: {mins} minutes",
         f"PID:      {pid or '-'}",
         f"Chrome:   port {port}" if port else "Chrome:   (no debug port)",
+        f"Mail from: {_mail_from_for_alert(worker) or '-'}",
         f"Upload:   {(worker or {}).get('upload_file') or '-'}",
         f"Upload dir:   {(worker or {}).get('upload_dir') or '-'}",
         f"Download dir: {(worker or {}).get('download_dir') or '-'}",
@@ -700,10 +749,12 @@ def send_error_alert(
     env_shot = (os.environ.get("RPA_ERROR_SCREENSHOT") or "").strip()
     if env_shot:
         shots.append(env_shot)
+    mail_from = _mail_from_for_alert(worker)
     headline = (
         "RPA JOB FAILED\n"
         "The worker exited with an error. Screenshots and logs are below.\n"
-        f"Error: {redact_secrets(str(error or '')[:800])}"
+        f"Error: {redact_secrets(str(error or '')[:800])}\n"
+        f"Original W1 sender: {mail_from or '(not captured)'}"
     )
     try:
         body, files = gather_evidence(

@@ -35,6 +35,7 @@ SSO_KEYS = (
 
 ALERT_KEYS = (
     "alert_emails",
+    "alert_cc_emails",
     "stuck_minutes",
 )
 

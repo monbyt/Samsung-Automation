@@ -139,6 +139,7 @@ def settings_page():
                 msg = f"NERP environment set to {env.upper()} ({get_nerp_url()})."
             elif section == "alerts":
                 set_setting("alert_emails", form.get("alert_emails", ""))
+                set_setting("alert_cc_emails", form.get("alert_cc_emails", ""))
                 set_setting("stuck_minutes", form.get("stuck_minutes", "60"))
                 msg = "Alert settings saved."
             elif section == "alert_test":
@@ -156,6 +157,7 @@ def settings_page():
     cfg = get_agent_config()
     from mail.settings_db import get_setting, get_nerp_env, get_nerp_url
     alert_to = get_setting("alert_emails", "")
+    alert_cc = get_setting("alert_cc_emails", "")
     stuck = get_setting("stuck_minutes", "60") or "60"
     nerp_env = get_nerp_env()
     nerp_url = get_nerp_url()
@@ -246,8 +248,9 @@ def settings_page():
         and logs, then close that session and clean its upload/PDF files.
         The same email (screenshots + logs, username/password stripped) is also
         sent when an RPA worker fails. Other parallel workers keep running.
-        <b>To</b> is you (this field). If W1 From was captured, that sender is
-        <b>Cc</b> on hang/fail alerts so they see it too. Test alert stays To-only.
+        <b>To</b> is you (this field). Optional <b>Cc</b> always gets hang/fail alerts.
+        If W1 From was captured, that sender is Cc'd as well. Test alert is To-only
+        plus your extra Cc (not the order sender).
       </p>
       <form method="post">
         <input type="hidden" name="section" value="alerts">
@@ -262,6 +265,11 @@ def settings_page():
             <input type="number" id="stuck_minutes" name="stuck_minutes"
                    min="5" max="1440" value="{stuck}">
           </div>
+        </div>
+        <div class="form-row">
+          <label for="alert_cc_emails">Alert Cc (optional — comma or semicolon separated)</label>
+          <input type="text" id="alert_cc_emails" name="alert_cc_emails"
+                 value="{alert_cc}" placeholder="manager@samsung.com; team@samsung.com">
         </div>
         <button type="submit" class="btn-run">Save alerts</button>
       </form>

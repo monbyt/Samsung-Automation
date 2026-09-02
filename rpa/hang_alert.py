@@ -119,6 +119,33 @@ def alert_emails() -> str:
         return ""
 
 
+def alert_cc_emails() -> str:
+    try:
+        from mail.settings_db import get_setting
+        return (get_setting("alert_cc_emails", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _merge_alert_cc(*parts: str) -> str:
+    """Settings Cc + captured sender, minus anyone already on To."""
+    to_set = {
+        p.strip().lower()
+        for p in re.split(r"[\s,;]+", alert_emails())
+        if p.strip()
+    }
+    seen = set(to_set)
+    out: List[str] = []
+    for part in (alert_cc_emails(),) + parts:
+        for addr in re.split(r"[\s,;]+", part or ""):
+            a = addr.strip()
+            if not a or a.lower() in seen:
+                continue
+            seen.add(a.lower())
+            out.append(a)
+    return ", ".join(out)
+
+
 def worker_log_path(label: str = "", upload_file: str = "") -> str:
     base = os.path.basename(upload_file or "") or (label or "worker")
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in base)[:80]
@@ -656,10 +683,7 @@ def _send(subject: str, body: str, files: List[str], cc: str = "") -> None:
         (short[:4000], pngs[:2]),
         (short[:2500], []),
     ]
-    cc_addr = (cc or "").strip()
-    to_set = {p.strip().lower() for p in re.split(r"[\s,;]+", to) if p.strip()}
-    if cc_addr.lower() in to_set:
-        cc_addr = ""
+    cc_addr = _merge_alert_cc(cc)
     last_err: Optional[Exception] = None
     for i, (text, attach) in enumerate(attempts, start=1):
         try:

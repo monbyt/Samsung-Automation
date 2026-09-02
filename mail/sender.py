@@ -466,6 +466,8 @@ def build_email_template_values(
         "mail_job": ctx["mail_job"],
         "mail_job_name": ctx["mail_job_name"],
         "mail_subject": mail_subject,
+        "mail_from": "",
+        "mail_cc": "",
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M"),
         "datetime": now.strftime("%Y-%m-%d %H:%M"),
@@ -570,6 +572,22 @@ def send_for_rpa(
     values = build_email_template_values(
         rpa_id, files, source_upload_file=source_upload_file or "",
     )
+    meta = {}
+    try:
+        from mail.mail_meta import read_mail_meta
+        meta = read_mail_meta(source_upload_file or "") or {}
+        if not meta.get("from"):
+            meta = read_mail_meta(os.environ.get("RPA_UPLOAD_FILE") or "") or meta
+    except Exception:
+        meta = {}
+    sender = (meta.get("from") or "").strip()
+    extra_cc = meta.get("cc") if isinstance(meta.get("cc"), list) else []
+    if sender:
+        values["mail_from"] = sender
+        values["mail_cc"] = ", ".join(extra_cc)
+    else:
+        values.setdefault("mail_from", "")
+        values.setdefault("mail_cc", "")
     raw_subject = job.get("subject", "") or ""
     raw_body = job.get("body", "") or ""
     subject = render_email_template(raw_subject, values)
@@ -580,12 +598,25 @@ def send_for_rpa(
         flush=True,
     )
 
+    to_addr = sender or (job.get("to_emails") or "")
+    cc_addr = job.get("cc_emails", "") or ""
+    cc_parts = [p.strip() for p in re.split(r"[\s,;]+", cc_addr) if p.strip()]
+    for e in extra_cc:
+        e = (e or "").strip()
+        if e and e.lower() != sender.lower() and e.lower() not in {x.lower() for x in cc_parts}:
+            cc_parts.append(e)
+    cc_addr = ", ".join(cc_parts)
+    if sender:
+        print(f"[mail] To original sender {sender} (Email Job To is fallback only)", flush=True)
+    else:
+        print("[mail] No captured sender — using Email Job To", flush=True)
+
     result = send_email(
-        to=job["to_emails"],
+        to=to_addr,
         subject=subject,
         body=body,
         files=files,
-        cc=job.get("cc_emails", "") or "",
+        cc=cc_addr,
     )
 
     if cleanup:

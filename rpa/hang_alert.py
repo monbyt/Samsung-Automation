@@ -41,8 +41,13 @@ def _log(msg: str) -> None:
 def _secret_values() -> List[str]:
     vals: List[str] = []
     try:
-        from mail.settings_db import get_sso_password, get_sso_username
-        vals.extend([get_sso_username(), get_sso_password()])
+        from mail.settings_db import (
+            get_sso_password, get_sso_username, get_w1_password, get_w1_username,
+        )
+        vals.extend([
+            get_sso_username(), get_sso_password(),
+            get_w1_username(), get_w1_password(),
+        ])
     except Exception:
         pass
     vals.extend([

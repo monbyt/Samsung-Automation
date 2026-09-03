@@ -69,18 +69,18 @@ def _mail(page):
 
 
 def _maybe_sso_login(page):
-    """If W1 shows a Samsung SSO login form, fill credentials from Settings."""
+    """If W1 shows a login form, fill W1 credentials from Settings (not NERP)."""
     try:
         user_box = page.get_by_role("textbox", name="User Account")
         if user_box.count() == 0:
             return
-        from mail.settings_db import get_sso_password, get_sso_username
-        username = get_sso_username() or config.NERP_USERNAME
-        password = get_sso_password() or config.NERP_PASSWORD
+        from mail.settings_db import get_w1_password, get_w1_username
+        username = get_w1_username() or config.NERP_USERNAME
+        password = get_w1_password() or config.NERP_PASSWORD
         if not username or not password:
-            print("  SSO login form detected but username/password not set in Settings.")
+            print("  W1 login form detected but username/password not set in Settings.")
             return
-        print(f"  SSO login as {username}…")
+        print(f"  W1 login as {username}…")
         user_box.first.click(timeout=3_000)
         user_box.first.fill(username)
         pw = page.get_by_role("textbox", name="Password")

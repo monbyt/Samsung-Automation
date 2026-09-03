@@ -1,6 +1,6 @@
 """
 App-wide key/value settings — used for the Samsung Agent (mail) API
-and Samsung SSO login credentials (W1 / NERP / recorded RPA).
+and login credentials (W1 mail vs NERP / recorded RPA — separate passwords).
 """
 import os
 
@@ -31,6 +31,11 @@ AGENT_KEYS = (
 SSO_KEYS = (
     "sso_username",
     "sso_password",
+)
+
+W1_KEYS = (
+    "w1_username",
+    "w1_password",
 )
 
 ALERT_KEYS = (
@@ -81,7 +86,7 @@ def is_agent_configured() -> bool:
 
 
 def get_sso_username() -> str:
-    """Samsung SSO username for W1 / NERP / recorded RPA logins."""
+    """NERP / recorded RPA SSO username."""
     stored = get_setting("sso_username")
     if stored:
         return stored
@@ -90,7 +95,7 @@ def get_sso_username() -> str:
 
 
 def get_sso_password() -> str:
-    """Samsung SSO password for W1 / NERP / recorded RPA logins."""
+    """NERP / recorded RPA SSO password."""
     stored = get_setting("sso_password")
     if stored:
         return stored
@@ -99,7 +104,7 @@ def get_sso_password() -> str:
 
 
 def save_sso_credentials(username: str, password: str, *, keep_password_if_blank: bool = True):
-    """Persist SSO credentials to the settings DB and sync into .env."""
+    """Persist NERP SSO credentials to the settings DB and sync into .env."""
     username = (username or "").strip()
     password = password if password is not None else ""
     set_setting("sso_username", username)
@@ -117,6 +122,31 @@ def save_sso_credentials(username: str, password: str, *, keep_password_if_blank
             config.NERP_PASSWORD = password.strip()
     except Exception:
         pass
+
+
+def get_w1_username() -> str:
+    """W1 portal username. Falls back to NERP username if unset."""
+    stored = get_setting("w1_username")
+    if stored:
+        return stored
+    return get_sso_username()
+
+
+def get_w1_password() -> str:
+    """W1 portal password. Falls back to NERP password if unset."""
+    stored = get_setting("w1_password")
+    if stored:
+        return stored
+    return get_sso_password()
+
+
+def save_w1_credentials(username: str, password: str, *, keep_password_if_blank: bool = True):
+    """Persist W1 mail credentials (separate from NERP)."""
+    username = (username or "").strip()
+    password = password if password is not None else ""
+    set_setting("w1_username", username)
+    if password or not keep_password_if_blank:
+        set_setting("w1_password", password.strip())
 
 
 def get_nerp_env() -> str:

@@ -117,7 +117,8 @@ _AGENT_LABELS = {
 @email_bp.route("/settings", methods=["GET", "POST"])
 def settings_page():
     from mail.settings_db import (
-        get_sso_password, get_sso_username, save_sso_credentials,
+        get_sso_password, get_sso_username,
+        save_sso_credentials, save_w1_credentials,
     )
 
     msg = ""
@@ -132,7 +133,14 @@ def settings_page():
                     form.get("sso_password", ""),
                     keep_password_if_blank=True,
                 )
-                msg = "Login credentials saved."
+                msg = "NERP login credentials saved."
+            elif section == "w1":
+                save_w1_credentials(
+                    form.get("w1_username", ""),
+                    form.get("w1_password", ""),
+                    keep_password_if_blank=True,
+                )
+                msg = "W1 login credentials saved."
             elif section == "nerp_env":
                 from mail.settings_db import save_nerp_env, get_nerp_url
                 env = save_nerp_env(form.get("nerp_env", "prod"))
@@ -181,10 +189,13 @@ def settings_page():
     status_cls = "ok" if is_agent_configured() else "err"
     sso_user = get_sso_username()
     has_pw = bool(get_sso_password())
+    # Show stored W1 fields (not NERP fallback) so the form is clear when unset.
+    w1_user = get_setting("w1_username", "") or sso_user
+    has_w1_pw = bool(get_setting("w1_password", ""))
 
     body = f"""
     <h1>Settings</h1>
-    <div class="sub">Samsung SSO login, NERP environment, Agent API, and overnight hang alerts.</div>
+    <div class="sub">W1 mail login, NERP login, Agent API, and overnight hang alerts.</div>
     {_flash(msg, ok)}
     <div class="panel">
       <h2>NERP environment</h2>
@@ -206,12 +217,36 @@ def settings_page():
       </form>
     </div>
     <div class="panel">
-      <h2>Samsung SSO login</h2>
+      <h2>W1 mail login</h2>
       <p class="muted" style="margin-bottom:14px;line-height:1.5">
-        Used when NERP or a recorded RPA script hits the User Account / Password form,
-        and when W1 shows a login page. Leave password blank to keep the current one.
-        W1 also reuses the saved Chrome profile under <code>chrome-profile/</code> —
+        Used only when the mail job hits the W1 login page. Separate from NERP —
+        put your W1 password here. Leave password blank to keep the current one.
+        W1 also reuses the Chrome profile under <code>chrome-profile/</code> —
         delete that folder if you need a fully fresh browser login.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="w1">
+        <div class="grid-2">
+          <div class="form-row">
+            <label for="w1_username">Username</label>
+            <input type="text" id="w1_username" name="w1_username"
+                   value="{w1_user}" autocomplete="username">
+          </div>
+          <div class="form-row">
+            <label for="w1_password">Password {"(saved ✓)" if has_w1_pw else "(not set — falls back to NERP)"}</label>
+            <input type="password" id="w1_password" name="w1_password"
+                   value="" placeholder="{'••••••••' if has_w1_pw else 'Enter W1 password'}"
+                   autocomplete="new-password">
+          </div>
+        </div>
+        <button type="submit" class="btn-run">Save W1 login</button>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>NERP / RPA login</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Used when NERP or a recorded RPA script hits the User Account / Password form.
+        Leave password blank to keep the current one.
       </p>
       <form method="post">
         <input type="hidden" name="section" value="sso">
@@ -224,11 +259,11 @@ def settings_page():
           <div class="form-row">
             <label for="sso_password">Password {"(saved ✓)" if has_pw else "(not set)"}</label>
             <input type="password" id="sso_password" name="sso_password"
-                   value="" placeholder="{'••••••••' if has_pw else 'Enter password'}"
+                   value="" placeholder="{'••••••••' if has_pw else 'Enter NERP password'}"
                    autocomplete="new-password">
           </div>
         </div>
-        <button type="submit" class="btn-run">Save login</button>
+        <button type="submit" class="btn-run">Save NERP login</button>
       </form>
     </div>
     <div class="panel">

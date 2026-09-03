@@ -507,8 +507,35 @@ def _sales_org_from_upload_excel() -> str:
     return org
 
 
+def _cell_as_so(raw) -> str:
+    """Normalize an Excel cell to a sales-order digit string, or ''."""
+    if raw is None:
+        return ""
+    try:
+        import pandas as pd
+        if pd.isna(raw):
+            return ""
+    except Exception:
+        pass
+    text = str(raw).strip()
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    # pandas sometimes yields "4123456789.0" for numeric SO cells
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    compact = re.sub(r"[^\d]", "", text)
+    # Dedicated Sales Order column: accept 8–12 digits (SAP VBELN-ish)
+    if 8 <= len(compact) <= 12:
+        return compact
+    m = SO_RE.search(text)
+    return m.group(0) if m else ""
+
+
 def _so_numbers_from_result_excel(path: str) -> list[str]:
-    """Read SO numbers from the Create Sales Order result Excel 'Sales Order' column."""
+    """Read SO numbers from the Create Sales Order result Excel 'Sales Order' column.
+
+    This file is the source of truth — do not require the SAP grid to show SOs.
+    """
     if not path or not os.path.isfile(path):
         print(f"[RPA] Result Excel missing for SO parse: {path!r}")
         return []
@@ -524,51 +551,96 @@ def _so_numbers_from_result_excel(path: str) -> list[str]:
         print(f"[RPA] Could not read result Excel for SO: {e}")
         return []
 
-    # Prefer exact "Sales Order"; allow close variants used by SAP exports.
+    # Match "Sales Order", "Sales Order Number", "Sales order no.", etc.
     header_re = re.compile(
-        r"^\s*sales[\s_-]*order\s*$|"
-        r"^\s*sales[\s_-]*document\s*$|"
-        r"^\s*s[\s./_-]*o[\s./_-]*n(?:o|um(?:ber)?)?\s*$|"
-        r"^\s*vbeln\s*$",
+        r"sales[\s._-]*order|sales[\s._-]*document|\bvbeln\b|"
+        r"\bs[\s./_-]*o[\s./_-]*(?:n(?:o|um(?:ber)?)?)?\b",
         re.I,
     )
     found: list[str] = []
+    header_dump: list[str] = []
+
     for sheet_name, df in (sheets or {}).items():
         if df is None or df.empty:
             continue
         so_cols: list[int] = []
         header_row = None
-        for r in range(min(25, len(df))):
+        for r in range(min(30, len(df))):
             row_vals = [str(c).strip() if pd.notna(c) else "" for c in df.iloc[r].tolist()]
+            if r < 5:
+                header_dump.append(
+                    f"sheet={sheet_name!r} row={r}: "
+                    + " | ".join(v for v in row_vals if v)[:240]
+                )
             hits = [i for i, v in enumerate(row_vals) if header_re.search(v or "")]
-            if hits:
-                so_cols = hits
+            # Prefer the column whose header contains "Sales Order" over weaker matches
+            preferred = [
+                i for i in hits
+                if re.search(r"sales[\s._-]*order", row_vals[i] or "", re.I)
+            ]
+            if preferred:
+                so_cols = preferred
                 header_row = r
                 break
+            if hits and header_row is None:
+                so_cols = hits
+                header_row = r
+                # keep scanning a bit for a better "Sales Order" header
         if header_row is None or not so_cols:
             continue
+
+        # Re-confirm preferred col if we took a weak match then saw Sales Order later
+        for r in range(header_row, min(header_row + 3, len(df))):
+            row_vals = [str(c).strip() if pd.notna(c) else "" for c in df.iloc[r].tolist()]
+            preferred = [
+                i for i, v in enumerate(row_vals)
+                if re.search(r"sales[\s._-]*order", v or "", re.I)
+            ]
+            if preferred:
+                so_cols = preferred
+                header_row = r
+                break
+
+        sheet_found: list[str] = []
         for r in range(header_row + 1, len(df)):
             for c in so_cols:
                 if c >= len(df.columns):
                     continue
-                raw = df.iloc[r, c]
-                if pd.isna(raw):
-                    continue
-                text = str(raw).strip()
-                if not text or text.lower() in ("nan", "none"):
-                    continue
-                for m in SO_RE.finditer(text):
-                    so = m.group(0)
-                    if so not in found:
-                        found.append(so)
-        if found:
+                so = _cell_as_so(df.iloc[r, c])
+                if so and so not in sheet_found:
+                    sheet_found.append(so)
+        if sheet_found:
             print(
                 f"[RPA] Sales Order from result Excel sheet={sheet_name!r} "
-                f"cols={so_cols} row={header_row}: {found}"
+                f"cols={so_cols} header_row={header_row}: {sheet_found}"
             )
-            return found
+            return sheet_found
+
+    # Last resort: column with the most 8–12 digit values (no header match)
+    for sheet_name, df in (sheets or {}).items():
+        if df is None or df.empty:
+            continue
+        col_hits: dict[int, list[str]] = {}
+        for r in range(len(df)):
+            for c in range(len(df.columns)):
+                so = _cell_as_so(df.iloc[r, c])
+                if so:
+                    col_hits.setdefault(c, [])
+                    if so not in col_hits[c]:
+                        col_hits[c].append(so)
+        if not col_hits:
+            continue
+        best_col = max(col_hits, key=lambda c: len(col_hits[c]))
+        if len(col_hits[best_col]) >= 1:
+            print(
+                f"[RPA] Sales Order from result Excel (no header match) "
+                f"sheet={sheet_name!r} col={best_col}: {col_hits[best_col]}"
+            )
+            return col_hits[best_col]
 
     print(f"[RPA] No 'Sales Order' column in result Excel: {os.path.basename(path)}")
+    for line in header_dump[:8]:
+        print(f"[RPA]   header peek: {line}")
     return []
 
 
@@ -1126,16 +1198,18 @@ def _run_after_login(page) -> None:
     except Exception as e:
         print(f"[RPA] Excel result save failed: {e}")
 
-    # Prefer the result Excel "Sales Order" column; grid scrape is fallback only.
+    # Prefer the result Excel "Sales Order" column — that file is the source of truth.
+    # Do NOT fail because the SAP grid is empty / scrolled away.
     so_numbers = _so_numbers_from_result_excel(result_excel) if result_excel else []
-    if not so_numbers:
-        print("[RPA] Falling back to SAP result-grid SO scan")
+    if not so_numbers and not result_excel:
+        print("[RPA] No result Excel saved — last resort: SAP result-grid SO scan")
         so_numbers = _capture_all_so_numbers(page)
     print(f"[RPA] Captured {len(so_numbers)} SO(s): {so_numbers}")
     if not so_numbers:
         raise RuntimeError(
-            "No sales order numbers found in the result Excel 'Sales Order' column "
-            "or the SAP result grid"
+            "No sales order numbers in the Create SO result Excel "
+            f"({os.path.basename(result_excel) if result_excel else 'not saved'}). "
+            "Expected a 'Sales Order' column. Not using the SAP grid."
         )
 
     sold_tos = _sold_tos_from_upload_excel()

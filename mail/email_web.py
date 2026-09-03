@@ -437,6 +437,7 @@ _PLACEHOLDER_CHIPS = [
     ("{original_stem}", "Excel name without extension"),
     ("{mail_subject}", "Original inbound email subject"),
     ("{mail_from}", "Original sender address (if captured)"),
+    ("{mail_cc}", "Original Cc addresses (if captured)"),
     ("{file}", "First attached PDF"),
     ("{files}", "All attached PDF names"),
     ("{file_list}", "Attached PDFs, one per line"),
@@ -514,6 +515,7 @@ def _render_form(job=None, is_edit=False) -> str:
         <label>Cc (optional — same separators)</label>
         <input type="text" name="cc_emails" value="{_fh(j.get('cc_emails', ''))}"
                placeholder="manager@samsung.com; team@samsung.com">
+        <p class="muted" style="margin-top:6px">Always Cc'd, plus anyone captured from the W1 Cc line.</p>
       </div>
     </div>
     <div class="form-row">

@@ -289,39 +289,112 @@ def _close_user_info_modal(mail, page) -> None:
         pass
 
 
+def _dismiss_popovers(mail, page) -> None:
+    """Close user-info modal and any open name popover."""
+    _close_user_info_modal(mail, page)
+    try:
+        page.keyboard.press("Escape")
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def _email_from_chip(mail, page, chip, *, label: str) -> str:
+    """Click a person chip → View User Info → read E-mail → close. No mailto click."""
+    name = ""
+    try:
+        name = (
+            chip.get_attribute("aria-label")
+            or chip.inner_text(timeout=1000)
+            or ""
+        ).strip()
+    except Exception:
+        pass
+    try:
+        print(f"  Clicking {label} chip: {name!r}")
+        chip.click(timeout=4000)
+        time.sleep(0.4)
+    except Exception as e:
+        print(f"  {label} chip click failed: {e}")
+        return ""
+
+    try:
+        mail.locator("a").filter(has_text="View User Info").click(timeout=5000)
+        print(f"  Clicked View User Info ({label})")
+        time.sleep(0.5)
+    except Exception as e:
+        print(f"  View User Info click failed ({label}): {e}")
+        _dismiss_popovers(mail, page)
+        return ""
+
+    addr = _read_email_from_user_info_modal(mail)
+    _dismiss_popovers(mail, page)
+    if addr:
+        print(f"  {label} address: {addr}")
+    else:
+        print(f"  View User Info had no E-mail row ({label})")
+    return addr
+
+
 def _capture_open_mail_sender(mail, page) -> str:
     """From chip → View User Info → read E-mail in the modal → close."""
     chip = mail.locator("div.sender-info button.btn-sender-info").first
     try:
         chip.wait_for(state="visible", timeout=5000)
-        name = ""
-        try:
-            name = (chip.locator(".sender-name").inner_text(timeout=1000) or "").strip()
-        except Exception:
-            pass
-        print(f"  Clicking From chip button.btn-sender-info: {name!r}")
-        chip.click(timeout=4000)
-        time.sleep(0.4)
     except Exception as e:
-        print(f"  From chip button.btn-sender-info not clicked: {e}")
+        print(f"  From chip button.btn-sender-info not visible: {e}")
         return ""
+    return _email_from_chip(mail, page, chip, label="From")
 
+
+def _capture_open_mail_cc(mail, page) -> list[str]:
+    """Cc row chips → View User Info each → collect addresses.
+
+    Codegen HTML: span.info-item > span.tit 'Cc' + span.desc.desc-v7-hover.
+    """
+    cc_row = mail.locator("span.info-item").filter(
+        has=mail.locator("span.tit", has_text=re.compile(r"^Cc$", re.I))
+    )
     try:
-        mail.locator("a").filter(has_text="View User Info").click(timeout=5000)
-        print("  Clicked View User Info")
-        time.sleep(0.5)
+        if cc_row.count() == 0:
+            print("  No Cc row on open mail")
+            return []
+        chips = cc_row.first.locator("span.desc.desc-v7-hover")
+        n = min(chips.count(), 8)
     except Exception as e:
-        print(f"  View User Info click failed: {e}")
-        _close_user_info_modal(mail, page)
-        return ""
+        print(f"  Cc row not found: {e}")
+        return []
+    if n == 0:
+        print("  Cc row present but no person chips")
+        return []
 
-    sender = _read_email_from_user_info_modal(mail)
-    _close_user_info_modal(mail, page)
-    if sender:
-        print(f"  Sender from View User Info: {sender}")
+    # Expand "View all" on the Cc row if more people are hidden.
+    try:
+        view_all = cc_row.first.locator("button").filter(has_text=re.compile(r"View all", re.I))
+        if view_all.count() > 0 and view_all.first.is_visible():
+            view_all.first.click(timeout=2000)
+            time.sleep(0.4)
+            chips = cc_row.first.locator("span.desc.desc-v7-hover")
+            n = min(chips.count(), 8)
+            print(f"  Expanded Cc View all → {n} chip(s)")
+    except Exception as e:
+        print(f"  Cc View all skipped: {e}")
+
+    found: list[str] = []
+    for i in range(n):
+        try:
+            addr = _email_from_chip(mail, page, chips.nth(i), label=f"Cc[{i}]")
+        except Exception as e:
+            print(f"  Cc[{i}] capture failed: {e}")
+            _dismiss_popovers(mail, page)
+            continue
+        if addr and addr not in found:
+            found.append(addr)
+    if found:
+        print(f"  Captured Cc: {found}")
     else:
-        print("  View User Info had no E-mail row")
-    return sender
+        print("  No Cc addresses captured")
+    return found
 
 
 def check_filter(page, mail_filter, processed_subjects, on_download=None):
@@ -355,10 +428,15 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         time.sleep(1.0)
 
         from_email = ""
+        cc_emails: list[str] = []
         try:
             from_email = _capture_open_mail_sender(mail, page)
         except Exception as e:
             print(f"[{filter_id}] Sender capture failed (download continues): {e}")
+        try:
+            cc_emails = _capture_open_mail_cc(mail, page)
+        except Exception as e:
+            print(f"[{filter_id}] Cc capture failed (download continues): {e}")
 
         save_path = _download_attachment(page, mail, download_dir)
 
@@ -383,13 +461,21 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
         }
         downloaded.append(item)
         print(f"[{filter_id}] Saved to {save_path}")
-        if from_email:
+        if from_email or cc_emails:
             try:
                 from mail.mail_meta import write_mail_meta
-                write_mail_meta(save_path, from_email=from_email, subject=subject)
-                print(f"[{filter_id}] Sender saved: {from_email}")
+                write_mail_meta(
+                    save_path,
+                    from_email=from_email,
+                    cc_emails=cc_emails,
+                    subject=subject,
+                )
+                print(
+                    f"[{filter_id}] Mail meta saved: from={from_email or '-'} "
+                    f"cc={cc_emails or []}"
+                )
             except Exception as e:
-                print(f"[{filter_id}] Could not write sender sidecar: {e}")
+                print(f"[{filter_id}] Could not write mail sidecar: {e}")
 
         if on_download:
             try:

@@ -467,6 +467,7 @@ def build_email_template_values(
         "mail_job_name": ctx["mail_job_name"],
         "mail_subject": mail_subject,
         "mail_from": "",
+        "mail_cc": "",
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M"),
         "datetime": now.strftime("%Y-%m-%d %H:%M"),
@@ -572,15 +573,22 @@ def send_for_rpa(
         rpa_id, files, source_upload_file=source_upload_file or "",
     )
     sender = ""
+    captured_cc: list[str] = []
     try:
         from mail.mail_meta import read_mail_meta
         meta = read_mail_meta(source_upload_file or "") or {}
-        if not meta.get("from"):
+        if not meta.get("from") and not meta.get("cc"):
             meta = read_mail_meta(os.environ.get("RPA_UPLOAD_FILE") or "") or meta
         sender = (meta.get("from") or "").strip()
+        raw_cc = meta.get("cc") or []
+        if isinstance(raw_cc, str):
+            raw_cc = re.split(r"[\s,;]+", raw_cc)
+        captured_cc = [e.strip() for e in raw_cc if (e or "").strip()]
     except Exception:
         sender = ""
+        captured_cc = []
     values["mail_from"] = sender
+    values["mail_cc"] = ", ".join(captured_cc)
     raw_subject = job.get("subject", "") or ""
     raw_body = job.get("body", "") or ""
     subject = render_email_template(raw_subject, values)
@@ -597,12 +605,34 @@ def send_for_rpa(
     else:
         print("[mail] No captured sender — using Email Job To", flush=True)
 
+    # Cc = W1 Cc people + Email Job Cc, minus anyone already on To.
+    to_set = {
+        p.strip().lower()
+        for p in re.split(r"[\s,;]+", to_addr or "")
+        if p.strip()
+    }
+    cc_parts: list[str] = []
+    seen_cc = set(to_set)
+    for part in (captured_cc, re.split(r"[\s,;]+", job.get("cc_emails", "") or "")):
+        for addr in part:
+            a = (addr or "").strip()
+            if not a or a.lower() in seen_cc:
+                continue
+            seen_cc.add(a.lower())
+            cc_parts.append(a)
+    cc_addr = ", ".join(cc_parts)
+    if captured_cc:
+        print(f"[mail] Cc from W1 mail: {captured_cc}", flush=True)
+    if job.get("cc_emails"):
+        print(f"[mail] Cc from Email Job: {job.get('cc_emails')}", flush=True)
+    print(f"[mail] Final Cc: {cc_addr or '(none)'}", flush=True)
+
     result = send_email(
         to=to_addr,
         subject=subject,
         body=body,
         files=files,
-        cc=job.get("cc_emails", "") or "",
+        cc=cc_addr,
     )
 
     if cleanup:

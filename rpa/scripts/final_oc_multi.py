@@ -507,6 +507,71 @@ def _sales_org_from_upload_excel() -> str:
     return org
 
 
+def _so_numbers_from_result_excel(path: str) -> list[str]:
+    """Read SO numbers from the Create Sales Order result Excel 'Sales Order' column."""
+    if not path or not os.path.isfile(path):
+        print(f"[RPA] Result Excel missing for SO parse: {path!r}")
+        return []
+    try:
+        import pandas as pd
+    except Exception as e:
+        print(f"[RPA] pandas unavailable for result Excel SO parse: {e}")
+        return []
+
+    try:
+        sheets = pd.read_excel(path, sheet_name=None, dtype=str, header=None)
+    except Exception as e:
+        print(f"[RPA] Could not read result Excel for SO: {e}")
+        return []
+
+    # Prefer exact "Sales Order"; allow close variants used by SAP exports.
+    header_re = re.compile(
+        r"^\s*sales[\s_-]*order\s*$|"
+        r"^\s*sales[\s_-]*document\s*$|"
+        r"^\s*s[\s./_-]*o[\s./_-]*n(?:o|um(?:ber)?)?\s*$|"
+        r"^\s*vbeln\s*$",
+        re.I,
+    )
+    found: list[str] = []
+    for sheet_name, df in (sheets or {}).items():
+        if df is None or df.empty:
+            continue
+        so_cols: list[int] = []
+        header_row = None
+        for r in range(min(25, len(df))):
+            row_vals = [str(c).strip() if pd.notna(c) else "" for c in df.iloc[r].tolist()]
+            hits = [i for i, v in enumerate(row_vals) if header_re.search(v or "")]
+            if hits:
+                so_cols = hits
+                header_row = r
+                break
+        if header_row is None or not so_cols:
+            continue
+        for r in range(header_row + 1, len(df)):
+            for c in so_cols:
+                if c >= len(df.columns):
+                    continue
+                raw = df.iloc[r, c]
+                if pd.isna(raw):
+                    continue
+                text = str(raw).strip()
+                if not text or text.lower() in ("nan", "none"):
+                    continue
+                for m in SO_RE.finditer(text):
+                    so = m.group(0)
+                    if so not in found:
+                        found.append(so)
+        if found:
+            print(
+                f"[RPA] Sales Order from result Excel sheet={sheet_name!r} "
+                f"cols={so_cols} row={header_row}: {found}"
+            )
+            return found
+
+    print(f"[RPA] No 'Sales Order' column in result Excel: {os.path.basename(path)}")
+    return []
+
+
 def _sold_tos_from_upload_excel() -> list[str]:
     """Pull Sold-to party numbers from the mail Excel (RPA_UPLOAD_FILE)."""
     path = os.environ.get("RPA_UPLOAD_FILE") or ""
@@ -1051,8 +1116,9 @@ def _run_after_login(page) -> None:
     with page.expect_download() as excel_info:
         page.locator("iframe[name=\"application-Shell-startGUI-iframe\"]").content_frame.get_by_role("button", name="Yes").click()
     excel_dl = excel_info.value
+    result_excel = ""
     try:
-        _save_playwright_download(
+        result_excel = _save_playwright_download(
             excel_dl,
             _excel_dir(),
             excel_dl.suggested_filename or "ZLSDF50270RESULT.XLSX",
@@ -1060,11 +1126,17 @@ def _run_after_login(page) -> None:
     except Exception as e:
         print(f"[RPA] Excel result save failed: {e}")
 
-    # Capture ALL SO numbers from the result grid (not just Row-0)
-    so_numbers = _capture_all_so_numbers(page)
+    # Prefer the result Excel "Sales Order" column; grid scrape is fallback only.
+    so_numbers = _so_numbers_from_result_excel(result_excel) if result_excel else []
+    if not so_numbers:
+        print("[RPA] Falling back to SAP result-grid SO scan")
+        so_numbers = _capture_all_so_numbers(page)
     print(f"[RPA] Captured {len(so_numbers)} SO(s): {so_numbers}")
     if not so_numbers:
-        raise RuntimeError("No sales order numbers found in the result grid")
+        raise RuntimeError(
+            "No sales order numbers found in the result Excel 'Sales Order' column "
+            "or the SAP result grid"
+        )
 
     sold_tos = _sold_tos_from_upload_excel()
     # Process each SO one by one (re-open ZSDM31520 each time for a clean screen)

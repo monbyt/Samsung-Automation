@@ -298,16 +298,11 @@ def _open_tcode(page, tcode: str, *, force_home: bool = True) -> None:
 
 
 def _document_select_radio(shell):
-    return shell.get_by_role("radio", name=re.compile(r"Document select", re.I))
+    return shell.get_by_role("radio", name=re.compile(r"^Document select$", re.I))
 
 
 def _radio_is_on(radio) -> bool:
-    """True when SAP actually selected the radio — not merely that it is visible."""
-    try:
-        if radio.is_checked():
-            return True
-    except Exception:
-        pass
+    """Strict check only — do not infer from CSS class names (false positives)."""
     try:
         return bool(
             radio.evaluate(
@@ -315,14 +310,12 @@ def _radio_is_on(radio) -> bool:
                   if (!el) return false;
                   if (el.checked === true) return true;
                   const aria = (el.getAttribute('aria-checked') || '').toLowerCase();
-                  if (aria === 'true' || aria === '1') return true;
-                  const cls = String(el.className || '');
-                  if (/checked|selected|sapMRbSel/i.test(cls)) return true;
-                  const wrap = el.closest('[role="radio"], .lsRadio, .sapMRb');
-                  if (wrap) {
+                  if (aria === 'true') return true;
+                  const wrap = el.closest('[role="radio"]');
+                  if (wrap && wrap !== el) {
+                    if (wrap.checked === true) return true;
                     const waria = (wrap.getAttribute('aria-checked') || '').toLowerCase();
-                    if (waria === 'true' || waria === '1') return true;
-                    if (/checked|selected|sapMRbSel/i.test(String(wrap.className || ''))) return true;
+                    if (waria === 'true') return true;
                   }
                   return false;
                 }"""
@@ -332,42 +325,96 @@ def _radio_is_on(radio) -> bool:
         return False
 
 
-def _click_document_select(shell, page) -> None:
-    """Click ZSDM31520 Document select until the radio stays checked.
+def _sales_doc_ready(shell) -> bool:
+    """Document-select mode is on when Sales Document is visible and enabled."""
+    loc = shell.get_by_role("textbox", name="Sales Document", exact=True)
+    try:
+        if loc.count() == 0:
+            return False
+        box = loc.first
+        return bool(box.is_visible() and box.is_enabled())
+    except Exception:
+        return False
 
-    Visible is not enough — WebGUI often paints the control before the click
-    sticks, so a single Playwright click can look successful while SAP is
-    still on Sold-to / billing select.
+
+def _js_click_document_select(shell) -> bool:
+    """Click the WebGUI label node a human actually hits (not only the a11y radio)."""
+    try:
+        return bool(
+            shell.locator(":root").evaluate(
+                """() => {
+                  const nodes = Array.from(document.querySelectorAll(
+                    '[role="radio"], .lsRadio, label, span, div'
+                  ));
+                  const hit = nodes.find(n => {
+                    const t = (n.innerText || n.textContent || '').replace(/\\s+/g, ' ').trim();
+                    return /^document select$/i.test(t);
+                  });
+                  if (!hit) return false;
+                  const target = hit.closest('[role="radio"]') || hit;
+                  target.scrollIntoView({block: 'center'});
+                  target.click();
+                  return true;
+                }"""
+            )
+        )
+    except Exception as e:
+        print(f"[RPA] JS Document select click failed: {e}")
+        return False
+
+
+def _click_document_select(shell, page) -> None:
+    """Always click Document select like a human, then confirm the mode stuck.
+
+    Do not skip the click just because Playwright thinks the radio is checked —
+    WebGUI often reports checked while still on Sold-to / billing select.
     """
     radio = _document_select_radio(shell).first
     radio.wait_for(state="visible")
-    for i in range(15):
-        radio = _document_select_radio(shell).first
-        if _radio_is_on(radio):
-            print("[RPA] Document select is checked")
-            return
-        print(f"[RPA] Clicking Document select (try {i + 1})")
+    try:
+        n = _document_select_radio(shell).count()
+        print(f"[RPA] Document select radios visible: {n}")
+    except Exception:
+        pass
+    print("[RPA] Waiting 1.5s for ZSDM31520 radio group to bind…")
+    page.wait_for_timeout(1500)
+
+    for i in range(12):
+        print(f"[RPA] Selecting Document select (try {i + 1})")
         try:
-            radio.click()
+            lbl = shell.get_by_text("Document select", exact=True)
+            if lbl.count() > 0:
+                lbl.first.click()
         except Exception as e:
-            print(f"[RPA] Document select click missed: {e}")
+            print(f"[RPA] Label click missed: {e}")
+        try:
+            radio = _document_select_radio(shell).first
             try:
+                radio.check()
+            except Exception:
                 radio.click(force=True)
-            except Exception:
-                pass
-        if i in (3, 7, 11):
-            try:
-                shell.get_by_text(re.compile(r"^Document select$", re.I)).first.click()
-            except Exception:
-                pass
-        page.wait_for_timeout(400)
-    radio = _document_select_radio(shell).first
-    if not _radio_is_on(radio):
-        raise RuntimeError(
-            "Document select never stayed checked after clicks. "
-            "Aborting before Sales Document fill."
-        )
-    print("[RPA] Document select is checked")
+        except Exception as e:
+            print(f"[RPA] Radio click missed: {e}")
+        if i >= 1:
+            _js_click_document_select(shell)
+        try:
+            radio = _document_select_radio(shell).first
+            radio.focus()
+            page.keyboard.press("Space")
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        radio = _document_select_radio(shell).first
+        on = _radio_is_on(radio)
+        sales = _sales_doc_ready(shell)
+        print(f"[RPA] Document select aria-checked={on} sales_doc_ready={sales}")
+        if sales:
+            print("[RPA] Document select mode is active (Sales Document ready)")
+            return
+    raise RuntimeError(
+        "Document select click did not enable Sales Document. "
+        "Aborting before SO fill."
+    )
 
 
 def _open_zsdm31520(page) -> None:

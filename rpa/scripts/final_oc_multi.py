@@ -12,6 +12,36 @@ from mail.settings_db import get_nerp_url
 
 SHELL_IFRAME = 'iframe[name="application-Shell-startGUI-iframe"]'
 SO_RE = re.compile(r"\d{10,}")
+_A11Y_SELECT_RE = re.compile(r"to select a row(?:[,.]?\s*press the(?: space bar)?)?", re.I)
+
+# SAP WebGUI cell text: innerText is often empty until the ALV hydrates; values
+# live on input.value / aria-label. Shared with row-text scraping.
+_JS_NODE_TEXT = r"""
+          const skipA11y = (s) => !s || /^\s*To select a row/i.test(String(s));
+          const nodeText = (n) => {
+            const bits = [];
+            const push = (s) => {
+              s = (s == null ? '' : String(s)).trim();
+              if (!s || skipA11y(s)) return;
+              if (!bits.includes(s)) bits.push(s);
+            };
+            push(n.innerText);
+            push(n.textContent);
+            if (n.value != null && String(n.value)) push(n.value);
+            if (n.getAttribute) {
+              push(n.getAttribute('title'));
+              push(n.getAttribute('aria-label'));
+              push(n.getAttribute('value'));
+            }
+            if (n.querySelectorAll) {
+              for (const k of n.querySelectorAll('input, textarea')) {
+                if (k.value) push(k.value);
+                if (k.getAttribute) push(k.getAttribute('value'));
+              }
+            }
+            return bits.join(' | ');
+          };
+"""
 
 # sha256 digests of PDFs saved in this browser run — same bytes twice = wrong print reused
 _PDF_HASHES_THIS_RUN: list[str] = []
@@ -31,15 +61,26 @@ def _shell(page):
     return page.locator(SHELL_IFRAME).content_frame
 
 
+def _strip_a11y_noise(text: str) -> str:
+    """Drop SAP's 'To select a row, press the space bar' so it is not treated as data."""
+    t = _A11Y_SELECT_RE.sub(" ", text or "")
+    return " ".join(t.split())
+
+
 def _read_grid_cells(shell) -> list[tuple[str, str]]:
     """Return [(id, text), ...] for every grid# node in the shell document.
 
     One evaluate call — do not nth() thousands of Playwright locators.
+    Reads input.value as well as innerText (ALV cells are often empty in the DOM
+    until hydrated, then still only expose the number via the inner input).
     """
-    # No object-literal braces; returns a list of [id, text] pairs.
     return shell.locator(":root").evaluate(
-        "() => Array.from(document.querySelectorAll('[id*=\"grid#\"]'))"
-        ".map(n => [n.id, (n.innerText || n.textContent || '').trim()])"
+        "() => {"
+        + _JS_NODE_TEXT
+        + r"""
+          return Array.from(document.querySelectorAll('[id*="grid#"]'))
+            .map(n => [n.id || '', nodeText(n)]);
+        }"""
     ) or []
 
 
@@ -256,12 +297,85 @@ def _open_tcode(page, tcode: str, *, force_home: bool = True) -> None:
     page.wait_for_timeout(2000)
 
 
+def _document_select_radio(shell):
+    return shell.get_by_role("radio", name=re.compile(r"Document select", re.I))
+
+
+def _radio_is_on(radio) -> bool:
+    """True when SAP actually selected the radio — not merely that it is visible."""
+    try:
+        if radio.is_checked():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(
+            radio.evaluate(
+                """el => {
+                  if (!el) return false;
+                  if (el.checked === true) return true;
+                  const aria = (el.getAttribute('aria-checked') || '').toLowerCase();
+                  if (aria === 'true' || aria === '1') return true;
+                  const cls = String(el.className || '');
+                  if (/checked|selected|sapMRbSel/i.test(cls)) return true;
+                  const wrap = el.closest('[role="radio"], .lsRadio, .sapMRb');
+                  if (wrap) {
+                    const waria = (wrap.getAttribute('aria-checked') || '').toLowerCase();
+                    if (waria === 'true' || waria === '1') return true;
+                    if (/checked|selected|sapMRbSel/i.test(String(wrap.className || ''))) return true;
+                  }
+                  return false;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _click_document_select(shell, page) -> None:
+    """Click ZSDM31520 Document select until the radio stays checked.
+
+    Visible is not enough — WebGUI often paints the control before the click
+    sticks, so a single Playwright click can look successful while SAP is
+    still on Sold-to / billing select.
+    """
+    radio = _document_select_radio(shell).first
+    radio.wait_for(state="visible")
+    for i in range(15):
+        radio = _document_select_radio(shell).first
+        if _radio_is_on(radio):
+            print("[RPA] Document select is checked")
+            return
+        print(f"[RPA] Clicking Document select (try {i + 1})")
+        try:
+            radio.click()
+        except Exception as e:
+            print(f"[RPA] Document select click missed: {e}")
+            try:
+                radio.click(force=True)
+            except Exception:
+                pass
+        if i in (3, 7, 11):
+            try:
+                shell.get_by_text(re.compile(r"^Document select$", re.I)).first.click()
+            except Exception:
+                pass
+        page.wait_for_timeout(400)
+    radio = _document_select_radio(shell).first
+    if not _radio_is_on(radio):
+        raise RuntimeError(
+            "Document select never stayed checked after clicks. "
+            "Aborting before Sales Document fill."
+        )
+    print("[RPA] Document select is checked")
+
+
 def _open_zsdm31520(page) -> None:
     _open_tcode(page, "ZSDM31520")
     # Confirm the P/I selection screen actually opened (not still on 50270).
     shell = _shell(page)
     try:
-        shell.get_by_role("radio", name="Document select").wait_for(
+        _document_select_radio(shell).first.wait_for(
             state="visible", timeout=60_000
         )
         print("[RPA] ZSDM31520 ready (Document select visible)")
@@ -270,6 +384,7 @@ def _open_zsdm31520(page) -> None:
             "ZSDM31520 did not open — Document select not visible after Search. "
             f"({e})"
         ) from e
+    _click_document_select(shell, page)
 
 
 def _save_playwright_download(dl, dest_dir: str, filename: str | None = None) -> str:
@@ -442,7 +557,11 @@ def _row_select_cells(shell):
 
 
 def _zsdm_result_ready(shell, so_number: str) -> str | None:
-    """True when Execute has produced a selectable result (not just the SO input field)."""
+    """True when Execute has produced the result *screen* (toolbar / ALV chrome).
+
+    This is NOT grid-data-ready. Create P/I and the 9 'select a row' cells appear
+    before ALV values paint — callers must then wait on _wait_for_result_grid_data.
+    """
     try:
         btn = _create_pi_button(shell)
         if btn.count() > 0 and btn.first.is_visible():
@@ -463,6 +582,101 @@ def _zsdm_result_ready(shell, so_number: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _sold_to_candidates(
+    sold_to: str | None = None,
+    sold_tos: list[str] | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    if sold_to:
+        n = _normalize_sap_num(sold_to)
+        if n:
+            candidates.append(n)
+    for s in sold_tos or []:
+        n = _normalize_sap_num(s)
+        if n and n not in candidates:
+            candidates.append(n)
+    return candidates
+
+
+def _result_grid_hydrated(
+    shell,
+    so_number: str,
+    candidates: list[str] | None = None,
+) -> str | None:
+    """True when ALV *data* cells exist — not just select-column a11y placeholders."""
+    so_norm = _normalize_sap_num(so_number)
+    grid_rows = _grid_rows_by_index(shell, log=False)
+    blob = " | ".join(grid_rows.values())
+    blob_n = _normalize_sap_num(blob)
+    if so_norm and so_norm in blob_n:
+        return "so_in_grid"
+    for sold in candidates or []:
+        if sold and sold in blob_n:
+            return f"sold_to_in_grid:{sold}"
+    # Result ALV often exposes the SO as a gridcell name before grid#C ids parse.
+    try:
+        n_so_cells = shell.get_by_role("gridcell").filter(has_text=so_number).count()
+        if n_so_cells > 0:
+            return "so_in_gridcell"
+    except Exception:
+        pass
+    n_sel = 0
+    try:
+        n_sel = _row_select_cells(shell).count()
+    except Exception:
+        pass
+    # One real line with any parsed cell text is enough to click the sole row.
+    if n_sel == 1 and grid_rows:
+        return "sole_row_with_data"
+    return None
+
+
+def _wait_for_result_grid_data(
+    shell,
+    page,
+    so_number: str,
+    sold_to: str | None = None,
+    sold_tos: list[str] | None = None,
+    timeout_s: int = 45,
+) -> str:
+    """Poll until ZSDM31520 ALV values exist. Create P/I visible is not enough."""
+    candidates = _sold_to_candidates(sold_to, sold_tos)
+    ticks = max(1, timeout_s * 2)
+    print(
+        f"[RPA] Waiting for ZSDM31520 grid data (SO {so_number}, "
+        f"timeout={timeout_s}s)"
+    )
+    for i in range(ticks):
+        reason = _result_grid_hydrated(shell, so_number, candidates)
+        if reason:
+            elapsed = i * 0.5
+            print(f"[RPA] Grid data ready ({reason}) after {elapsed:.1f}s")
+            _grid_rows_by_index(shell, log=True)
+            return reason
+        if i > 0 and i % 10 == 0:
+            try:
+                n_sel = _row_select_cells(shell).count()
+            except Exception:
+                n_sel = -1
+            print(
+                f"[RPA] Grid still empty… ({i // 2}s) "
+                f"select_cells={n_sel} (chrome ready, values not painted)"
+            )
+            status = _shell_status_text(shell)
+            if status:
+                print(f"[RPA] Status bar @ {i // 2}s: {status[:200]!r}")
+            if re.search(r"no\s+(relevant\s+)?documents?\s+found", status, re.I):
+                raise RuntimeError(
+                    f"ZSDM31520 found no documents for SO {so_number}."
+                )
+        page.wait_for_timeout(500)
+    raise RuntimeError(
+        f"ZSDM31520 result grid never hydrated for SO {so_number} "
+        f"(Create P/I / select cells were visible but no ALV cell values "
+        f"after {timeout_s}s). Refusing Create P/I."
+    )
 
 
 def _fill_sales_document(shell, page, so_number: str) -> None:
@@ -709,20 +923,24 @@ def _text_has_sap_num(text: str, num: str) -> bool:
     return bool(compact) and num in compact
 
 
-def _grid_rows_by_index(shell) -> dict[int, str]:
+def _grid_rows_by_index(shell, *, log: bool = True) -> dict[int, str]:
     """Group visible grid#C cells by SAP row index — sold-to lives here, not on the select cell."""
     grouped: dict[int, list[str]] = {}
     try:
         cells = _read_grid_cells(shell)
     except Exception as e:
-        print(f"[RPA] Grid cell dump failed: {e}")
+        if log:
+            print(f"[RPA] Grid cell dump failed: {e}")
         return {}
     for cid, text in cells:
         row, col = _parse_row_col(cid)
-        if row is None or not (text or "").strip():
+        cleaned = _strip_a11y_noise(text)
+        if row is None or not cleaned:
             continue
-        grouped.setdefault(row, []).append(text.strip())
+        grouped.setdefault(row, []).append(cleaned)
     out = {r: " | ".join(vals) for r, vals in grouped.items()}
+    if not log:
+        return out
     if out:
         print(f"[RPA] Grid data rows: {len(out)}")
         for r in sorted(out)[:30]:
@@ -744,10 +962,34 @@ def _row_text_for_select_cell(cell) -> str:
         return (
             cell.evaluate(
                 r"""(el) => {
-                  const cellText = (el.innerText || el.textContent || '').trim();
+                  const skipA11y = (s) => !s || /^\s*To select a row/i.test(String(s));
+                  const nodeText = (n) => {
+                    const bits = [];
+                    const push = (s) => {
+                      s = (s == null ? '' : String(s)).trim();
+                      if (!s || skipA11y(s)) return;
+                      if (!bits.includes(s)) bits.push(s);
+                    };
+                    push(n.innerText);
+                    push(n.textContent);
+                    if (n.value != null && String(n.value)) push(n.value);
+                    if (n.getAttribute) {
+                      push(n.getAttribute('title'));
+                      push(n.getAttribute('aria-label'));
+                      push(n.getAttribute('value'));
+                    }
+                    if (n.querySelectorAll) {
+                      for (const k of n.querySelectorAll('input, textarea')) {
+                        if (k.value) push(k.value);
+                        if (k.getAttribute) push(k.getAttribute('value'));
+                      }
+                    }
+                    return bits.join(' | ');
+                  };
+                  const cellText = nodeText(el);
                   const a11y = el.closest('[role="row"], tr, .lsTable__row');
                   if (a11y && a11y !== el) {
-                    const t = (a11y.innerText || a11y.textContent || '').trim();
+                    const t = nodeText(a11y);
                     if (t && t !== cellText) return t;
                   }
                   const parse = (id) => {
@@ -773,14 +1015,14 @@ def _row_text_for_select_cell(cell) -> str:
                     for (const node of document.querySelectorAll('[id^="grid#"]')) {
                       const hit = parse(node.id);
                       if (!hit || hit.row !== rowIdx) continue;
-                      const t = (node.innerText || node.textContent || '').trim();
+                      const t = nodeText(node);
                       if (t) texts.push(t);
                     }
                     if (texts.length) return texts.join(' | ');
                   }
                   let p = el.parentElement;
                   for (let i = 0; i < 10 && p; i++) {
-                    const t = (p.innerText || p.textContent || '').trim();
+                    const t = nodeText(p);
                     if (t && t !== cellText && t.length > cellText.length + 5) return t;
                     p = p.parentElement;
                   }
@@ -848,13 +1090,7 @@ def _select_so_result_row(
     contains the order's Sold-to party number; fall back to SO match, then
     sole select cell.
     """
-    candidates = []
-    if sold_to:
-        candidates.append(_normalize_sap_num(sold_to))
-    for s in sold_tos or []:
-        n = _normalize_sap_num(s)
-        if n and n not in candidates:
-            candidates.append(n)
+    candidates = _sold_to_candidates(sold_to, sold_tos)
 
     exact = shell.get_by_role("gridcell", name="To select a row, press the")
     try:
@@ -883,6 +1119,7 @@ def _select_so_result_row(
                 combined = f"{txt} | {extra}".strip(" |")
             else:
                 combined = txt or extra
+            combined = _strip_a11y_noise(combined)
             rows_info.append((i, combined, grid_i))
             compact = " ".join((combined or "").split())
             print(
@@ -1047,9 +1284,7 @@ def _process_so(
     _open_zsdm31520(page)
     shell = _shell(page)
     # Mode radio on the selection screen (not the result-grid row radio)
-    shell.get_by_role("radio", name="Document select").wait_for(state="visible")
-    shell.get_by_role("radio", name="Document select").click()
-    page.wait_for_timeout(500)
+    _click_document_select(shell, page)
     _fill_sales_document(shell, page, so_number)
     shell.get_by_role("button", name="Execute  Emphasized").click()
     print(f"[RPA] Waiting for ZSDM31520 result UI after Execute (SO {so_number})")
@@ -1089,8 +1324,11 @@ def _process_so(
             f"ZSDM31520 result UI not ready within 90s after Execute for SO {so_number}. "
             f"status={status[:300]!r}"
         )
-    page.wait_for_timeout(500)
-    print(f"[RPA] Result UI ready ({ready_reason}) for SO {so_number} — selecting line")
+    print(f"[RPA] Result UI ready ({ready_reason}) for SO {so_number} — waiting for grid values")
+    _wait_for_result_grid_data(
+        shell, page, so_number, sold_to=sold_to, sold_tos=sold_tos
+    )
+    print(f"[RPA] Selecting line for SO {so_number}")
     _select_so_result_row(
         shell, page, so_number, sold_to=sold_to, sold_tos=sold_tos
     )

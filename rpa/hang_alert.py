@@ -957,6 +957,14 @@ def _close_hung_session(run: Optional[dict], worker: Optional[dict]) -> None:
             also=[upload_file],
             keep_name_contains=("layout", "template"),
         )
+    try:
+        from mail.sender import remove_worker_dir
+        if download:
+            remove_worker_dir(download)
+        if upload:
+            remove_worker_dir(upload)
+    except Exception as e:
+        _log(f"Worker folder remove skipped: {e}")
     _log(
         f"Hung session closed · cleaned {len(deleted)} file(s)"
         + (f" · {', '.join(os.path.basename(p) for p in deleted[:8])}" if deleted else "")

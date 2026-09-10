@@ -441,6 +441,9 @@ def run_rpa(
             _log(f"Error alert skipped: {alert_err}")
         raise
 
+    finally:
+        _drop_worker_slot_dirs(resolved_upload_dir, resolved_download_dir)
+
     return result
 
 
@@ -525,34 +528,88 @@ def _worker_slot_dirs(base_upload: str, base_download: str, index: int, token: s
     return upload, download
 
 
-def _purge_stale_worker_dirs(base_upload: str, base_download: str) -> None:
-    """Remove leftover _worker_* folders from earlier runs (wrong-PDF source)."""
-    import shutil
+def _drop_worker_slot_dirs(*dirs: str) -> None:
+    """Remove isolated _worker_* folders (HTML leftovers, JSON stubs, PDFs)."""
+    try:
+        from mail.sender import remove_worker_dir
+    except Exception as e:
+        _log(f"Worker folder cleanup unavailable: {e}")
+        return
+    seen = set()
+    for directory in dirs:
+        path = os.path.normpath(directory or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            if remove_worker_dir(path):
+                _log(f"Removed worker folder: {path}")
+        except Exception as e:
+            _log(f"Could not remove worker folder {path}: {e}")
+
+
+def _purge_stale_worker_dirs(
+    base_upload: str,
+    base_download: str,
+    *,
+    token: str = "",
+    min_age_s: float = 600,
+) -> None:
+    """Remove leftover _worker_* folders (HTML + files + directory).
+
+    token — if set, only this batch's slots (…_HHMMSS).
+    min_age_s — skip folders newer than this (avoids killing an overlapping job).
+    """
     import time
 
     now = time.time()
+    seen = set()
     for base in (base_upload, base_download):
         if not base or not os.path.isdir(base):
             continue
+        norm = os.path.normpath(base)
+        if norm in seen:
+            continue
+        seen.add(norm)
         for name in os.listdir(base):
             if not name.startswith("_worker_"):
+                continue
+            if token and token not in name:
                 continue
             path = os.path.join(base, name)
             if not os.path.isdir(path):
                 continue
-            try:
-                age_h = (now - os.path.getmtime(path)) / 3600.0
-            except OSError:
-                age_h = 999
-            # Anything older than ~10 minutes from a prior batch is safe to drop
-            # before starting a new parallel batch.
-            if age_h < (10 / 60.0):
+            if min_age_s > 0:
+                try:
+                    age = now - os.path.getmtime(path)
+                except OSError:
+                    age = min_age_s + 1
+                if age < min_age_s:
+                    continue
+            _drop_worker_slot_dirs(path)
+
+
+def _wipe_leftover_html(*directories: str) -> None:
+    """SAP/Chrome sometimes dumps .html next to PDFs; those were never cleaned."""
+    seen = set()
+    for directory in directories:
+        if not directory or not os.path.isdir(directory):
+            continue
+        norm = os.path.normpath(directory)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        for name in os.listdir(directory):
+            if not name.lower().endswith((".html", ".htm")):
+                continue
+            path = os.path.join(directory, name)
+            if not os.path.isfile(path):
                 continue
             try:
-                shutil.rmtree(path)
-                _log(f"Removed stale worker folder: {path}")
+                os.remove(path)
+                _log(f"Removed leftover HTML: {path}")
             except OSError as e:
-                _log(f"Could not remove stale worker folder {path}: {e}")
+                _log(f"Could not remove HTML {path}: {e}")
 
 
 def _parallel_worker(payload: dict) -> dict:
@@ -760,6 +817,10 @@ def trigger_for_mail_job(
                         "status": "error",
                         "message": str(e),
                     })
+            _purge_stale_worker_dirs(
+                base_upload, base_download, token=token, min_age_s=0
+            )
+            _wipe_leftover_html(base_upload, base_download)
             continue
         queue = list(payloads)
         active = []
@@ -814,4 +875,9 @@ def trigger_for_mail_job(
                 except Exception:
                     pass
             raise
+        finally:
+            _purge_stale_worker_dirs(
+                base_upload, base_download, token=token, min_age_s=0
+            )
+            _wipe_leftover_html(base_upload, base_download)
     return results

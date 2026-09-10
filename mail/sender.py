@@ -168,8 +168,10 @@ def send_email(
     raise SendError(f"Agent API failed after retries: {last_err}")
 
 
-_ATTACH_EXTS = (".pdf", ".xlsx", ".xls", ".csv", ".xlsm", ".zip", ".docx", ".doc",
-                ".png", ".jpg", ".jpeg", ".txt")
+_ATTACH_EXTS = (
+    ".pdf", ".xlsx", ".xls", ".csv", ".xlsm", ".zip", ".docx", ".doc",
+    ".png", ".jpg", ".jpeg", ".txt", ".html", ".htm", ".crdownload",
+)
 
 
 def _latest_files_in(directory: str, count: int) -> list[str]:
@@ -248,7 +250,12 @@ def cleanup_folder_files(
 
     if directory and os.path.isdir(directory):
         for name in os.listdir(directory):
-            if not name.lower().endswith(_ATTACH_EXTS):
+            name_l = name.lower()
+            if not (
+                name_l.endswith(_ATTACH_EXTS)
+                or name_l.endswith(".mail.json")
+                or name_l in ("_worker_result.json", "_worker_payload.json")
+            ):
                 continue
             _safe_remove(os.path.join(directory, name))
 
@@ -256,22 +263,40 @@ def cleanup_folder_files(
 
 
 def remove_worker_dir(directory: str) -> bool:
-    """Delete an isolated _worker_* folder after the run (files + directory)."""
-    import shutil
+    """Delete an isolated _worker_* folder after the run (files + directory).
 
-    directory = _normalize_folder_path(directory or "")
+    Retries: Chrome/Excel on Windows often hold a file for a second after the
+    worker exits, so a single rmtree fails and the folder is left behind.
+    """
+    import shutil
+    import time
+
+    directory = os.path.normpath((directory or "").strip().strip('"'))
     if not directory:
         return False
     base = os.path.basename(directory.rstrip("\\/"))
     if not base.startswith("_worker_"):
         return False
-    try:
-        shutil.rmtree(directory, ignore_errors=False)
-        print(f"[mail] Removed worker folder: {directory}", flush=True)
-        return True
-    except OSError as e:
-        print(f"[mail] Could not remove worker folder {directory}: {e}", flush=True)
+    if not os.path.isdir(directory):
         return False
+    last_err = None
+    for i in range(6):
+        try:
+            shutil.rmtree(directory)
+            print(f"[mail] Removed worker folder: {directory}", flush=True)
+            return True
+        except OSError as e:
+            last_err = e
+            time.sleep(0.4 * (i + 1))
+    try:
+        shutil.rmtree(directory, ignore_errors=True)
+        if not os.path.isdir(directory):
+            print(f"[mail] Removed worker folder: {directory}", flush=True)
+            return True
+    except OSError as e:
+        last_err = e
+    print(f"[mail] Could not remove worker folder {directory}: {last_err}", flush=True)
+    return False
 
 
 def wipe_folder_attachables(directory: str, *, keep_name_contains: Optional[Iterable[str]] = None) -> list[str]:

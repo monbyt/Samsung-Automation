@@ -19,6 +19,12 @@ import config
 
 MAIL_IFRAME = 'iframe[title="Mail"]'
 MAX_MAILS_PER_TICK = 20
+# W1 only renders visible rows. Scan a few screens, not the whole mailbox.
+MAX_LIST_SCROLLS = 5
+# Subject column. Codegen and live logs click this cell to open a message.
+# Do not use frame-wide get_by_text: a mailbox button named like the subject
+# (e.g. "Recon File") is bold when selected and gets clicked instead of the mail.
+_SUBJECT_CELL = ".inner-cell.col03-01"
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
@@ -201,8 +207,8 @@ _IS_UNREAD_JS = """
 """
 
 
-def _click_unread_email(mail, subject: str) -> bool:
-    """Click the first unread row whose subject contains *subject*."""
+def _click_unread_email_text(mail, subject: str) -> bool:
+    """Original click: first unread text match. Used by Order Creation."""
     pattern = _subject_pattern(subject)
     rows = mail.get_by_text(pattern)
     n = rows.count()
@@ -235,6 +241,200 @@ def _click_unread_email(mail, subject: str) -> bool:
 
     print("  No unread email whose subject contains that text.")
     return False
+
+
+def _subject_is_inside_mailbox(mailbox: str, subject: str) -> bool:
+    """True when the folder button itself contains the subject search text."""
+    box = (mailbox or "").strip().lower()
+    sub = (subject or "").strip().lower()
+    return bool(box and sub and sub in box)
+
+
+# Bold/unread is often on the row or the subject cell, not on the text node.
+_ROW_UNREAD_JS = """
+(el) => {
+  const row = el.closest('.tbl-row') || el;
+  const cell = row.querySelector('.inner-cell.col03-01') || el;
+  const text = (cell.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 140);
+  const cls = (cell.className || '').toString().slice(0, 80);
+  let fw = '';
+  let n = cell;
+  for (let i = 0; i < 8 && n; i++, n = n.parentElement) {
+    const c = (n.className || '').toString().toLowerCase();
+    const w = getComputedStyle(n).fontWeight;
+    if (!fw) fw = w;
+    if (/\\bunread\\b|\\bnot-read\\b|\\bis-unread\\b|\\bmail-unread\\b/.test(c)) {
+      return { unread: true, fw: w, cls, text };
+    }
+    if (w === 'bold' || w === 'bolder' || parseInt(w, 10) >= 600) {
+      return { unread: true, fw: w, cls, text };
+    }
+  }
+  return { unread: false, fw, cls, text };
+}
+"""
+
+_MARK_LIST_SCROLLER_JS = """
+(body) => {
+  const doc = body.ownerDocument;
+  const prev = doc.querySelector('[data-w1-mail-scroller="1"]');
+  if (prev) prev.removeAttribute('data-w1-mail-scroller');
+  let best = null;
+  let bestScore = 0;
+  for (const n of doc.querySelectorAll('div, ul, table, tbody, section')) {
+    const extra = n.scrollHeight - n.clientHeight;
+    if (extra < 40 || n.clientHeight < 80 || n.clientWidth < 120) continue;
+    const st = getComputedStyle(n);
+    if (!/(auto|scroll|overlay|hidden)/.test(st.overflowY)) continue;
+    if (!n.querySelector('.inner-cell.col03-01')) continue;
+    const score = extra + n.querySelectorAll('.inner-cell.col03-01').length * 80;
+    if (score > bestScore) {
+      best = n;
+      bestScore = score;
+    }
+  }
+  if (!best) return { found: false };
+  best.setAttribute('data-w1-mail-scroller', '1');
+  best.scrollTop = 0;
+  return { found: true, extra: best.scrollHeight - best.clientHeight };
+}
+"""
+
+_SCROLL_LIST_DOWN_JS = """
+(body) => {
+  const el = body.ownerDocument.querySelector('[data-w1-mail-scroller="1"]');
+  if (!el) return { moved: false, atEnd: true };
+  const before = el.scrollTop;
+  const step = Math.max(Math.floor(el.clientHeight * 0.8), 120);
+  el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + step);
+  const moved = el.scrollTop > before + 1;
+  const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  return { moved, atEnd };
+}
+"""
+
+
+def _click_subject_cell(cell, index: int) -> bool:
+    """Click one subject cell when its row is unread. False if read or hidden."""
+    try:
+        if not cell.is_visible():
+            return False
+    except Exception:
+        return False
+    try:
+        info = cell.evaluate(_ROW_UNREAD_JS)
+    except Exception as e:
+        print(f"    [{index}] unread check failed: {e}")
+        return False
+    if not isinstance(info, dict):
+        info = {"unread": bool(info)}
+    flag = "UNREAD" if info.get("unread") else "read"
+    print(
+        f"    [{index}] [{flag}] fw={info.get('fw')!r} "
+        f"cls={info.get('cls')!r} text={info.get('text')!r}"
+    )
+    if not info.get("unread"):
+        return False
+    cell.scroll_into_view_if_needed()
+    cell.click(timeout=10_000)
+    print(f"  Clicked unread email: {info.get('text')!r}")
+    return True
+
+
+def _click_unread_on_screen(mail, subject: str, pattern) -> bool:
+    """Click the first visible unread subject cell that contains *subject*."""
+    cells = mail.locator(_SUBJECT_CELL).filter(has_text=pattern)
+    n = cells.count()
+    print(f"  Subject cells containing {subject!r}: {n}")
+    if _click_first_visible(cells, n):
+        return True
+    if n:
+        return False
+
+    # Filename on the row (attachment column) rather than the subject text.
+    rows = mail.locator(".tbl-row").filter(has_text=pattern)
+    rn = rows.count()
+    print(f"  Mail rows containing {subject!r} (not in subject cell): {rn}")
+    visible = 0
+    for i in range(rn):
+        cell = rows.nth(i).locator(_SUBJECT_CELL).first
+        try:
+            if not cell.is_visible():
+                continue
+        except Exception:
+            continue
+        visible += 1
+        if _click_subject_cell(cell, i):
+            return True
+        if visible >= MAX_MAILS_PER_TICK:
+            break
+    return False
+
+
+def _click_first_visible(cells, n: int) -> bool:
+    """Try subject cells, skipping hidden copies, until one unread row opens."""
+    visible = 0
+    for i in range(n):
+        cell = cells.nth(i)
+        try:
+            if not cell.is_visible():
+                continue
+        except Exception:
+            continue
+        visible += 1
+        if _click_subject_cell(cell, i):
+            return True
+        if visible >= MAX_MAILS_PER_TICK:
+            break
+    return False
+
+
+def _click_unread_subject_cell(mail, subject: str) -> bool:
+    """Open via the subject cell when the folder name contains the subject text.
+
+    Order Creation does not use this. Its folder is OC, so the original
+    text click still runs for that job.
+    """
+    pattern = _subject_pattern(subject)
+    try:
+        scroller = mail.locator("body").evaluate(_MARK_LIST_SCROLLER_JS)
+    except Exception as e:
+        print(f"  Mail list scroller skipped: {e}")
+        scroller = {"found": False}
+    if isinstance(scroller, dict) and scroller.get("found"):
+        print(f"  Mail list is scrollable — scanning at most {MAX_LIST_SCROLLS} screens.")
+
+    for screen in range(MAX_LIST_SCROLLS + 1):
+        if screen:
+            print(f"  Scanning mail list screen {screen}")
+        if _click_unread_on_screen(mail, subject, pattern):
+            return True
+        if screen >= MAX_LIST_SCROLLS:
+            break
+        try:
+            info = mail.locator("body").evaluate(_SCROLL_LIST_DOWN_JS)
+        except Exception:
+            break
+        if not isinstance(info, dict) or not info.get("moved"):
+            break
+        time.sleep(0.4)
+
+    print("  No unread email whose subject contains that text.")
+    return False
+
+
+def _click_unread_email(mail, subject: str, mailbox: str = "", filter_id: str = "") -> bool:
+    """Order Creation keeps the original text click. Recon-style jobs do not."""
+    fid = (filter_id or "").strip().lower()
+    if fid in ("order_creation", "oc") or "order_creation" in fid:
+        return _click_unread_email_text(mail, subject)
+    if _subject_is_inside_mailbox(mailbox, subject):
+        print(
+            f"  Mailbox {mailbox!r} contains {subject!r} — "
+            "clicking the subject cell, not the folder button"
+        )
+        return _click_unread_subject_cell(mail, subject)
+    return _click_unread_email_text(mail, subject)
 
 
 def _read_email_from_user_info_modal(mail) -> str:
@@ -344,7 +544,7 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     _apply_unread_filter(mail)
 
     for i in range(MAX_MAILS_PER_TICK):
-        if not _click_unread_email(mail, subject):
+        if not _click_unread_email(mail, subject, mailbox=mailbox, filter_id=filter_id):
             if i == 0:
                 print(f"[{filter_id}] No unread mail — skipping download.")
             else:

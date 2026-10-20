@@ -535,6 +535,14 @@ def _patch_playwright_logging() -> None:
     from playwright.sync_api import Locator, Page
     from rpa.debug_log import debug_log
 
+    def _snap_failure_screen(target) -> None:
+        try:
+            page = getattr(target, "page", None) or target
+            from rpa.hang_alert import save_page_screenshot
+            save_page_screenshot(page)
+        except Exception:
+            pass
+
     def _wrap(cls, name):
         original = getattr(cls, name)
 
@@ -591,7 +599,11 @@ def _patch_playwright_logging() -> None:
                 # endregion
                 if _upload_file_path() and 'get_by_role("button", name="OK")' in snippet:
                     _start_win_open_fallback()
-            return original(self, *args, **kwargs)
+            try:
+                return original(self, *args, **kwargs)
+            except Exception:
+                _snap_failure_screen(self)
+                raise
 
         setattr(cls, name, wrapper)
 

@@ -704,10 +704,17 @@ def _send(subject: str, body: str, files: List[str], cc: str = "") -> None:
 
 def save_page_screenshot(page) -> str:
     """Capture the SAP window while Playwright still has the page open."""
+    existing = (os.environ.get("RPA_ERROR_SCREENSHOT") or "").strip()
+    if existing and os.path.isfile(existing) and os.path.getsize(existing) > 0:
+        return existing
     dest_dir = os.path.join(log_dir(), "alerts")
     os.makedirs(dest_dir, exist_ok=True)
     path = os.path.join(dest_dir, f"rpa-error-{datetime.now():%Y%m%d-%H%M%S}.png")
-    page.screenshot(path=path, timeout=8000)
+    try:
+        page.screenshot(path=path, timeout=8000)
+    except Exception as e:
+        _log(f"Error screenshot failed: {e}")
+        return ""
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         os.environ["RPA_ERROR_SCREENSHOT"] = path
         return path
@@ -751,13 +758,121 @@ def _worker_for_this_process() -> Optional[dict]:
     return None
 
 
+_JARGON = (
+    "timeout",
+    "locator",
+    "selector",
+    "playwright",
+    "traceback",
+    "target closed",
+    "target page",
+    "call log",
+    "strict mode",
+    "waiting for",
+    "browser",
+    "net::",
+    "econn",
+    "cdp",
+    "stack",
+)
+
+
+def _screen_message(error: str) -> str:
+    """A short on-screen message, or blank when the text is only tooling noise."""
+    raw = redact_secrets(str(error or "")).strip()
+    line = ""
+    for part in reversed(raw.splitlines()):
+        part = part.strip().lstrip("-").strip()
+        if not part or part.startswith("File ") or part.lower().startswith(("traceback", "call log")):
+            continue
+        line = part
+        break
+    if ": " in line:
+        head, tail = line.split(": ", 1)
+        if head.endswith("Error") or head.endswith("Exception"):
+            line = tail.strip()
+    low = line.lower()
+    if not line or len(line) > 180 or any(mark in low for mark in _JARGON):
+        return ""
+    return line
+
+
+def _worker_port(worker: Optional[dict]) -> int:
+    raw = (worker or {}).get("chrome_port") or os.environ.get("RPA_CHROME_DEBUG_PORT") or ""
+    try:
+        return int(str(raw).strip() or 0)
+    except ValueError:
+        return 0
+
+
+def _error_screenshots(worker: Optional[dict], extra_files: Optional[List[str]]) -> List[str]:
+    """The browser window only. Logs and the desktop shot stay off this email."""
+    shots: List[str] = []
+
+    def add(path: str) -> None:
+        path = (path or "").strip()
+        if not path or not os.path.isfile(path):
+            return
+        if not path.lower().endswith((".png", ".jpg", ".jpeg")):
+            return
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return
+        if size <= 0 or size > _MAX_ATTACH_BYTES:
+            return
+        ap = os.path.abspath(path)
+        if ap in {os.path.abspath(p) for p in shots}:
+            return
+        shots.append(ap)
+
+    for path in extra_files or []:
+        add(path)
+    add(os.environ.get("RPA_ERROR_SCREENSHOT") or "")
+    if shots:
+        return shots[:1]
+
+    port = _worker_port(worker)
+    if not port:
+        return []
+    out_dir = os.path.join(log_dir(), "alerts", datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(out_dir, exist_ok=True)
+    for path in capture_cdp_screenshots(port, out_dir):
+        add(path)
+        if shots:
+            break
+    return shots[:1]
+
+
+def _simple_error_body(label: str, upload_file: str, error: str, has_shot: bool) -> str:
+    when = datetime.now().strftime("%d %b %Y, %H:%M")
+    file_name = os.path.basename(upload_file) if upload_file else ""
+    lines = [
+        "This job stopped before it finished.",
+        "",
+        f"Job: {label}",
+    ]
+    if file_name:
+        lines.append(f"File: {file_name}")
+    lines.append(f"When: {when}")
+    message = _screen_message(error)
+    if message:
+        lines.extend(["", f"Message: {message}"])
+    lines.append("")
+    if has_shot:
+        lines.append("The attached picture is the screen at that moment.")
+    else:
+        lines.append("The window had already closed, so there is no picture of the screen.")
+    return "\n".join(lines)
+
+
 def send_error_alert(
     error: str,
     *,
     extra_files: Optional[List[str]] = None,
     worker: Optional[dict] = None,
 ) -> None:
-    """Email screenshots + logs when an RPA worker fails (not a hang)."""
+    """Short email plus the browser picture when an RPA worker fails."""
     to = alert_emails()
     if not to:
         _log("RPA failed but no alert emails in Settings — skipping error email")
@@ -779,31 +894,21 @@ def send_error_alert(
             run = get_run(rid)
     except Exception:
         run = None
-    shots = [p for p in (extra_files or []) if p]
-    env_shot = (os.environ.get("RPA_ERROR_SCREENSHOT") or "").strip()
-    if env_shot:
-        shots.append(env_shot)
     mail_from = _mail_from_for_alert(worker)
-    headline = (
-        "RPA JOB FAILED\n"
-        "The worker exited with an error. Screenshots and logs are below.\n"
-        f"Error: {redact_secrets(str(error or '')[:800])}\n"
-        f"Original W1 sender: {mail_from or '(not captured)'}"
+    label = (
+        (run or {}).get("label")
+        or (worker or {}).get("label")
+        or (worker or {}).get("rpa_id")
+        or "Job"
     )
+    upload = (worker or {}).get("upload_file") or ""
+    file_name = os.path.basename(upload) if upload else ""
     try:
-        body, files = gather_evidence(
-            run,
-            worker,
-            headline=headline,
-            extra_files=shots,
-        )
-        label = (
-            (run or {}).get("label")
-            or (worker or {}).get("label")
-            or (worker or {}).get("rpa_id")
-            or "RPA"
-        )
-        subject = f"[ALERT] RPA failed — {label}"
+        files = _error_screenshots(worker, extra_files)
+        body = _simple_error_body(label, upload, error, bool(files))
+        subject = f"Stopped: {label}"
+        if file_name:
+            subject = f"Stopped: {label} ({file_name})"
         _send(subject, body, files, cc=mail_from)
         _log(
             f"Sent error alert for {label} to {to}"

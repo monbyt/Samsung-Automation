@@ -374,15 +374,34 @@ def run_rpa(
         print(f"[RPA] {job['name']} complete.")
         finish_step("rpa", "ok", f"{job['name']} finished")
 
+        digest_facts = _collect_oc_facts(
+            rpa_id,
+            job,
+            upload_file=used_path or upload_file,
+            upload_dir=resolved_upload_dir,
+            download_dir=resolved_download_dir,
+        )
+        email_info = None
         if send_email:
-            _maybe_send_email(
+            email_info = _maybe_send_email(
                 rpa_id,
                 upload_dir=resolved_upload_dir,
                 attach_dir=resolved_download_dir,
                 source_upload_file=used_path or upload_file,
             )
         else:
+            email_info = {"skipped": "Email deferred until remaining files are processed"}
             _log("Deferring email send until remaining download files are processed.")
+        _record_oc_digest(
+            rpa_id,
+            job,
+            status="ok",
+            upload_file=used_path or upload_file,
+            upload_dir=resolved_upload_dir,
+            download_dir=resolved_download_dir,
+            email_info=email_info,
+            facts=digest_facts,
+        )
 
         # Chain to next step if configured
         next_id = job.get("next_rpa") or ""
@@ -410,6 +429,15 @@ def run_rpa(
         if owns_run:
             finish_run("cancelled", str(e))
         print(f"[RPA] {job['name']} cancelled: {e}")
+        _record_oc_digest(
+            rpa_id,
+            job,
+            status="cancelled",
+            message=str(e),
+            upload_file=used_path or upload_file,
+            upload_dir=resolved_upload_dir,
+            download_dir=resolved_download_dir,
+        )
         raise
 
     except Exception as e:
@@ -422,6 +450,15 @@ def run_rpa(
         finish_step("rpa", "error", str(e))
         if owns_run:
             finish_run("error", str(e))
+        _record_oc_digest(
+            rpa_id,
+            job,
+            status="error",
+            message=str(e),
+            upload_file=used_path or upload_file,
+            upload_dir=resolved_upload_dir,
+            download_dir=resolved_download_dir,
+        )
         try:
             from rpa.hang_alert import send_error_alert
             send_error_alert(
@@ -447,12 +484,65 @@ def run_rpa(
     return result
 
 
+def _collect_oc_facts(
+    rpa_id: str,
+    job: dict,
+    *,
+    upload_file: Optional[str] = None,
+    upload_dir: str = "",
+    download_dir: str = "",
+) -> Optional[dict]:
+    try:
+        from mail.oc_digest import collect_oc_facts, is_oc_rpa
+        if not is_oc_rpa(rpa_id, job.get("name") or ""):
+            return None
+        return collect_oc_facts(
+            rpa_id=rpa_id,
+            job=job,
+            upload_file=upload_file or "",
+            upload_dir=upload_dir or "",
+            download_dir=download_dir or "",
+        )
+    except Exception as e:
+        _log(f"OC digest snapshot skipped: {e}")
+        return None
+
+
+def _record_oc_digest(
+    rpa_id: str,
+    job: dict,
+    *,
+    status: str,
+    message: str = "",
+    upload_file: Optional[str] = None,
+    upload_dir: str = "",
+    download_dir: str = "",
+    email_info: Optional[dict] = None,
+    facts: Optional[dict] = None,
+) -> None:
+    try:
+        from mail.oc_digest import record_rpa_run_event
+        record_rpa_run_event(
+            rpa_id=rpa_id,
+            job=job,
+            status=status,
+            message=message,
+            upload_file=upload_file or "",
+            upload_dir=upload_dir or "",
+            download_dir=download_dir or "",
+            email_info=email_info,
+            facts=facts,
+        )
+    except Exception as e:
+        _log(f"OC digest capture skipped: {e}")
+
+
 def _maybe_send_email(
     rpa_id: str,
     upload_dir: str = "",
     attach_dir: str = "",
     source_upload_file: str = "",
-) -> None:
+) -> dict:
     """If an enabled email job is configured for this RPA, send it."""
     from pipeline_progress import begin_step, check_cancelled, finish_step, skip_step
 
@@ -462,18 +552,18 @@ def _maybe_send_email(
         _log(f"Email module unavailable, skipping send: {e}")
         skip_step("email", f"Unavailable: {e}")
         skip_step("cleanup", "No email send")
-        return
+        return {"skipped": f"Email module unavailable: {e}"}
 
     job = get_email_job_for_rpa(rpa_id)
     if not job:
         skip_step("email", "No email job linked")
         skip_step("cleanup", "No email send")
-        return
+        return {"skipped": "No email job linked"}
     if not job.get("enabled"):
         _log(f"Email job for {rpa_id} is disabled, skipping.")
         skip_step("email", "Email job disabled")
         skip_step("cleanup", "No email send")
-        return
+        return {"skipped": "Email job disabled"}
 
     check_cancelled()
     _log(f"Sending email for {rpa_id} to {job.get('to_emails')}"
@@ -497,6 +587,7 @@ def _maybe_send_email(
             f"Removed {len(cleaned)} file(s)" if cleaned else "Folder already empty",
         )
         _log(f"Email sent for {rpa_id}. Cleaned: {cleaned}")
+        return result if isinstance(result, dict) else {"status": "ok"}
     except Exception as e:
         from pipeline_progress import PipelineCancelled
         if isinstance(e, PipelineCancelled):
@@ -509,6 +600,7 @@ def _maybe_send_email(
             mark_send_finished(rpa_id, "error", err)
         except Exception:
             pass
+        return {"skipped": f"Email send failed: {e}"}
 
 
 def _worker_slot_dirs(base_upload: str, base_download: str, index: int, token: str) -> Tuple[str, str]:

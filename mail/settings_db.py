@@ -44,6 +44,14 @@ ALERT_KEYS = (
     "stuck_minutes",
 )
 
+DIGEST_KEYS = (
+    "digest_enabled",
+    "digest_time",
+    "digest_emails",
+    "digest_skip_empty",
+    "digest_last_sent_at",
+)
+
 NERP_KEYS = (
     "nerp_env",
 )
@@ -52,6 +60,9 @@ DEFAULTS = {
     "agent_mail_component_id": "knox_portal_mail-1irUi",
     "stuck_minutes": "60",
     "nerp_env": "prod",
+    "digest_enabled": "1",
+    "digest_time": "18:00",
+    "digest_skip_empty": "1",
 }
 
 

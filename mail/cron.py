@@ -108,6 +108,11 @@ def run_job(job_id: str) -> dict:
                     skip_step("email", "No downloads")
                     skip_step("cleanup", "No downloads")
                     finish_run("ok", "No new mail", run_id=run_id)
+                    try:
+                        from mail.oc_digest import record_idle_check
+                        record_idle_check(job_id, 0)
+                    except Exception:
+                        pass
 
             record_monitor_run(summary, job_id=job_id)
         except PipelineCancelled as e:
@@ -189,6 +194,11 @@ def tick():
                 "errors": [err],
                 "job_id": job["job_id"],
             })
+    try:
+        from mail.oc_digest import maybe_send_daily_digest
+        maybe_send_daily_digest()
+    except Exception as e:
+        print(f"OC digest tick skipped: {e}", flush=True)
 
 
 def scheduler_loop():

@@ -41,7 +41,7 @@ th { color: #8a94a6; font-weight: 500; white-space: nowrap; }
 tr:hover td { background: #1b2130; }
 .ok { color: #4ec98a; } .err { color: #ef6a6a; }
 .muted { color: #8a94a6; font-size: 13px; }
-textarea, input[type=text], input[type=number], input[type=password], select {
+textarea, input[type=text], input[type=number], input[type=password], input[type=time], select {
   background: #0d1017; color: #e6e9ef; border: 1px solid #232a38;
   border-radius: 8px; padding: 10px; font-family: inherit; font-size: 13px; width: 100%; }
 textarea { min-height: 120px; font-family: monospace; }
@@ -150,6 +150,16 @@ def settings_page():
                 set_setting("alert_cc_emails", form.get("alert_cc_emails", ""))
                 set_setting("stuck_minutes", form.get("stuck_minutes", "60"))
                 msg = "Alert settings saved."
+            elif section == "digest":
+                set_setting("digest_enabled", "1" if form.get("digest_enabled") else "0")
+                set_setting("digest_time", form.get("digest_time", "18:00") or "18:00")
+                set_setting("digest_emails", form.get("digest_emails", ""))
+                set_setting("digest_skip_empty", "1" if form.get("digest_skip_empty") else "0")
+                msg = "Order Creation digest settings saved."
+            elif section == "digest_test":
+                from mail.oc_digest import send_digest
+                to = send_digest(force=True)
+                msg = f"Order Creation digest sent to {to}." if to else "Digest marked sent (no OC runs in window)."
             elif section == "alert_test":
                 from rpa.hang_alert import send_test_alert
                 to = send_test_alert()
@@ -167,6 +177,10 @@ def settings_page():
     alert_to = get_setting("alert_emails", "")
     alert_cc = get_setting("alert_cc_emails", "")
     stuck = get_setting("stuck_minutes", "60") or "60"
+    digest_on = (get_setting("digest_enabled", "1") or "1").strip() not in ("0", "false", "no", "off")
+    digest_time = get_setting("digest_time", "18:00") or "18:00"
+    digest_emails = get_setting("digest_emails", "")
+    digest_skip = (get_setting("digest_skip_empty", "1") or "1").strip() not in ("0", "false", "no", "off")
     nerp_env = get_nerp_env()
     nerp_url = get_nerp_url()
     nerp_prod_sel = "selected" if nerp_env == "prod" else ""
@@ -195,7 +209,7 @@ def settings_page():
 
     body = f"""
     <h1>Settings</h1>
-    <div class="sub">W1 mail login, NERP login, Agent API, and overnight hang alerts.</div>
+    <div class="sub">W1 mail login, NERP login, Agent API, hang alerts, and the Order Creation daily digest.</div>
     {_flash(msg, ok)}
     <div class="panel">
       <h2>NERP environment</h2>
@@ -281,8 +295,8 @@ def settings_page():
         If a Live mail or RPA session is still running after this many minutes
         (overnight hang, SAP dialog, dead click), send one email with screenshots
         and logs, then close that session and clean its upload/PDF files.
-        The same email (screenshots + logs, username/password stripped) is also
-        sent when an RPA worker fails. Other parallel workers keep running.
+        When an RPA worker fails, a short email goes out with a picture of the
+        screen. Other parallel workers keep running.
         <b>To</b> is you (this field). Optional <b>Cc</b> always gets hang/fail alerts.
         If W1 From was captured, that sender is Cc'd as well. Test alert is To-only
         plus your extra Cc (not the order sender).
@@ -312,6 +326,51 @@ def settings_page():
         <input type="hidden" name="section" value="alert_test">
         <button type="submit">Send test alert</button>
         <span class="muted"> Needs Agent API + alert address above.</span>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Order Creation daily digest</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Once a day, email the order-creation team what was actually created:
+        sales order numbers, sold-to, sales org (7101/7104), whether the P/I
+        went out, and anything that still needs a look (missing P/I, mixed
+        org on the Excel, request that did not finish). Recipients default to
+        <b>Alert to</b> above if the digest list is blank.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="digest">
+        <div class="form-row">
+          <label>
+            <input type="checkbox" name="digest_enabled" value="1"
+                   {"checked" if digest_on else ""}>
+            Send a daily Order Creation digest
+          </label>
+        </div>
+        <div class="grid-2">
+          <div class="form-row">
+            <label for="digest_time">Send at (local time)</label>
+            <input type="time" id="digest_time" name="digest_time"
+                   value="{digest_time}">
+          </div>
+          <div class="form-row">
+            <label for="digest_emails">Digest to (optional — defaults to Alert to)</label>
+            <input type="text" id="digest_emails" name="digest_emails"
+                   value="{digest_emails}" placeholder="team@samsung.com">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>
+            <input type="checkbox" name="digest_skip_empty" value="1"
+                   {"checked" if digest_skip else ""}>
+            Skip the email when no orders were created since the last digest
+          </label>
+        </div>
+        <button type="submit" class="btn-run">Save digest</button>
+      </form>
+      <form method="post" style="margin-top:12px">
+        <input type="hidden" name="section" value="digest_test">
+        <button type="submit">Send digest now</button>
+        <span class="muted"> Uses the same Agent mail path as hang alerts.</span>
       </form>
     </div>
     """

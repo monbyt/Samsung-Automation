@@ -629,6 +629,10 @@ def send_for_rpa(
         files=files,
         cc=job.get("cc_emails", "") or "",
     )
+    result = dict(result) if isinstance(result, dict) else {"response": result}
+    result["to"] = to_addr
+    result["cc"] = job.get("cc_emails", "") or ""
+    result["files"] = [os.path.basename(p) for p in files]
 
     if cleanup:
         deleted: list[str] = []

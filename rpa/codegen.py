@@ -309,6 +309,48 @@ def _inject_sales_org(source: str) -> str:
     return "\n".join(out)
 
 
+def _ensure_page_binding(source: str) -> str:
+    """Codegen with --user-data-dir often uses `page` without assigning it.
+
+    Sticky Record opens a persistent profile; Playwright sometimes emits only
+    context = launch_persistent_context(...) and then page.goto(...) → NameError.
+    """
+    if re.search(r"(?m)^\s*page\s*=", source):
+        return source
+    if not re.search(r"\bpage\.", source):
+        return source
+
+    lines = source.splitlines(keepends=True)
+    out: list[str] = []
+    injected = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        if not injected and re.search(
+            r"context\s*=\s*.*\.(launch_persistent_context|new_context)\(",
+            line,
+        ):
+            buf = line
+            while buf.count("(") > buf.count(")") and i + 1 < len(lines):
+                i += 1
+                out.append(lines[i])
+                buf += lines[i]
+            indent_m = re.match(r"^(\s*)", line)
+            indent = indent_m.group(1) if indent_m else "    "
+            out.append(
+                f"{indent}page = context.pages[0] if context.pages else context.new_page()\n"
+            )
+            out.append(f'{indent}print("[RPA] Bound page from sticky context")\n')
+            injected = True
+            _log("Injected missing page = context.pages[0] (sticky codegen omit)")
+        i += 1
+
+    if not injected:
+        _log("WARNING: script uses page. but no context= launch — cannot auto-bind")
+    return "".join(out)
+
+
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
@@ -317,6 +359,7 @@ def prepare_script_source(
     from rpa.debug_log import debug_log
 
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
+    source = _ensure_page_binding(source)
     source = _sanitize_upload_literals(source)
     source = _inject_nerp_url(source)
     source = _inject_sso_credentials(source)

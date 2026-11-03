@@ -38,6 +38,8 @@ rpa_jobs = Table(
     Column("last_message", Text),
     Column("created_at", DateTime),
     Column("next_rpa", String(64)),
+    # Keep cookies/MFA in chrome-profile-rpa/<rpa_id>/ across record + run.
+    Column("sticky_chrome", Integer, default=0),
 )
 
 _BUILTIN_IDS = frozenset({"nerp_upload_pi"})
@@ -63,6 +65,10 @@ def _migrate_rpa_columns():
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN download_folder VARCHAR(500)"))
         if "next_rpa" not in cols:
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN next_rpa VARCHAR(64)"))
+        if "sticky_chrome" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE rpa_jobs ADD COLUMN sticky_chrome INTEGER DEFAULT 0"
+            ))
         conn.execute(
             sqltext(
                 "UPDATE rpa_jobs SET start_url = :url "
@@ -94,6 +100,12 @@ def _row_to_dict(row):
         "description": row.description or "",
         "trigger_mail_job": row.trigger_mail_job or "",
         "next_rpa": row.next_rpa or "",
+        "sticky_chrome": bool(getattr(row, "sticky_chrome", 0)),
+        "chrome_profile": (
+            config.rpa_sticky_profile_dir(row.rpa_id)
+            if getattr(row, "sticky_chrome", 0)
+            else ""
+        ),
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "last_status": row.last_status,
@@ -188,6 +200,7 @@ def add_rpa_job(
     description: str = "",
     trigger_mail_job: str = "",
     next_rpa: str = "",
+    sticky_chrome: bool = False,
     enabled: bool = False,
 ) -> str:
     slug = _normalize_rpa_id(rpa_id)
@@ -209,9 +222,12 @@ def add_rpa_job(
             description=description.strip(),
             trigger_mail_job=(trigger_mail_job or "").strip(),
             next_rpa=(next_rpa or "").strip(),
+            sticky_chrome=1 if sticky_chrome else 0,
             enabled=1 if enabled else 0,
             created_at=now,
         ))
+    if sticky_chrome:
+        os.makedirs(config.rpa_sticky_profile_dir(slug), exist_ok=True)
     return slug
 
 
@@ -237,13 +253,15 @@ def rpa_by_mail_job():
 def update_rpa_job(rpa_id: str, **fields):
     allowed = {
         "name", "description", "trigger_mail_job", "enabled", "start_url",
-        "upload_folder", "download_folder", "next_rpa",
+        "upload_folder", "download_folder", "next_rpa", "sticky_chrome",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
+    if "sticky_chrome" in updates:
+        updates["sticky_chrome"] = 1 if updates["sticky_chrome"] else 0
     if "trigger_mail_job" in updates and updates["trigger_mail_job"] is None:
         updates["trigger_mail_job"] = ""
     if "start_url" in updates and updates["start_url"] is not None:
@@ -253,6 +271,8 @@ def update_rpa_job(rpa_id: str, **fields):
         conn.execute(
             update(rpa_jobs).where(rpa_jobs.c.rpa_id == rpa_id).values(**updates)
         )
+    if updates.get("sticky_chrome"):
+        os.makedirs(config.rpa_sticky_profile_dir(rpa_id), exist_ok=True)
 
 
 def delete_rpa_job(rpa_id: str):

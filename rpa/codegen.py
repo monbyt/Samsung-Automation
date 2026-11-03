@@ -443,6 +443,50 @@ def _patch_file_chooser_upload() -> None:
     _log(f"File picker auto-upload enabled → {_upload_file_path()}")
 
 
+class _StickyBrowser:
+    """Wrap a persistent context so codegen's launch()+new_context() keeps cookies.
+
+    Recorded scripts call chromium.launch() then browser.new_context(). When
+    RPA_CHROME_PROFILE is set we open a persistent profile instead and reuse it.
+    """
+
+    def __init__(self, context):
+        self._context = context
+
+    def new_context(self, *args, **kwargs):
+        return self._context
+
+    def new_page(self, *args, **kwargs):
+        return self._context.new_page(*args, **kwargs)
+
+    def close(self):
+        try:
+            self._context.close()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._context, name)
+
+
+def _chromium_launch_args(kwargs: dict) -> tuple[dict, str]:
+    """Shared Chromium flags for launch / persistent (no installed Chrome channel)."""
+    kwargs = dict(kwargs)
+    kwargs.pop("channel", None)
+    extra = list(kwargs.get("args") or [])
+    extra.extend([
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+    ])
+    port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
+    if port and not any(str(a).startswith("--remote-debugging-port") for a in extra):
+        extra.append(f"--remote-debugging-port={port}")
+    kwargs["args"] = extra
+    kwargs.setdefault("headless", False)
+    return kwargs, port
+
+
 def _patch_playwright_no_timeout() -> None:
     global _PLAYWRIGHT_PATCHED
     if _PLAYWRIGHT_PATCHED:
@@ -463,35 +507,11 @@ def _patch_playwright_no_timeout() -> None:
 
     Browser.new_context = new_context
 
-    _orig_launch = BrowserType.launch
-
-    def launch(self, *args, **kwargs):
-        # Never use installed Google Chrome (channel="chrome"). That executable
-        # has a process singleton: the 2nd worker waits until the 1st closes.
-        # Playwright's bundled Chromium can run many windows at once.
-        kwargs = dict(kwargs)
-        kwargs.pop("channel", None)
-        extra = list(kwargs.get("args") or [])
-        extra.extend([
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-session-crashed-bubble",
-        ])
-        port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
-        if port and not any(str(a).startswith("--remote-debugging-port") for a in extra):
-            extra.append(f"--remote-debugging-port={port}")
-        kwargs["args"] = extra
-        kwargs.setdefault("headless", False)
-        _log(f"Playwright Chromium launch (not installed Chrome) port={port or '-'}")
-        return _orig_launch(self, *args, **kwargs)
-
-    BrowserType.launch = launch
-
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
-        kwargs = dict(kwargs)
-        kwargs.pop("channel", None)
+        kwargs, _port = _chromium_launch_args(kwargs)
+        kwargs.setdefault("accept_downloads", True)
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
         if profile:
             os.makedirs(profile, exist_ok=True)
@@ -499,10 +519,34 @@ def _patch_playwright_no_timeout() -> None:
                 args = (profile,) + tuple(args[1:])
             else:
                 kwargs["user_data_dir"] = profile
-        _log(f"Playwright Chromium persistent profile={profile or kwargs.get('user_data_dir')}")
+        _log(
+            f"Playwright Chromium persistent profile="
+            f"{profile or kwargs.get('user_data_dir')}"
+        )
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context
+
+    _orig_launch = BrowserType.launch
+
+    def launch(self, *args, **kwargs):
+        # Never use installed Google Chrome (channel="chrome"). That executable
+        # has a process singleton: the 2nd worker waits until the 1st closes.
+        # Playwright's bundled Chromium can run many windows at once.
+        kwargs, port = _chromium_launch_args(kwargs)
+        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
+        if profile:
+            # Honor sticky / worker profile: codegen scripts use launch()+new_context()
+            # which would otherwise throw away cookies every run.
+            os.makedirs(profile, exist_ok=True)
+            kwargs.setdefault("accept_downloads", True)
+            _log(f"Playwright Chromium sticky profile={profile} port={port or '-'}")
+            ctx = _disable(_orig_persistent(self, profile, **kwargs))
+            return _StickyBrowser(ctx)
+        _log(f"Playwright Chromium launch (not installed Chrome) port={port or '-'}")
+        return _orig_launch(self, *args, **kwargs)
+
+    BrowserType.launch = launch
     _PLAYWRIGHT_PATCHED = True
 
 
@@ -623,7 +667,12 @@ def save_script(rpa_id: str, content: str) -> str:
     return path
 
 
-def launch_recorder(rpa_id: str, start_url: str) -> str:
+def launch_recorder(
+    rpa_id: str,
+    start_url: str,
+    *,
+    user_data_dir: Optional[str] = None,
+) -> str:
     _validate_rpa_id(rpa_id)
     url = (start_url or "").strip()
     if not url:
@@ -632,21 +681,25 @@ def launch_recorder(rpa_id: str, start_url: str) -> str:
     path = script_path(rpa_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    profile = (user_data_dir or "").strip()
+    if profile:
+        os.makedirs(profile, exist_ok=True)
+        _log(f"Recorder sticky profile: {profile}")
+
+    cmd = [
+        sys.executable, "-m", "playwright", "codegen", url,
+        "-o", path, "--target", "python", "-b", "chromium", "--channel", "chrome",
+    ]
+    if profile:
+        cmd.extend(["--user-data-dir", profile])
+
     if sys.platform == "win32":
-        shell_cmd = (
-            f'start "Playwright Codegen — {rpa_id}" '
-            f'"{sys.executable}" -m playwright codegen '
-            f'"{url}" -o "{path}" --target python -b chromium --channel chrome'
-        )
+        # Quote each arg for `start` so paths with spaces stay intact.
+        quoted = " ".join(f'"{c}"' for c in cmd)
+        shell_cmd = f'start "Playwright Codegen — {rpa_id}" {quoted}'
         subprocess.Popen(shell_cmd, shell=True, cwd=config.BASE_DIR)
     else:
-        subprocess.Popen(
-            [
-                sys.executable, "-m", "playwright", "codegen", url,
-                "-o", path, "--target", "python", "-b", "chromium", "--channel", "chrome",
-            ],
-            cwd=config.BASE_DIR,
-        )
+        subprocess.Popen(cmd, cwd=config.BASE_DIR)
 
     return path
 

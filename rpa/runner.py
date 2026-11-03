@@ -359,12 +359,25 @@ def run_rpa(
             if owns_run:
                 begin_step("rpa", f"Running {job['name']}")
             check_cancelled()
-            run_recorded_script(
-                rpa_id,
-                upload_file=path,
-                upload_dir=resolved_upload_dir,
-                download_dir=resolved_download_dir,
-            )
+            prev_profile = os.environ.get("RPA_CHROME_PROFILE")
+            if job.get("sticky_chrome"):
+                sticky = config.rpa_sticky_profile_dir(rpa_id)
+                os.makedirs(sticky, exist_ok=True)
+                os.environ["RPA_CHROME_PROFILE"] = sticky
+                _log(f"Sticky Chrome profile: {sticky}")
+            try:
+                run_recorded_script(
+                    rpa_id,
+                    upload_file=path,
+                    upload_dir=resolved_upload_dir,
+                    download_dir=resolved_download_dir,
+                )
+            finally:
+                if job.get("sticky_chrome"):
+                    if prev_profile is None:
+                        os.environ.pop("RPA_CHROME_PROFILE", None)
+                    else:
+                        os.environ["RPA_CHROME_PROFILE"] = prev_profile
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 
@@ -854,9 +867,16 @@ def trigger_for_mail_job(
         base_upload, base_download = _resolve_rpa_folders(rpa)
         token = datetime.now().strftime("%H%M%S")
         _purge_stale_worker_dirs(base_upload, base_download)
+        sticky = bool(rpa.get("sticky_chrome"))
+        sticky_profile = config.rpa_sticky_profile_dir(rpa_id) if sticky else ""
+        # One Chrome profile cannot be opened by two processes — serialize sticky jobs.
+        batch_workers = 1 if sticky else workers
+        if sticky:
+            os.makedirs(sticky_profile, exist_ok=True)
+            _log(f"Sticky Chrome for {rpa_id}: {sticky_profile} (parallel off)")
         payloads = []
         for i, path in enumerate(files):
-            chrome_profile = _chrome_profile_dir(i + 1, token)
+            chrome_profile = sticky_profile if sticky else _chrome_profile_dir(i + 1, token)
             if path:
                 w_upload, w_download = _worker_slot_dirs(base_upload, base_download, i + 1, token)
                 label = (
@@ -879,7 +899,7 @@ def trigger_for_mail_job(
 
         _log(
             f"===== RPA BATCH: {len(payloads)} Excel file(s) → "
-            f"up to {workers} Chrome windows ====="
+            f"up to {batch_workers} Chrome windows ====="
         )
         if len(payloads) == 1:
             _log(
@@ -887,7 +907,7 @@ def trigger_for_mail_job(
                 "Need 2+ unread mail Excels for parallel windows."
             )
 
-        if workers <= 1:
+        if batch_workers <= 1:
             for payload in payloads:
                 check_cancelled()
                 if payload.get("chrome_profile"):
@@ -920,10 +940,10 @@ def trigger_for_mail_job(
         try:
             while queue or active:
                 check_cancelled()
-                while queue and len(active) < workers:
+                while queue and len(active) < batch_workers:
                     proc, payload, result_path = _start_worker_process(queue.pop(0))
                     active.append((proc, payload, result_path))
-                    _log(f"Live workers now: {len(active)} / cap {workers}")
+                    _log(f"Live workers now: {len(active)} / cap {batch_workers}")
                 still = []
                 for proc, payload, result_path in active:
                     rc = proc.poll()

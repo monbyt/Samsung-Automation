@@ -1162,7 +1162,7 @@ def rpa_list():
       <td class="muted" style="max-width:220px;word-break:break-all">{{ r.start_url or '—' }}</td>
       <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual</span>{% endif %}</td>
       <td>{% if r.next_rpa %}<span class="pill" title="{{ r.next_rpa }}">→ {{ r.next_rpa_name or r.next_rpa }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-      <td>{% if r.tool == 'codegen' %}{% if r.has_script %}<span class="ok">saved</span>{% else %}<span class="err">not recorded</span>{% endif %}{% else %}<span class="muted">built-in</span>{% endif %}</td>
+      <td>{% if r.tool == 'codegen' %}{% if r.has_script %}<span class="ok">saved</span>{% else %}<span class="err">not recorded</span>{% endif %}{% if r.sticky_chrome %} <span class="pill" title="{{ r.chrome_profile }}">sticky</span>{% endif %}{% else %}<span class="muted">built-in</span>{% endif %}</td>
       <td>{{ r.last_run or '—' }}</td>
       <td class="{{ 'ok' if r.last_status=='ok' else 'err' if r.last_status else '' }}">{{ r.last_status or '—' }}</td>
       <td style="white-space:nowrap">
@@ -1198,10 +1198,12 @@ def rpa_list():
   <div class="panel"><h2>Recording your own script</h2>
     <p class="muted" style="line-height:1.6">
       1. Click <b>+ New recorded script</b> and set the <b>start URL</b><br>
-      2. Click <b>Record</b> — Playwright codegen opens in a new window<br>
-      3. Perform your steps, then close the codegen window (script auto-saves)<br>
-      4. Or paste/edit the Python script on the Edit page<br>
-      5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download
+      2. For Tableau / MFA sites, enable <b>Keep signed-in Chrome profile</b><br>
+      3. Click <b>Record</b> — Playwright codegen opens (sticky jobs reuse that profile)<br>
+      4. Sign in + MFA once, perform your steps, then close codegen (script auto-saves)<br>
+      5. Or paste/edit the Python script on the Edit page<br>
+      6. <b>Run</b> to execute — sticky jobs keep cookies so you stay signed in<br>
+      Profile folder is <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> (separate from W1/NERP).
     </p>
   </div>
   <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
@@ -1231,6 +1233,7 @@ def rpa_new():
         "description": "",
         "trigger_mail_job": "",
         "next_rpa": "",
+        "sticky_chrome": False,
         "enabled": False,
     }
     mail_jobs = list_jobs()
@@ -1243,6 +1246,7 @@ def rpa_new():
             "description": request.form.get("description", ""),
             "trigger_mail_job": request.form.get("trigger_mail_job", ""),
             "next_rpa": request.form.get("next_rpa", ""),
+            "sticky_chrome": request.form.get("sticky_chrome") == "on",
             "enabled": request.form.get("enabled") == "on",
         }
         try:
@@ -1253,6 +1257,7 @@ def rpa_new():
                 description=form["description"],
                 trigger_mail_job=form["trigger_mail_job"],
                 next_rpa=form["next_rpa"],
+                sticky_chrome=form["sticky_chrome"],
                 enabled=form["enabled"],
             )
             return redirect(url_for("rpa_edit", rpa_id=slug, msg="Created — click Record to capture steps"))
@@ -1284,6 +1289,8 @@ def rpa_new():
       </select></div>
     <div class="form-row"><label>Notes</label>
       <input type="text" name="description" value="{{ form.description }}"></div>
+    <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if form.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
+    <p class="muted">Uses <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> only — does not touch W1 or NERP profiles. Sign in once while recording; later Runs reuse cookies.</p>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
     <button type="submit">Create</button>
     <a href="/rpa"><button type="button">Cancel</button></a>
@@ -1320,6 +1327,7 @@ def rpa_edit(rpa_id):
                 fields["start_url"] = request.form.get("start_url", "").strip()
                 fields["upload_folder"] = request.form.get("upload_folder", "").strip()
                 fields["download_folder"] = request.form.get("download_folder", "").strip()
+                fields["sticky_chrome"] = request.form.get("sticky_chrome") == "on"
             update_rpa_job(rpa_id, **fields)
             if job["tool"] == "codegen" and "script" in request.form:
                 body = request.form.get("script", "")
@@ -1349,6 +1357,12 @@ def rpa_edit(rpa_id):
     <div class="form-row"><label>Download folder (Windows path)</label>
       <input type="text" name="download_folder" value="{{ job.download_folder }}" style="width:100%"
         placeholder="e.g. C:/Users/you/Desktop/Order-Results"></div>
+    <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if job.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
+    {% if job.sticky_chrome %}
+    <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder. W1/NERP profiles are untouched.</p>
+    {% else %}
+    <p class="muted">Off = fresh browser each run (fine for NERP SSO fill). On = cookies survive for MFA sites.</p>
+    {% endif %}
     <div class="form-row">
       <label>Recorded script {% if script_saved %}<span class="ok">(saved)</span>{% else %}<span class="err">(not recorded yet)</span>{% endif %}</label>
       <textarea name="script" rows="18" style="width:100%;font-family:monospace;font-size:12px" placeholder="Paste Playwright codegen output here, or click Record below.">{{ script_text }}</textarea>
@@ -1406,11 +1420,16 @@ def rpa_record(rpa_id):
         update_rpa_job(rpa_id, start_url=start_url)
 
     try:
-        path = launch_recorder(rpa_id, start_url)
+        profile = config.rpa_sticky_profile_dir(rpa_id) if job.get("sticky_chrome") else ""
+        path = launch_recorder(rpa_id, start_url, user_data_dir=profile or None)
+        sticky_note = f" Sticky profile: {os.path.basename(profile)}." if profile else ""
         return redirect(
             url_for(
                 "rpa_list",
-                msg=f"Recorder opened for '{rpa_id}'. Perform steps, close codegen when done. Saves to {os.path.basename(path)}",
+                msg=(
+                    f"Recorder opened for '{rpa_id}'. Perform steps, close codegen when done. "
+                    f"Saves to {os.path.basename(path)}.{sticky_note}"
+                ),
             )
         )
     except Exception as e:

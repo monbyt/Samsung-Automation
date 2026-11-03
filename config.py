@@ -113,6 +113,17 @@ NERP_PROGRAM_PI = "ZSDM31520"
 # Recorded Playwright codegen scripts (one .py per custom RPA job).
 RPA_SCRIPTS_DIR = os.path.join(BASE_DIR, "rpa", "scripts")
 
+# Sticky RPA Chrome profiles (cookies/MFA survive across runs). One folder per
+# rpa_id under here — never reuse chrome-profile/ (W1) or chrome-profile-nerp/.
+RPA_CHROME_PROFILE_ROOT = os.path.join(BASE_DIR, "chrome-profile-rpa")
+
+
+def rpa_sticky_profile_dir(rpa_id: str) -> str:
+    """Fixed Chrome user-data-dir for one RPA job (e.g. Tableau MFA session)."""
+    slug = (rpa_id or "").strip().lower() or "default"
+    return os.path.join(RPA_CHROME_PROFILE_ROOT, slug)
+
+
 # Max concurrent RPA Chrome windows after mail download (separate processes).
 # Each worker uses its own Chrome profile + upload/PDF folders.
 RPA_PARALLEL_WORKERS = int(os.environ.get("RPA_PARALLEL_WORKERS", "4"))

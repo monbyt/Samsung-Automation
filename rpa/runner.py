@@ -345,26 +345,42 @@ def run_rpa(
                 )
             _log(f"Upload folder: {resolved_upload_dir}")
             _log(f"Download folder: {resolved_download_dir}")
-            try:
-                path = _prepare_upload_file(upload_file, job)
-                used_path = path
-                _log(f"Resolved upload file: {path}")
+            # Tableau / MFA extract jobs: no Excel. Don't hunt mail folders or NERP Book1.
+            wants_upload = bool(
+                upload_file
+                or (job.get("upload_folder") or "").strip()
+                or (job.get("trigger_mail_job") or "").strip()
+            )
+            path = None
+            if job.get("sticky_chrome") and not wants_upload:
+                _log("Sticky job with no upload folder/mail trigger — skipping Excel prepare")
                 if owns_run:
-                    finish_step("prepare", "ok", os.path.basename(path))
-            except FileNotFoundError as e:
-                path = None
-                _log(f"No upload file: {e}")
-                if owns_run:
-                    finish_step("prepare", "ok", "No upload file (script may not need one)")
+                    finish_step("prepare", "ok", "No upload (extract-only job)")
+            else:
+                try:
+                    path = _prepare_upload_file(upload_file, job)
+                    used_path = path
+                    _log(f"Resolved upload file: {path}")
+                    if owns_run:
+                        finish_step("prepare", "ok", os.path.basename(path))
+                except FileNotFoundError as e:
+                    path = None
+                    _log(f"No upload file: {e}")
+                    if owns_run:
+                        finish_step("prepare", "ok", "No upload file (script may not need one)")
             if owns_run:
                 begin_step("rpa", f"Running {job['name']}")
             check_cancelled()
             prev_profile = os.environ.get("RPA_CHROME_PROFILE")
+            prev_sys_chrome = os.environ.get("RPA_USE_SYSTEM_CHROME")
             if job.get("sticky_chrome"):
                 sticky = config.rpa_sticky_profile_dir(rpa_id)
                 os.makedirs(sticky, exist_ok=True)
                 os.environ["RPA_CHROME_PROFILE"] = sticky
+                # Must match Record (--channel chrome) or MFA cookies are invisible.
+                os.environ["RPA_USE_SYSTEM_CHROME"] = "1"
                 _log(f"Sticky Chrome profile: {sticky}")
+                _log("RPA_USE_SYSTEM_CHROME=1 (installed Google Chrome, same as Record)")
             try:
                 run_recorded_script(
                     rpa_id,
@@ -378,6 +394,10 @@ def run_rpa(
                         os.environ.pop("RPA_CHROME_PROFILE", None)
                     else:
                         os.environ["RPA_CHROME_PROFILE"] = prev_profile
+                    if prev_sys_chrome is None:
+                        os.environ.pop("RPA_USE_SYSTEM_CHROME", None)
+                    else:
+                        os.environ["RPA_USE_SYSTEM_CHROME"] = prev_sys_chrome
         else:
             raise ValueError(f"Unsupported RPA tool: {job['tool']}")
 
@@ -795,6 +815,8 @@ def _start_worker_process(payload: dict):
     env["PYTHONPATH"] = config.BASE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     if payload.get("chrome_profile"):
         env["RPA_CHROME_PROFILE"] = payload["chrome_profile"]
+    if payload.get("use_system_chrome"):
+        env["RPA_USE_SYSTEM_CHROME"] = "1"
     if payload.get("chrome_port"):
         env["RPA_CHROME_DEBUG_PORT"] = str(payload["chrome_port"])
     worker_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
@@ -893,6 +915,7 @@ def trigger_for_mail_job(
                 "upload_dir": w_upload,
                 "download_dir": w_download,
                 "chrome_profile": chrome_profile,
+                "use_system_chrome": sticky,
                 "chrome_port": 9330 + i,
                 "label": label,
             })

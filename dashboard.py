@@ -1359,7 +1359,8 @@ def rpa_edit(rpa_id):
         placeholder="e.g. C:/Users/you/Desktop/Order-Results"></div>
     <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if job.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
     {% if job.sticky_chrome %}
-    <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder. W1/NERP profiles are untouched.</p>
+    <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder with <b>installed Chrome</b> (not Chromium). W1/NERP profiles are untouched.</p>
+    <p class="muted">Debug: after Record/Run, check the console for <code>STICKY PROFILE DEBUG</code> — Record and Run must show the <b>same</b> <code>user_data_dir</code>. Also open <code>.rpa_sticky_profile</code> in that folder; both actions append a line.</p>
     {% else %}
     <p class="muted">Off = fresh browser each run (fine for NERP SSO fill). On = cookies survive for MFA sites.</p>
     {% endif %}

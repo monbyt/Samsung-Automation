@@ -469,10 +469,55 @@ class _StickyBrowser:
         return getattr(self._context, name)
 
 
-def _chromium_launch_args(kwargs: dict) -> tuple[dict, str]:
-    """Shared Chromium flags for launch / persistent (no installed Chrome channel)."""
+def _use_system_chrome() -> bool:
+    """Sticky MFA profiles must use installed Chrome — same as Record (--channel chrome).
+
+    Bundled Chromium cannot read cookies written by Google Chrome into the profile,
+    which looks like 'sticky failed' / always redirected to sign-in.
+    """
+    return (os.environ.get("RPA_USE_SYSTEM_CHROME") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _log_profile_debug(profile: str, *, channel: str) -> None:
+    """Print enough for the operator to confirm Record and Run share one profile."""
+    profile = os.path.abspath(profile)
+    default = os.path.join(profile, "Default")
+    cookie_candidates = [
+        os.path.join(default, "Network", "Cookies"),
+        os.path.join(default, "Cookies"),
+    ]
+    cookie_path = next((p for p in cookie_candidates if os.path.isfile(p)), "")
+    marker = os.path.join(profile, ".rpa_sticky_profile")
+    try:
+        with open(marker, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now().isoformat()} channel={channel}\n")
+    except OSError:
+        pass
+    _log(f"===== STICKY PROFILE DEBUG =====")
+    _log(f"user_data_dir = {profile}")
+    _log(f"channel      = {channel}")
+    _log(f"Default/     = {'yes' if os.path.isdir(default) else 'NO (fresh profile)'}")
+    if cookie_path:
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(cookie_path))
+            _log(f"Cookies      = {cookie_path} (mtime {mtime:%Y-%m-%d %H:%M:%S})")
+        except OSError:
+            _log(f"Cookies      = {cookie_path}")
+    else:
+        _log("Cookies      = missing (not signed in yet, or wrong browser wrote them)")
+    _log(f"marker file  = {marker}")
+    _log(f"================================")
+
+
+def _chromium_launch_args(kwargs: dict, *, allow_system_chrome: bool = False) -> tuple[dict, str]:
+    """Shared Chromium flags. System Chrome only when sticky MFA needs it."""
     kwargs = dict(kwargs)
-    kwargs.pop("channel", None)
+    if allow_system_chrome and _use_system_chrome():
+        kwargs["channel"] = "chrome"
+    else:
+        kwargs.pop("channel", None)
     extra = list(kwargs.get("args") or [])
     extra.extend([
         "--no-first-run",
@@ -510,7 +555,8 @@ def _patch_playwright_no_timeout() -> None:
     _orig_persistent = BrowserType.launch_persistent_context
 
     def launch_persistent_context(self, *args, **kwargs):
-        kwargs, _port = _chromium_launch_args(kwargs)
+        sticky = _use_system_chrome()
+        kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=True)
         kwargs.setdefault("accept_downloads", True)
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
         if profile:
@@ -519,10 +565,17 @@ def _patch_playwright_no_timeout() -> None:
                 args = (profile,) + tuple(args[1:])
             else:
                 kwargs["user_data_dir"] = profile
-        _log(
-            f"Playwright Chromium persistent profile="
-            f"{profile or kwargs.get('user_data_dir')}"
-        )
+            channel = "chrome" if sticky else "chromium"
+            _log_profile_debug(profile, channel=channel)
+            _log(
+                f"Playwright persistent profile={profile} "
+                f"channel={channel} port={port or '-'}"
+            )
+        else:
+            _log(
+                f"Playwright Chromium persistent profile="
+                f"{kwargs.get('user_data_dir')}"
+            )
         return _disable(_orig_persistent(self, *args, **kwargs))
 
     BrowserType.launch_persistent_context = launch_persistent_context
@@ -530,17 +583,20 @@ def _patch_playwright_no_timeout() -> None:
     _orig_launch = BrowserType.launch
 
     def launch(self, *args, **kwargs):
-        # Never use installed Google Chrome (channel="chrome"). That executable
-        # has a process singleton: the 2nd worker waits until the 1st closes.
-        # Playwright's bundled Chromium can run many windows at once.
-        kwargs, port = _chromium_launch_args(kwargs)
+        # Parallel SAP workers: bundled Chromium (no channel) so many windows open.
+        # Sticky MFA jobs: installed Chrome — must match Record (--channel chrome).
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
+        sticky = bool(profile) and _use_system_chrome()
+        kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=sticky)
         if profile:
-            # Honor sticky / worker profile: codegen scripts use launch()+new_context()
-            # which would otherwise throw away cookies every run.
             os.makedirs(profile, exist_ok=True)
             kwargs.setdefault("accept_downloads", True)
-            _log(f"Playwright Chromium sticky profile={profile} port={port or '-'}")
+            channel = "chrome" if sticky else "chromium"
+            _log_profile_debug(profile, channel=channel)
+            _log(
+                f"Playwright sticky launch profile={profile} "
+                f"channel={channel} port={port or '-'}"
+            )
             ctx = _disable(_orig_persistent(self, profile, **kwargs))
             return _StickyBrowser(ctx)
         _log(f"Playwright Chromium launch (not installed Chrome) port={port or '-'}")
@@ -684,7 +740,9 @@ def launch_recorder(
     profile = (user_data_dir or "").strip()
     if profile:
         os.makedirs(profile, exist_ok=True)
+        _log_profile_debug(profile, channel="chrome")
         _log(f"Recorder sticky profile: {profile}")
+        _log("Sign in HERE — Run will reopen this exact folder with channel=chrome")
 
     cmd = [
         sys.executable, "-m", "playwright", "codegen", url,

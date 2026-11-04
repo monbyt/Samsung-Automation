@@ -351,6 +351,54 @@ def _ensure_page_binding(source: str) -> str:
     return "".join(out)
 
 
+_STICKY_AUTH_HINT_RE = re.compile(
+    r"verification|one[\s-]?time|otp|passcode|authenticator|security code|"
+    r"enter code|password|passwort|sign[\s-]?in|log[\s-]?in|username|"
+    r"user account|email address|e-mail|mfa|2fa|two[\s-]?factor",
+    re.I,
+)
+
+
+def _soften_sticky_auth_actions(source: str) -> str:
+    """On sticky MFA jobs, don't fail when login/OTP UI isn't there (already signed in).
+
+    Operator completes OTP once during Record. Later Runs should reuse cookies.
+    Recorded login/OTP clicks are wrapped in try/except so a signed-in session
+    skips them instead of NameError/timeout.
+    """
+    if not _use_system_chrome():
+        return source
+    out: list[str] = []
+    wrapped = 0
+    for line in source.splitlines(keepends=True):
+        raw = line.rstrip("\n")
+        stripped = raw.lstrip()
+        indent = raw[: len(raw) - len(stripped)]
+        is_action = any(
+            tok in stripped
+            for tok in (".fill(", ".click(", ".press(", ".type(", ".check(")
+        )
+        if (
+            is_action
+            and "print(" not in stripped
+            and not stripped.startswith("#")
+            and _STICKY_AUTH_HINT_RE.search(stripped)
+        ):
+            out.append(f"{indent}try:\n")
+            out.append(f"{indent}    {stripped}\n")
+            out.append(f"{indent}except Exception as _rpa_auth_skip:\n")
+            out.append(
+                f'{indent}    print("[RPA] Skip auth step (sticky session):", '
+                f"{stripped[:80]!r})\n"
+            )
+            wrapped += 1
+            continue
+        out.append(line)
+    if wrapped:
+        _log(f"Softened {wrapped} sticky login/OTP step(s) — safe if already signed in")
+    return "".join(out)
+
+
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
@@ -362,7 +410,13 @@ def prepare_script_source(
     source = _ensure_page_binding(source)
     source = _sanitize_upload_literals(source)
     source = _inject_nerp_url(source)
-    source = _inject_sso_credentials(source)
+    # Sticky MFA jobs: operator signs in once by hand; do NOT rewrite login fills
+    # to NERP SSO (OTP changes every time and must not be automated).
+    if _use_system_chrome():
+        _log("Sticky profile run — skipping SSO credential injection")
+        source = _soften_sticky_auth_actions(source)
+    else:
+        source = _inject_sso_credentials(source)
     source = _inject_sales_org(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
     raw_upload_lines = [ln.strip() for ln in source.splitlines() if "set_input_files" in ln]

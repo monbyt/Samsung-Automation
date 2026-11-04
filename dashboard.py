@@ -1199,11 +1199,11 @@ def rpa_list():
     <p class="muted" style="line-height:1.6">
       1. Click <b>+ New recorded script</b> and set the <b>start URL</b><br>
       2. For Tableau / MFA sites, enable <b>Keep signed-in Chrome profile</b><br>
-      3. Click <b>Record</b> — Playwright codegen opens (sticky jobs reuse that profile)<br>
-      4. Sign in + MFA once, perform your steps, then close codegen (script auto-saves)<br>
-      5. Or paste/edit the Python script on the Edit page<br>
-      6. <b>Run</b> to execute — sticky jobs keep cookies so you stay signed in<br>
-      Profile folder is <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> (separate from W1/NERP).
+      3. Click <b>Record</b> — Chrome opens on that job’s profile folder<br>
+      4. <b>You</b> sign in + enter the one-time code yourself (not automated)<br>
+      5. Only then record the extract/download clicks — do <b>not</b> leave OTP steps in the script<br>
+      6. Close codegen → later <b>Run</b>s reuse cookies and should skip login<br>
+      Profile: <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> (not W1/NERP). If MFA comes back, Record once and sign in again.
     </p>
   </div>
   <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
@@ -1290,7 +1290,7 @@ def rpa_new():
     <div class="form-row"><label>Notes</label>
       <input type="text" name="description" value="{{ form.description }}"></div>
     <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if form.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
-    <p class="muted">Uses <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> only — does not touch W1 or NERP profiles. Sign in once while recording; later Runs reuse cookies.</p>
+    <p class="muted">Uses <code>chrome-profile-rpa/&lt;rpa_id&gt;/</code> only — does not touch W1 or NERP. You complete MFA yourself once; we do <b>not</b> auto-fill one-time codes. Later Runs reuse the signed-in session.</p>
     <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if form.enabled else '' }}> Enabled</label></div>
     <button type="submit">Create</button>
     <a href="/rpa"><button type="button">Cancel</button></a>
@@ -1359,8 +1359,8 @@ def rpa_edit(rpa_id):
         placeholder="e.g. C:/Users/you/Desktop/Order-Results"></div>
     <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if job.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
     {% if job.sticky_chrome %}
-    <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder with <b>installed Chrome</b> (not Chromium). W1/NERP profiles are untouched.</p>
-    <p class="muted">Debug: after Record/Run, check the console for <code>STICKY PROFILE DEBUG</code> — Record and Run must show the <b>same</b> <code>user_data_dir</code>. Also open <code>.rpa_sticky_profile</code> in that folder; both actions append a line.</p>
+    <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder with <b>installed Chrome</b>. You sign in + OTP yourself once; Runs should stay signed in via cookies (no auto-login).</p>
+    <p class="muted">Tip: delete any recorded login/OTP clicks from the script so Run only does the extract. Debug: console <code>STICKY PROFILE DEBUG</code> must show the same <code>user_data_dir</code> for Record and Run.</p>
     {% else %}
     <p class="muted">Off = fresh browser each run (fine for NERP SSO fill). On = cookies survive for MFA sites.</p>
     {% endif %}

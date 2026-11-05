@@ -309,12 +309,51 @@ def _inject_sales_org(source: str) -> str:
     return "\n".join(out)
 
 
+def _sticky_page_bind_lines(indent: str) -> list[str]:
+    """Pick a signed-in Tableau tab — pages[0] is often a stale MFA tab."""
+    return [
+        f"{indent}page = None\n",
+        f"{indent}for _rpa_p in list(context.pages):\n",
+        f"{indent}    _rpa_u = (_rpa_p.url or \"\")\n",
+        f"{indent}    if (\"d2cbi.sec.samsung.net\" in _rpa_u\n",
+        f"{indent}            and \"mfa-\" not in _rpa_u\n",
+        f"{indent}            and \"openid-connect\" not in _rpa_u):\n",
+        f"{indent}        page = _rpa_p\n",
+        f"{indent}        break\n",
+        f"{indent}if page is None:\n",
+        f"{indent}    page = context.pages[0] if context.pages else context.new_page()\n",
+        f'{indent}print("[RPA] Bound page:", ((page.url or ""))[:160])\n',
+        f"{indent}try:\n",
+        f"{indent}    _rpa_cks = [c for c in context.cookies() if \"samsung\" in (c.get(\"domain\") or \"\")]\n",
+        f'{indent}    print("[RPA] Sticky samsung cookies in this profile:", len(_rpa_cks))\n',
+        f"{indent}except Exception as _rpa_ce:\n",
+        f'{indent}    print("[RPA] Cookie probe failed:", _rpa_ce)\n',
+    ]
+
+
 def _ensure_page_binding(source: str) -> str:
     """Codegen with --user-data-dir often uses `page` without assigning it.
 
     Sticky Record opens a persistent profile; Playwright sometimes emits only
     context = launch_persistent_context(...) and then page.goto(...) → NameError.
     """
+    sticky = _use_system_chrome()
+    # Replace naive pages[0] binding — wrong tab = looks logged out every Run.
+    if sticky and re.search(r"(?m)^\s*page\s*=\s*context\.pages\[0\]", source):
+        def _repl(m):
+            indent = m.group(1)
+            return "".join(_sticky_page_bind_lines(indent))
+
+        source = re.sub(
+            r"(?m)^(\s*)page\s*=\s*context\.pages\[0\][^\n]*\n"
+            r"(?:\s*print\(\"\[RPA\] Bound page[^\n]*\n)?",
+            _repl,
+            source,
+            count=1,
+        )
+        _log("Replaced pages[0] with sticky tab picker (avoid stale MFA tab)")
+        return source
+
     if re.search(r"(?m)^\s*page\s*=", source):
         return source
     if not re.search(r"\bpage\.", source):
@@ -338,12 +377,16 @@ def _ensure_page_binding(source: str) -> str:
                 buf += lines[i]
             indent_m = re.match(r"^(\s*)", line)
             indent = indent_m.group(1) if indent_m else "    "
-            out.append(
-                f"{indent}page = context.pages[0] if context.pages else context.new_page()\n"
-            )
-            out.append(f'{indent}print("[RPA] Bound page from sticky context")\n')
+            if sticky:
+                out.extend(_sticky_page_bind_lines(indent))
+                _log("Injected sticky tab picker (prefer signed-in d2cbi tab)")
+            else:
+                out.append(
+                    f"{indent}page = context.pages[0] if context.pages else context.new_page()\n"
+                )
+                out.append(f'{indent}print("[RPA] Bound page from sticky context")\n')
+                _log("Injected missing page = context.pages[0] (sticky codegen omit)")
             injected = True
-            _log("Injected missing page = context.pages[0] (sticky codegen omit)")
         i += 1
 
     if not injected:
@@ -431,7 +474,40 @@ def _fix_sticky_gotos(source: str, start_url: str = "") -> str:
     out = _PAGE_GOTO_RE.sub(_replace, source)
     if state["rewrites"]:
         _log(f"Sticky: rewrote {state['rewrites']} page.goto(s) to job start_url")
-    return out
+
+    # If SSO still shows, wait for YOU to sign in in THIS window (not normal Chrome).
+    gate = """
+    _rpa_url = (page.url or "")
+    if ("mfa-" in _rpa_url or "openid-connect" in _rpa_url
+            or "/protocol/openid-connect/auth" in _rpa_url):
+        print("[RPA] ===== MFA LOGIN REQUIRED IN THIS WINDOW =====")
+        print("[RPA] Your everyday Chrome session does NOT apply here.")
+        print("[RPA] Complete username + OTP in this RPA Chrome, then wait...")
+        import re as _rpa_re
+        page.wait_for_url(
+            _rpa_re.compile(r"https://d2cbi\\.sec\\.samsung\\.net/.*"),
+            timeout=600_000,
+        )
+        print("[RPA] Tableau session OK — continuing automation")
+"""
+    # Insert gate once after the first page.goto(...)
+    lines = out.splitlines(keepends=True)
+    gated: list[str] = []
+    done = False
+    i = 0
+    while i < len(lines):
+        gated.append(lines[i])
+        if not done and "page.goto(" in lines[i]:
+            buf = lines[i]
+            while buf.count("(") > buf.count(")") and i + 1 < len(lines):
+                i += 1
+                gated.append(lines[i])
+                buf += lines[i]
+            gated.append(gate)
+            done = True
+            _log("Injected sticky MFA wait gate after first goto")
+        i += 1
+    return "".join(gated)
 
 
 def prepare_script_source(
@@ -648,8 +724,14 @@ def _log_profile_debug(profile: str, *, channel: str) -> None:
 def _chromium_launch_args(kwargs: dict, *, allow_system_chrome: bool = False) -> tuple[dict, str]:
     """Shared Chromium flags. System Chrome only when sticky MFA needs it."""
     kwargs = dict(kwargs)
-    if allow_system_chrome and _use_system_chrome():
+    sticky = allow_system_chrome and _use_system_chrome()
+    if sticky:
         kwargs["channel"] = "chrome"
+        # SSO providers often refuse to persist sessions when Chrome looks automated.
+        ignore = list(kwargs.get("ignore_default_args") or [])
+        if "--enable-automation" not in ignore:
+            ignore.append("--enable-automation")
+        kwargs["ignore_default_args"] = ignore
     else:
         kwargs.pop("channel", None)
     extra = list(kwargs.get("args") or [])
@@ -658,6 +740,8 @@ def _chromium_launch_args(kwargs: dict, *, allow_system_chrome: bool = False) ->
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
     ])
+    if sticky and not any("AutomationControlled" in str(a) for a in extra):
+        extra.append("--disable-blink-features=AutomationControlled")
     port = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "").strip()
     if port and not any(str(a).startswith("--remote-debugging-port") for a in extra):
         extra.append(f"--remote-debugging-port={port}")

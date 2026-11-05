@@ -653,15 +653,29 @@ def _patch_file_chooser_upload() -> None:
     _log(f"File picker auto-upload enabled → {_upload_file_path()}")
 
 
-class _StickyBrowser:
-    """Wrap a persistent context so codegen's launch()+new_context() keeps cookies.
+# CDP browser handle kept so GC does not disconnect while the script runs.
+_STICKY_CDP_BROWSER = None
 
-    Recorded scripts call chromium.launch() then browser.new_context(). When
-    RPA_CHROME_PROFILE is set we open a persistent profile instead and reuse it.
+
+class _StickyBrowser:
+    """Wrap the sticky Chrome context for codegen's launch()+new_context() pattern.
+
+    MFA/OIDC uses *session* cookies — they die when Chrome exits. Sticky jobs keep
+    a real Chrome process alive and Playwright only connects/disconnects via CDP.
     """
 
-    def __init__(self, context):
+    def __init__(self, context, *, browser=None, keepalive: bool = False):
         self._context = context
+        self._browser = browser
+        self._keepalive = keepalive
+        if keepalive:
+            # Script calls context.close() — must NOT kill the SSO session.
+            try:
+                context.close = lambda *a, **k: _log(
+                    "Sticky: leaving Chrome open (session cookies)"
+                )
+            except Exception:
+                pass
 
     def new_context(self, *args, **kwargs):
         return self._context
@@ -670,6 +684,14 @@ class _StickyBrowser:
         return self._context.new_page(*args, **kwargs)
 
     def close(self):
+        if self._keepalive:
+            _log("Sticky: disconnect Playwright — Chrome stays open for next Run")
+            try:
+                if self._browser is not None:
+                    self._browser.close()  # CDP disconnect only
+            except Exception:
+                pass
+            return
         try:
             self._context.close()
         except Exception:
@@ -677,6 +699,100 @@ class _StickyBrowser:
 
     def __getattr__(self, name):
         return getattr(self._context, name)
+
+
+def _sticky_debug_port() -> int:
+    raw = (os.environ.get("RPA_CHROME_DEBUG_PORT") or "9329").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 9329
+
+
+def _cdp_is_up(port: int) -> bool:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=1.5
+        ) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception:
+        return False
+
+
+def _ensure_keepalive_chrome(profile: str, port: int) -> None:
+    """Start Google Chrome with the sticky profile if CDP is not already listening."""
+    if _cdp_is_up(port):
+        _log(f"Sticky Chrome already running on CDP port {port}")
+        return
+
+    exe = _chrome_executable()
+    if not exe:
+        raise RuntimeError(
+            "Google Chrome not found — sticky MFA needs installed Chrome "
+            "(set CHROME_PATH)."
+        )
+    os.makedirs(profile, exist_ok=True)
+    cmd = [
+        exe,
+        f"--user-data-dir={profile}",
+        f"--remote-debugging-port={port}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-blink-features=AutomationControlled",
+        "about:blank",
+    ]
+    _log(f"Starting keepalive Chrome: profile={profile} port={port}")
+    popen_kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+        )
+    subprocess.Popen(cmd, **popen_kwargs)
+
+    import time
+
+    for _ in range(40):
+        if _cdp_is_up(port):
+            _log(f"Sticky Chrome CDP ready on {port}")
+            return
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"Sticky Chrome did not open CDP on port {port}. "
+        "Close any Chrome using this profile and try again."
+    )
+
+
+def _connect_sticky_chrome(browser_type, profile: str):
+    """Connect to a long-lived Chrome (keeps MFA session cookies across Runs)."""
+    global _STICKY_CDP_BROWSER
+    port = _sticky_debug_port()
+    _log_profile_debug(profile, channel="chrome-keepalive")
+    _ensure_keepalive_chrome(profile, port)
+    endpoint = f"http://127.0.0.1:{port}"
+    _log(f"Connecting Playwright over CDP {endpoint}")
+    browser = browser_type.connect_over_cdp(endpoint)
+    _STICKY_CDP_BROWSER = browser
+    if browser.contexts:
+        context = browser.contexts[0]
+    else:
+        context = browser.new_context(accept_downloads=True)
+    try:
+        context.set_default_timeout(0)
+        context.set_default_navigation_timeout(0)
+    except Exception:
+        pass
+    _bind_file_chooser_context(context)
+    _log(
+        "Sticky keepalive ON — do not close this Chrome window; "
+        "MFA session lives until you quit that window"
+    )
+    return browser, context
 
 
 def _use_system_chrome() -> bool:
@@ -774,9 +890,21 @@ def _patch_playwright_no_timeout() -> None:
 
     def launch_persistent_context(self, *args, **kwargs):
         sticky = _use_system_chrome()
+        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
+        # Sticky MFA: attach to a Chrome that stays open (session cookies).
+        if sticky and profile:
+            os.makedirs(profile, exist_ok=True)
+            _browser, ctx = _connect_sticky_chrome(self, profile)
+            try:
+                ctx.close = lambda *a, **k: _log(
+                    "Sticky: leaving Chrome open (session cookies)"
+                )
+            except Exception:
+                pass
+            return ctx
+
         kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=True)
         kwargs.setdefault("accept_downloads", True)
-        profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
         if profile:
             os.makedirs(profile, exist_ok=True)
             if args:
@@ -802,18 +930,21 @@ def _patch_playwright_no_timeout() -> None:
 
     def launch(self, *args, **kwargs):
         # Parallel SAP workers: bundled Chromium (no channel) so many windows open.
-        # Sticky MFA jobs: installed Chrome — must match Record (--channel chrome).
+        # Sticky MFA: keepalive Chrome + CDP so closing the script does not wipe SSO.
         profile = (os.environ.get("RPA_CHROME_PROFILE") or "").strip()
         sticky = bool(profile) and _use_system_chrome()
-        kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=sticky)
+        if sticky and profile:
+            os.makedirs(profile, exist_ok=True)
+            browser, ctx = _connect_sticky_chrome(self, profile)
+            return _StickyBrowser(ctx, browser=browser, keepalive=True)
+        kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=False)
         if profile:
             os.makedirs(profile, exist_ok=True)
             kwargs.setdefault("accept_downloads", True)
-            channel = "chrome" if sticky else "chromium"
-            _log_profile_debug(profile, channel=channel)
+            _log_profile_debug(profile, channel="chromium")
             _log(
                 f"Playwright sticky launch profile={profile} "
-                f"channel={channel} port={port or '-'}"
+                f"channel=chromium port={port or '-'}"
             )
             ctx = _disable(_orig_persistent(self, profile, **kwargs))
             return _StickyBrowser(ctx)

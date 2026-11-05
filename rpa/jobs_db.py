@@ -1,5 +1,6 @@
 """
-RPA tool definitions — managed from the dashboard, triggered after mail jobs.
+RPA tool definitions — managed from the dashboard, triggered after mail jobs
+or on their own cron schedule (interval_minutes + clock offset).
 """
 import os
 import re
@@ -9,6 +10,7 @@ from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text,
 
 import config
 from db import engine, init_db
+from mail.jobs_db import next_clock_run, slot_label, slot_options, _snap_interval_minutes
 
 
 def _nerp_start_url() -> str:
@@ -40,6 +42,10 @@ rpa_jobs = Table(
     Column("next_rpa", String(64)),
     # Keep cookies/MFA in chrome-profile-rpa/<rpa_id>/ across record + run.
     Column("sticky_chrome", Integer, default=0),
+    # Standalone cron (0 = manual / mail-trigger only).
+    Column("interval_minutes", Integer, default=0),
+    Column("schedule_offset_minutes", Integer, default=0),
+    Column("next_run", DateTime),
 )
 
 _BUILTIN_IDS = frozenset({"nerp_upload_pi"})
@@ -69,6 +75,16 @@ def _migrate_rpa_columns():
             conn.execute(sqltext(
                 "ALTER TABLE rpa_jobs ADD COLUMN sticky_chrome INTEGER DEFAULT 0"
             ))
+        if "interval_minutes" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE rpa_jobs ADD COLUMN interval_minutes INTEGER DEFAULT 0"
+            ))
+        if "schedule_offset_minutes" not in cols:
+            conn.execute(sqltext(
+                "ALTER TABLE rpa_jobs ADD COLUMN schedule_offset_minutes INTEGER DEFAULT 0"
+            ))
+        if "next_run" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN next_run DATETIME"))
         conn.execute(
             sqltext(
                 "UPDATE rpa_jobs SET start_url = :url "
@@ -88,7 +104,52 @@ def _normalize_rpa_id(raw: str) -> str:
     return slug
 
 
+def _interval_minutes(row) -> int:
+    try:
+        return max(0, int(getattr(row, "interval_minutes", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def daily_slot_options():
+    """Clock times for a once-per-day schedule (every 30 minutes)."""
+    opts = []
+    for h in range(24):
+        for m in (0, 30):
+            off = h * 60 + m
+            h12 = h % 12 or 12
+            ampm = "AM" if h < 12 else "PM"
+            opts.append((off, f"Daily at {h12}:{m:02d} {ampm}"))
+    return opts
+
+
+def schedule_slot_options(interval_minutes: int):
+    minutes = int(interval_minutes or 0)
+    if minutes <= 0:
+        return []
+    if minutes >= 1440:
+        return daily_slot_options()
+    return slot_options(minutes)
+
+
+def _format_slot_label(interval_minutes: int, offset_minutes: int) -> str:
+    interval = int(interval_minutes or 0)
+    if interval <= 0:
+        return "Manual / mail"
+    offset = int(offset_minutes or 0)
+    if interval >= 1440:
+        off = offset % 1440
+        h, m = divmod(off, 60)
+        h12 = h % 12 or 12
+        ampm = "AM" if h < 12 else "PM"
+        return f"Daily {h12}:{m:02d} {ampm}"
+    return slot_label(offset, interval)
+
+
 def _row_to_dict(row):
+    interval = _interval_minutes(row)
+    offset = int(getattr(row, "schedule_offset_minutes", 0) or 0)
+    scheduled = interval > 0
     return {
         "id": row.id,
         "rpa_id": row.rpa_id,
@@ -106,6 +167,11 @@ def _row_to_dict(row):
             if getattr(row, "sticky_chrome", 0)
             else ""
         ),
+        "interval_minutes": interval,
+        "schedule_offset_minutes": offset,
+        "next_run": getattr(row, "next_run", None),
+        "scheduled": scheduled,
+        "slot_label": _format_slot_label(interval, offset),
         "enabled": bool(row.enabled),
         "last_run": row.last_run,
         "last_status": row.last_status,
@@ -201,6 +267,8 @@ def add_rpa_job(
     trigger_mail_job: str = "",
     next_rpa: str = "",
     sticky_chrome: bool = False,
+    interval_minutes: int = 0,
+    schedule_offset_minutes: int = 0,
     enabled: bool = False,
 ) -> str:
     slug = _normalize_rpa_id(rpa_id)
@@ -212,6 +280,11 @@ def add_rpa_job(
         raise ValueError("Start URL is required for recording.")
 
     now = datetime.now()
+    interval = max(0, int(interval_minutes or 0))
+    if interval > 0:
+        interval = _snap_interval_minutes(interval)
+    offset = max(0, int(schedule_offset_minutes or 0))
+    nxt = next_clock_run(now, interval, offset) if interval > 0 else None
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(rpa_jobs.insert().values(
@@ -223,6 +296,9 @@ def add_rpa_job(
             trigger_mail_job=(trigger_mail_job or "").strip(),
             next_rpa=(next_rpa or "").strip(),
             sticky_chrome=1 if sticky_chrome else 0,
+            interval_minutes=interval,
+            schedule_offset_minutes=offset,
+            next_run=nxt,
             enabled=1 if enabled else 0,
             created_at=now,
         ))
@@ -254,6 +330,7 @@ def update_rpa_job(rpa_id: str, **fields):
     allowed = {
         "name", "description", "trigger_mail_job", "enabled", "start_url",
         "upload_folder", "download_folder", "next_rpa", "sticky_chrome",
+        "interval_minutes", "schedule_offset_minutes", "next_run",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -266,6 +343,28 @@ def update_rpa_job(rpa_id: str, **fields):
         updates["trigger_mail_job"] = ""
     if "start_url" in updates and updates["start_url"] is not None:
         updates["start_url"] = updates["start_url"].strip()
+    if "interval_minutes" in updates:
+        interval = max(0, int(updates["interval_minutes"] or 0))
+        if interval > 0:
+            interval = _snap_interval_minutes(interval)
+        updates["interval_minutes"] = interval
+    if "schedule_offset_minutes" in updates:
+        updates["schedule_offset_minutes"] = max(
+            0, int(updates["schedule_offset_minutes"] or 0)
+        )
+    # Recompute next_run when schedule changes (unless caller set next_run explicitly).
+    if "next_run" not in updates and (
+        "interval_minutes" in updates or "schedule_offset_minutes" in updates
+    ):
+        job = get_rpa_job(rpa_id) or {}
+        interval = updates.get("interval_minutes", job.get("interval_minutes") or 0)
+        offset = updates.get(
+            "schedule_offset_minutes", job.get("schedule_offset_minutes") or 0
+        )
+        if int(interval or 0) > 0:
+            updates["next_run"] = next_clock_run(datetime.now(), int(interval), int(offset))
+        else:
+            updates["next_run"] = None
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
@@ -295,15 +394,39 @@ def get_next_rpa(rpa_id: str):
     return job.get("next_rpa") or None
 
 
+def get_due_rpa_jobs(now=None):
+    """Enabled RPA jobs whose standalone cron next_run is due."""
+    now = now or datetime.now()
+    _ensure_tables()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(rpa_jobs)
+            .where(rpa_jobs.c.enabled == 1)
+            .where(rpa_jobs.c.interval_minutes > 0)
+            .where(rpa_jobs.c.next_run.isnot(None))
+            .where(rpa_jobs.c.next_run <= now)
+            .order_by(rpa_jobs.c.next_run)
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
 def mark_rpa_finished(rpa_id: str, status: str, message: str = ""):
+    now = datetime.now()
+    job = get_rpa_job(rpa_id) or {}
+    values = {
+        "last_run": now,
+        "last_status": status,
+        "last_message": (message or "")[:2000],
+    }
+    interval = int(job.get("interval_minutes") or 0)
+    if interval > 0:
+        values["next_run"] = next_clock_run(
+            now, interval, job.get("schedule_offset_minutes") or 0
+        )
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
             update(rpa_jobs)
             .where(rpa_jobs.c.rpa_id == rpa_id)
-            .values(
-                last_run=datetime.now(),
-                last_status=status,
-                last_message=(message or "")[:2000],
-            )
+            .values(**values)
         )

@@ -1155,15 +1155,15 @@ def rpa_list():
   <p><a href="/rpa/new"><button type="button">+ New recorded script</button></a></p>
   <div class="panel"><h2>Registered tools</h2><div class="scroll">
     {% if jobs %}<table>
-    <tr><th>Name</th><th>Type</th><th>Start URL</th><th>Trigger</th><th>Next</th><th>Script</th><th>Last run</th><th>Status</th><th>Actions</th></tr>
+    <tr><th>Name</th><th>Type</th><th>Schedule</th><th>Trigger</th><th>Next RPA</th><th>Script</th><th>Last / next</th><th>Status</th><th>Actions</th></tr>
     {% for r in jobs %}<tr>
       <td><span class="pill">{{ r.rpa_id }}</span><br><span class="muted">{{ r.name }}</span></td>
       <td>{{ r.tool }}</td>
-      <td class="muted" style="max-width:220px;word-break:break-all">{{ r.start_url or '—' }}</td>
+      <td>{% if r.scheduled %}<span class="pill">{{ r.slot_label }}</span><br><span class="muted">{{ r.interval_minutes }}m</span>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{% if r.trigger_mail_job %}<span class="pill">{{ r.trigger_mail_job }}</span>{% else %}<span class="muted">Manual</span>{% endif %}</td>
       <td>{% if r.next_rpa %}<span class="pill" title="{{ r.next_rpa }}">→ {{ r.next_rpa_name or r.next_rpa }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{% if r.tool == 'codegen' %}{% if r.has_script %}<span class="ok">saved</span>{% else %}<span class="err">not recorded</span>{% endif %}{% if r.sticky_chrome %} <span class="pill" title="{{ r.chrome_profile }}">sticky</span>{% endif %}{% else %}<span class="muted">built-in</span>{% endif %}</td>
-      <td>{{ r.last_run or '—' }}</td>
+      <td>{{ r.last_run or '—' }}{% if r.next_run %}<br><span class="muted">next {{ r.next_run }}</span>{% endif %}</td>
       <td class="{{ 'ok' if r.last_status=='ok' else 'err' if r.last_status else '' }}">{{ r.last_status or '—' }}</td>
       <td style="white-space:nowrap">
         <form method="post" action="/rpa/{{ r.rpa_id }}/run" style="display:inline"><button class="btn-sm btn-run">Run</button></form>
@@ -1322,6 +1322,10 @@ def rpa_edit(rpa_id):
                 trigger_mail_job=request.form.get("trigger_mail_job", "").strip(),
                 next_rpa=request.form.get("next_rpa", "").strip(),
                 enabled=request.form.get("enabled") == "on",
+                interval_minutes=int(request.form.get("interval_minutes") or 0),
+                schedule_offset_minutes=int(
+                    request.form.get("schedule_offset_minutes") or 0
+                ),
             )
             if job["tool"] == "codegen":
                 fields["start_url"] = request.form.get("start_url", "").strip()
@@ -1384,9 +1388,26 @@ def rpa_edit(rpa_id):
           {% endif %}
         {% endfor %}
       </select></div>
+    <div class="form-row"><label>Schedule (standalone cron)</label>
+      <select name="interval_minutes" id="rpa_interval">
+        <option value="0" {{ 'selected' if not job.interval_minutes else '' }}>— Off (manual / mail only) —</option>
+        <option value="60" {{ 'selected' if job.interval_minutes == 60 else '' }}>Every 60 minutes</option>
+        <option value="120" {{ 'selected' if job.interval_minutes == 120 else '' }}>Every 2 hours</option>
+        <option value="360" {{ 'selected' if job.interval_minutes == 360 else '' }}>Every 6 hours</option>
+        <option value="720" {{ 'selected' if job.interval_minutes == 720 else '' }}>Every 12 hours</option>
+        <option value="1440" {{ 'selected' if job.interval_minutes == 1440 else '' }}>Once a day</option>
+      </select></div>
+    <div class="form-row"><label>Clock time / slot</label>
+      <select name="schedule_offset_minutes">
+        {% for off, label in schedule_slots %}
+          <option value="{{ off }}" {{ 'selected' if job.schedule_offset_minutes == off else '' }}>{{ label }}</option>
+        {% endfor %}
+      </select></div>
+    <p class="muted">For Tableau morning extract: set <b>Once a day</b> + e.g. <b>Daily 8:00 AM</b>, turn <b>Enabled</b> on, keep sticky Chrome signed in. Dashboard scheduler must be running.</p>
+    {% if job.next_run %}<p class="muted">Next scheduled run: <code>{{ job.next_run }}</code></p>{% endif %}
     <div class="form-row"><label>Notes</label>
       <input type="text" name="description" value="{{ job.description }}"></div>
-    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled</label></div>
+    <div class="form-row"><label><input type="checkbox" name="enabled" {{ 'checked' if job.enabled else '' }}> Enabled (required for schedule + mail trigger)</label></div>
     <button type="submit">Save</button>
     {% if job.tool == 'codegen' %}
     <button type="submit" formaction="/rpa/{{ job.rpa_id }}/record" formmethod="post">Open recorder</button>
@@ -1397,12 +1418,18 @@ def rpa_edit(rpa_id):
     {% endif %}
   </form>
 """
+    from rpa.jobs_db import schedule_slot_options
     rpa_jobs_list = list_rpa_jobs()
+    # Refresh job after possible failed POST so schedule fields stay in sync.
+    job = get_rpa_job(rpa_id) or job
+    slots = schedule_slot_options(job.get("interval_minutes") or 1440)
+    if not slots:
+        slots = schedule_slot_options(1440)
     return _layout(
         "Edit RPA", "rpa", body,
         job=job, mail_jobs=mail_jobs, error=error, msg=msg,
         script_text=script_text, script_saved=script_saved,
-        rpa_jobs=rpa_jobs_list,
+        rpa_jobs=rpa_jobs_list, schedule_slots=slots,
     )
 
 

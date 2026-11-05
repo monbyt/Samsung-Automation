@@ -178,6 +178,30 @@ def run_job(job_id: str) -> dict:
     return summary
 
 
+def _tick_scheduled_rpa():
+    """Run RPA tools that have their own cron (e.g. daily Tableau extract)."""
+    from rpa.jobs_db import get_due_rpa_jobs, mark_rpa_finished
+    from rpa.runner import run_rpa
+
+    due = get_due_rpa_jobs()
+    for job in due:
+        rpa_id = job["rpa_id"]
+        print(
+            f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] "
+            f"Scheduled RPA due: {rpa_id} ({job.get('slot_label')})",
+            flush=True,
+        )
+        try:
+            run_rpa(rpa_id)
+        except Exception:
+            err = traceback.format_exc()[-500:]
+            print(f"Scheduled RPA {rpa_id} failed:\n{err}", flush=True)
+            try:
+                mark_rpa_finished(rpa_id, "error", err)
+            except Exception:
+                pass
+
+
 def tick():
     """Run all jobs that are due right now."""
     due = get_due_jobs()
@@ -194,6 +218,10 @@ def tick():
                 "errors": [err],
                 "job_id": job["job_id"],
             })
+    try:
+        _tick_scheduled_rpa()
+    except Exception as e:
+        print(f"Scheduled RPA tick skipped: {e}", flush=True)
     try:
         from mail.oc_digest import maybe_send_daily_digest
         maybe_send_daily_digest()
@@ -220,7 +248,7 @@ def scheduler_loop():
     tick_seconds = getattr(config, "SCHEDULER_TICK_SECONDS", 60)
 
     print(
-        f"Mail scheduler started — checking every {tick_seconds}s for due jobs.\n"
+        f"Mail + RPA scheduler started — checking every {tick_seconds}s for due jobs.\n"
         "Jobs will NOT run immediately on startup; manage them from the dashboard.\n"
     )
 

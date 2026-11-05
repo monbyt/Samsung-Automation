@@ -310,10 +310,30 @@ def _inject_sales_org(source: str) -> str:
 
 
 def _sticky_page_bind_lines(indent: str) -> list[str]:
-    """Pick a signed-in Tableau tab — pages[0] is often a stale MFA tab."""
+    """Reuse the signed-in Tableau tab; keep a spare blank tab so Chrome never quits.
+
+    Closing the last tab exits Chrome and wipes MFA. A keeper about:blank tab
+    must always remain (same workaround as opening a tab by hand).
+    """
     return [
+        f"{indent}# Keeper tab: if the last tab closes, Chrome exits and MFA dies.\n",
+        f"{indent}_rpa_keeper = None\n",
+        f"{indent}for _rpa_p in list(context.pages):\n",
+        f"{indent}    _rpa_u = (_rpa_p.url or \"\")\n",
+        f"{indent}    if _rpa_u.startswith(\"about:blank\") or _rpa_u in (\"\", \"chrome://newtab/\"):\n",
+        f"{indent}        _rpa_keeper = _rpa_p\n",
+        f"{indent}        break\n",
+        f"{indent}if _rpa_keeper is None:\n",
+        f"{indent}    _rpa_keeper = context.new_page()\n",
+        f"{indent}    try:\n",
+        f"{indent}        _rpa_keeper.goto(\"about:blank\")\n",
+        f"{indent}    except Exception:\n",
+        f"{indent}        pass\n",
+        f'{indent}    print("[RPA] Opened keeper tab (keeps Chrome alive after Run)")\n',
         f"{indent}page = None\n",
         f"{indent}for _rpa_p in list(context.pages):\n",
+        f"{indent}    if _rpa_p is _rpa_keeper:\n",
+        f"{indent}        continue\n",
         f"{indent}    _rpa_u = (_rpa_p.url or \"\")\n",
         f"{indent}    if (\"d2cbi.sec.samsung.net\" in _rpa_u\n",
         f"{indent}            and \"mfa-\" not in _rpa_u\n",
@@ -321,7 +341,12 @@ def _sticky_page_bind_lines(indent: str) -> list[str]:
         f"{indent}        page = _rpa_p\n",
         f"{indent}        break\n",
         f"{indent}if page is None:\n",
-        f"{indent}    page = context.pages[0] if context.pages else context.new_page()\n",
+        f"{indent}    page = context.new_page()\n",
+        f'{indent}    print("[RPA] Opened work tab for this Run")\n',
+        f"{indent}try:\n",
+        f"{indent}    page.bring_to_front()\n",
+        f"{indent}except Exception:\n",
+        f"{indent}    pass\n",
         f'{indent}print("[RPA] Bound page:", ((page.url or ""))[:160])\n',
         f"{indent}try:\n",
         f"{indent}    _rpa_cks = [c for c in context.cookies() if \"samsung\" in (c.get(\"domain\") or \"\")]\n",
@@ -657,6 +682,57 @@ def _patch_file_chooser_upload() -> None:
 _STICKY_CDP_BROWSER = None
 
 
+def _install_sticky_page_close_guard(context) -> None:
+    """Refuse page.close() when it would quit Chrome (last tab = process exit)."""
+    if getattr(context, "_rpa_sticky_close_guard", False):
+        return
+    try:
+        from playwright.sync_api import Page
+    except Exception:
+        return
+
+    if not getattr(Page, "_rpa_sticky_close_patched", False):
+        _orig_close = Page.close
+
+        def _guarded_close(self, *args, **kwargs):
+            if _use_system_chrome():
+                try:
+                    open_pages = [
+                        p for p in self.context.pages if not p.is_closed()
+                    ]
+                except Exception:
+                    open_pages = []
+                if len(open_pages) <= 1:
+                    _log(
+                        "Sticky: blocked page.close() on last tab "
+                        "(would quit Chrome and wipe MFA)"
+                    )
+                    return None
+            return _orig_close(self, *args, **kwargs)
+
+        Page.close = _guarded_close
+        Page._rpa_sticky_close_patched = True
+    context._rpa_sticky_close_guard = True
+
+
+def _ensure_sticky_keeper_tab(context) -> None:
+    """Guarantee a blank tab remains so Chrome stays open after the job."""
+    try:
+        pages = [p for p in context.pages if not p.is_closed()]
+    except Exception:
+        pages = []
+    for p in pages:
+        u = (p.url or "")
+        if u.startswith("about:blank") or u in ("", "chrome://newtab/"):
+            return
+    try:
+        keeper = context.new_page()
+        keeper.goto("about:blank")
+        _log("Sticky: ensured keeper about:blank tab before disconnect")
+    except Exception as e:
+        _log(f"Sticky: could not open keeper tab: {e}")
+
+
 class _StickyBrowser:
     """Wrap the sticky Chrome context for codegen's launch()+new_context() pattern.
 
@@ -669,6 +745,8 @@ class _StickyBrowser:
         self._browser = browser
         self._keepalive = keepalive
         if keepalive:
+            _install_sticky_page_close_guard(context)
+            _ensure_sticky_keeper_tab(context)
             # Script calls context.close() — must NOT kill the SSO session.
             try:
                 context.close = lambda *a, **k: _log(
@@ -685,6 +763,7 @@ class _StickyBrowser:
 
     def close(self):
         if self._keepalive:
+            _ensure_sticky_keeper_tab(self._context)
             _log("Sticky: disconnect Playwright — Chrome stays open for next Run")
             try:
                 if self._browser is not None:
@@ -806,9 +885,12 @@ def _connect_sticky_chrome(browser_type, profile: str):
     except Exception:
         pass
     _bind_file_chooser_context(context)
+    _install_sticky_page_close_guard(context)
+    _ensure_sticky_keeper_tab(context)
     _log(
-        "Sticky keepalive ON — do not close this Chrome window; "
-        "MFA session lives until you quit that window"
+        "Sticky keepalive ON — leave the Chrome *window* open "
+        "(a blank keeper tab stays so the window does not quit). "
+        "Do not use File→Exit / close the last window."
     )
     return browser, context
 

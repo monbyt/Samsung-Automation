@@ -317,6 +317,10 @@ def _sticky_page_bind_lines(indent: str) -> list[str]:
     """
     return [
         f"{indent}# Keeper tab: if the last tab closes, Chrome exits and MFA dies.\n",
+        f"{indent}try:\n",
+        f'{indent}    print("[RPA] Open tabs:", [((p.url or "")[:80]) for p in context.pages])\n',
+        f"{indent}except Exception:\n",
+        f"{indent}    pass\n",
         f"{indent}_rpa_keeper = None\n",
         f"{indent}for _rpa_p in list(context.pages):\n",
         f"{indent}    _rpa_u = (_rpa_p.url or \"\")\n",
@@ -339,6 +343,15 @@ def _sticky_page_bind_lines(indent: str) -> list[str]:
         f"{indent}            and \"mfa-\" not in _rpa_u\n",
         f"{indent}            and \"openid-connect\" not in _rpa_u):\n",
         f"{indent}        page = _rpa_p\n",
+        f'{indent}        print("[RPA] Reusing signed-in Tableau tab")\n',
+        f"{indent}        break\n",
+        f"{indent}if page is None:\n",
+        f"{indent}    # Prefer any non-keeper tab over opening yet another blank.\n",
+        f"{indent}    for _rpa_p in list(context.pages):\n",
+        f"{indent}        if _rpa_p is _rpa_keeper:\n",
+        f"{indent}            continue\n",
+        f"{indent}        page = _rpa_p\n",
+        f'{indent}        print("[RPA] Reusing existing tab:", ((_rpa_p.url or ""))[:80])\n',
         f"{indent}        break\n",
         f"{indent}if page is None:\n",
         f"{indent}    page = context.new_page()\n",
@@ -425,13 +438,20 @@ _STICKY_AUTH_HINT_RE = re.compile(
     r"user account|email address|e-mail|mfa|2fa|two[\s-]?factor|capslock",
     re.I,
 )
+# Recorded dismiss/"close" often closes the tab on re-run → page closed errors.
+_STICKY_CLOSE_CLICK_RE = re.compile(
+    r"get_by_role\(\s*[\"']button[\"']\s*,\s*name\s*=\s*[\"']close[\"']\s*\)"
+    r"|get_by_label\(\s*[\"']close[\"']\s*\)",
+    re.I,
+)
 
 
 def _strip_sticky_auth_actions(source: str) -> str:
-    """Remove recorded login/OTP clicks on sticky runs — do not execute them.
+    """Remove recorded login/OTP/close clicks on sticky runs — do not execute them.
 
     Soft try/except still ran Sign In and broke the Tableau session. Sticky means
     cookies keep you signed in; OTP/password steps must not replay.
+    The codegen 'close' button click often kills the work tab on the 2nd Run.
     """
     if not _use_system_chrome():
         return source
@@ -447,14 +467,20 @@ def _strip_sticky_auth_actions(source: str) -> str:
             is_action
             and "print(" not in stripped
             and not stripped.startswith("#")
-            and _STICKY_AUTH_HINT_RE.search(stripped)
+            and (
+                _STICKY_AUTH_HINT_RE.search(stripped)
+                or _STICKY_CLOSE_CLICK_RE.search(stripped)
+            )
         ):
             removed += 1
-            _log(f"Sticky drop auth step: {stripped[:100]}")
+            _log(f"Sticky drop auth/close step: {stripped[:100]}")
             continue
         out.append(line)
     if removed:
-        _log(f"Removed {removed} sticky login/OTP step(s) from Run (session cookies only)")
+        _log(
+            f"Removed {removed} sticky login/OTP/close step(s) "
+            "(session cookies only; avoid closing work tab)"
+        )
     return "".join(out)
 
 

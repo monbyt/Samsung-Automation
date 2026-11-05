@@ -387,6 +387,7 @@ def run_rpa(
                     upload_file=path,
                     upload_dir=resolved_upload_dir,
                     download_dir=resolved_download_dir,
+                    start_url=(job.get("start_url") or "").strip(),
                 )
             finally:
                 if job.get("sticky_chrome"):

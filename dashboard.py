@@ -1360,7 +1360,7 @@ def rpa_edit(rpa_id):
     <div class="form-row"><label><input type="checkbox" name="sticky_chrome" {{ 'checked' if job.sticky_chrome else '' }}> Keep signed-in Chrome profile (Tableau / MFA)</label></div>
     {% if job.sticky_chrome %}
     <p class="muted">Profile: <code>{{ job.chrome_profile }}</code> — Record and Run both reuse this folder with <b>installed Chrome</b>. You sign in + OTP yourself once; Runs should stay signed in via cookies (no auto-login).</p>
-    <p class="muted">Tip: delete any recorded login/OTP clicks from the script so Run only does the extract. Debug: console <code>STICKY PROFILE DEBUG</code> must show the same <code>user_data_dir</code> for Record and Run.</p>
+    <p class="muted">Tip: set <b>Start URL</b> to the real Tableau/app page (not the sign-in page). Sticky Runs rewrite recorded <code>page.goto(login…)</code> to that URL. Debug: <code>STICKY PROFILE DEBUG</code> must match for Record and Run.</p>
     {% else %}
     <p class="muted">Off = fresh browser each run (fine for NERP SSO fill). On = cookies survive for MFA sites.</p>
     {% endif %}

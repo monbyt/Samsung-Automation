@@ -354,26 +354,23 @@ def _ensure_page_binding(source: str) -> str:
 _STICKY_AUTH_HINT_RE = re.compile(
     r"verification|one[\s-]?time|otp|passcode|authenticator|security code|"
     r"enter code|password|passwort|sign[\s-]?in|log[\s-]?in|username|"
-    r"user account|email address|e-mail|mfa|2fa|two[\s-]?factor",
+    r"user account|email address|e-mail|mfa|2fa|two[\s-]?factor|capslock",
     re.I,
 )
 
 
-def _soften_sticky_auth_actions(source: str) -> str:
-    """On sticky MFA jobs, don't fail when login/OTP UI isn't there (already signed in).
+def _strip_sticky_auth_actions(source: str) -> str:
+    """Remove recorded login/OTP clicks on sticky runs — do not execute them.
 
-    Operator completes OTP once during Record. Later Runs should reuse cookies.
-    Recorded login/OTP clicks are wrapped in try/except so a signed-in session
-    skips them instead of NameError/timeout.
+    Soft try/except still ran Sign In and broke the Tableau session. Sticky means
+    cookies keep you signed in; OTP/password steps must not replay.
     """
     if not _use_system_chrome():
         return source
     out: list[str] = []
-    wrapped = 0
+    removed = 0
     for line in source.splitlines(keepends=True):
-        raw = line.rstrip("\n")
-        stripped = raw.lstrip()
-        indent = raw[: len(raw) - len(stripped)]
+        stripped = line.lstrip()
         is_action = any(
             tok in stripped
             for tok in (".fill(", ".click(", ".press(", ".type(", ".check(")
@@ -384,25 +381,64 @@ def _soften_sticky_auth_actions(source: str) -> str:
             and not stripped.startswith("#")
             and _STICKY_AUTH_HINT_RE.search(stripped)
         ):
-            out.append(f"{indent}try:\n")
-            out.append(f"{indent}    {stripped}\n")
-            out.append(f"{indent}except Exception as _rpa_auth_skip:\n")
-            out.append(
-                f'{indent}    print("[RPA] Skip auth step (sticky session):", '
-                f"{stripped[:80]!r})\n"
-            )
-            wrapped += 1
+            removed += 1
+            _log(f"Sticky drop auth step: {stripped[:100]}")
             continue
         out.append(line)
-    if wrapped:
-        _log(f"Softened {wrapped} sticky login/OTP step(s) — safe if already signed in")
+    if removed:
+        _log(f"Removed {removed} sticky login/OTP step(s) from Run (session cookies only)")
     return "".join(out)
+
+
+_LOGIN_GOTO_HINT_RE = re.compile(
+    r"login|sign[\s_-]?in|sso|oauth|okta|auth0|microsoftonline|mfa-|"
+    r"openid-connect|realms/|vizportal/.*/auth|accounts\.google|"
+    r"saml|adfs|/idp/|passwd|session|/auth\b",
+    re.I,
+)
+_PAGE_GOTO_RE = re.compile(
+    r'page\.goto\(\s*(["\'])([^"\']*)\1([^)]*)\)'
+)
+
+
+def _fix_sticky_gotos(source: str, start_url: str = "") -> str:
+    """Codegen often records page.goto(sign-in URL). That forces login every Run.
+
+    Sticky jobs rewrite the first goto (and any login-looking goto) to the job's
+    start_url so cookies can open the real app already signed in.
+    """
+    if not _use_system_chrome():
+        return source
+    target = (start_url or os.environ.get("RPA_START_URL") or "").strip()
+    if not target:
+        _log("Sticky run: no start_url set — cannot rewrite login page.goto")
+        return source
+
+    state = {"first": True, "rewrites": 0}
+
+    def _replace(match: re.Match) -> str:
+        url = match.group(2)
+        rest = match.group(3) or ""
+        is_first = state["first"]
+        state["first"] = False
+        if is_first or _LOGIN_GOTO_HINT_RE.search(url):
+            if url.rstrip("/") != target.rstrip("/"):
+                state["rewrites"] += 1
+                _log(f"Sticky rewrite goto: {url!r} → {target!r}")
+            return f"page.goto({target!r}{rest})"
+        return match.group(0)
+
+    out = _PAGE_GOTO_RE.sub(_replace, source)
+    if state["rewrites"]:
+        _log(f"Sticky: rewrote {state['rewrites']} page.goto(s) to job start_url")
+    return out
 
 
 def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
     download_dir: Optional[str] = None,
+    start_url: Optional[str] = None,
 ) -> str:
     from rpa.debug_log import debug_log
 
@@ -414,7 +450,8 @@ def prepare_script_source(
     # to NERP SSO (OTP changes every time and must not be automated).
     if _use_system_chrome():
         _log("Sticky profile run — skipping SSO credential injection")
-        source = _soften_sticky_auth_actions(source)
+        source = _fix_sticky_gotos(source, start_url or "")
+        source = _strip_sticky_auth_actions(source)
     else:
         source = _inject_sso_credentials(source)
     source = _inject_sales_org(source)
@@ -896,6 +933,7 @@ def run_recorded_script(
     upload_file: Optional[str] = None,
     upload_dir: Optional[str] = None,
     download_dir: Optional[str] = None,
+    start_url: Optional[str] = None,
 ) -> None:
     os.environ.setdefault("NO_PROXY", "*")
     os.environ.setdefault("no_proxy", "*")
@@ -909,6 +947,16 @@ def run_recorded_script(
     os.environ.setdefault("RPA_CHROME_DEBUG_PORT", "9329")
 
     _log(f"Starting script: {rpa_id}")
+    job_start = (start_url or "").strip()
+    if not job_start:
+        try:
+            from rpa.jobs_db import get_rpa_job
+            job_start = ((get_rpa_job(rpa_id) or {}).get("start_url") or "").strip()
+        except Exception:
+            job_start = ""
+    if job_start:
+        os.environ["RPA_START_URL"] = job_start
+        _log(f"Job start_url: {job_start}")
     if upload_dir:
         _log(f"Upload folder: {upload_dir}")
         os.environ["RPA_UPLOAD_DIR"] = upload_dir
@@ -954,6 +1002,7 @@ def run_recorded_script(
         raw,
         upload_file=sap_upload or upload_file,
         download_dir=download_dir,
+        start_url=job_start,
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog

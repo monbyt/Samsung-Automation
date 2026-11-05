@@ -722,7 +722,11 @@ def _cdp_is_up(port: int) -> bool:
 
 
 def _ensure_keepalive_chrome(profile: str, port: int) -> None:
-    """Start Google Chrome with the sticky profile if CDP is not already listening."""
+    """Start Google Chrome with the sticky profile if CDP is not already listening.
+
+    Must fully detach from the Python/dashboard process — otherwise Windows kills
+    Chrome when the RPA script exits and MFA session cookies are lost.
+    """
     if _cdp_is_up(port):
         _log(f"Sticky Chrome already running on CDP port {port}")
         return
@@ -744,22 +748,36 @@ def _ensure_keepalive_chrome(profile: str, port: int) -> None:
         "--disable-blink-features=AutomationControlled",
         "about:blank",
     ]
-    _log(f"Starting keepalive Chrome: profile={profile} port={port}")
-    popen_kwargs = {
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
+    _log(f"Starting keepalive Chrome (detached): profile={profile} port={port}")
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+        # `start` breaks away from the dashboard job object so Chrome survives Run.
+        quoted = subprocess.list2cmdline(cmd)
+        subprocess.Popen(
+            f'start "RPA-sticky-chrome-{port}" {quoted}',
+            shell=True,
+            cwd=config.BASE_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+            | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000),
         )
-    subprocess.Popen(cmd, **popen_kwargs)
+    else:
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
     import time
 
-    for _ in range(40):
+    for _ in range(60):
         if _cdp_is_up(port):
-            _log(f"Sticky Chrome CDP ready on {port}")
+            _log(
+                f"Sticky Chrome CDP ready on {port} — leave this window open after MFA"
+            )
             return
         time.sleep(0.25)
     raise RuntimeError(
@@ -894,14 +912,9 @@ def _patch_playwright_no_timeout() -> None:
         # Sticky MFA: attach to a Chrome that stays open (session cookies).
         if sticky and profile:
             os.makedirs(profile, exist_ok=True)
-            _browser, ctx = _connect_sticky_chrome(self, profile)
-            try:
-                ctx.close = lambda *a, **k: _log(
-                    "Sticky: leaving Chrome open (session cookies)"
-                )
-            except Exception:
-                pass
-            return ctx
+            browser, ctx = _connect_sticky_chrome(self, profile)
+            # Return a browser-shaped wrapper: codegen may call browser.close().
+            return _StickyBrowser(ctx, browser=browser, keepalive=True)
 
         kwargs, port = _chromium_launch_args(kwargs, allow_system_chrome=True)
         kwargs.setdefault("accept_downloads", True)

@@ -99,10 +99,50 @@ def _maybe_sso_login(page):
         print(f"  SSO auto-login skipped: {e}")
 
 
+def _on_broken_w1_login(page) -> bool:
+    url = (page.url or "").lower()
+    return "abnormal-logout" in url or "loginapp" in url
+
+
+def _w1_shell_visible(page) -> bool:
+    """Mail button (already in) or the real SSO form (User Account)."""
+    try:
+        mail = page.get_by_role("button", name="Mail", exact=True)
+        if mail.count() > 0 and mail.first.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        user = page.get_by_role("textbox", name="User Account")
+        if user.count() > 0 and user.first.is_visible():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_w1_shell(page, timeout_s: float = 8) -> bool:
+    """First navigation often stops on a dead login URL. A reload then loads W1."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _on_broken_w1_login(page):
+            return False
+        if _w1_shell_visible(page):
+            return True
+        page.wait_for_timeout(400)
+    return _w1_shell_visible(page)
+
+
 def _goto_w1(page):
-    if "abnormal-logout" in page.url or "loginapp" in page.url:
-        _click_ok_popups(page)
     page.goto(config.W1_URL)
+    if not _wait_for_w1_shell(page):
+        print(f"  W1 did not load on first open ({page.url}) — reloading…")
+        try:
+            page.reload()
+        except Exception as e:
+            print(f"  W1 reload failed ({e}); opening {config.W1_URL} again…")
+            page.goto(config.W1_URL)
+        _wait_for_w1_shell(page)
     _click_ok_popups(page)
     _maybe_sso_login(page)
 

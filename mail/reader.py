@@ -142,14 +142,44 @@ def _goto_w1(page):
         except Exception as e:
             print(f"  W1 reload failed ({e}); opening {config.W1_URL} again…")
             page.goto(config.W1_URL)
-        _wait_for_w1_shell(page)
+        if not _wait_for_w1_shell(page):
+            raise RuntimeError(
+                f"W1 still did not load after refresh ({page.url})"
+            )
     _click_ok_popups(page)
     _maybe_sso_login(page)
 
 
+def _reload_mail_app(page):
+    """Refresh W1 and open Mail again. Call this when a control never appears."""
+    print("  Component did not open — refreshing…")
+    try:
+        page.reload()
+    except Exception as e:
+        print(f"  Reload failed ({e}); opening {config.W1_URL} again…")
+        page.goto(config.W1_URL)
+    if not _wait_for_w1_shell(page):
+        print(f"  W1 still not up after refresh ({page.url}) — opening again…")
+        page.goto(config.W1_URL)
+        if not _wait_for_w1_shell(page):
+            raise RuntimeError(
+                f"W1 still did not load after refresh ({page.url})"
+            )
+    _click_ok_popups(page)
+    _maybe_sso_login(page)
+    page.get_by_role("button", name="Mail", exact=True).click(timeout=8_000)
+    page.locator(MAIL_IFRAME).wait_for(state="visible", timeout=10_000)
+    time.sleep(0.8)
+
+
 def _open_mail(page):
     _goto_w1(page)
-    page.get_by_role("button", name="Mail", exact=True).click()
+    try:
+        page.get_by_role("button", name="Mail", exact=True).click(timeout=8_000)
+        page.locator(MAIL_IFRAME).wait_for(state="visible", timeout=10_000)
+    except Exception as e:
+        print(f"  Mail did not open ({e})")
+        _reload_mail_app(page)
 
 
 def _subject_pattern(subject: str):
@@ -208,22 +238,38 @@ def _open_mailbox(mail, mailbox):
         break
     if target is None:
         target = candidates.first
-    target.click()
+    target.click(timeout=8_000)
     time.sleep(1.5)
 
 
 def _apply_unread_filter(mail) -> None:
     """Open the mailbox Filter popover and select Unread (W1 codegen)."""
-    try:
-        mail.get_by_role("button", name="Filter").click(timeout=8_000)
-        time.sleep(0.4)
-        mail.locator("#FilterPopover").get_by_role(
-            "button", name="Unread"
-        ).click(timeout=8_000)
-        time.sleep(1.0)
-        print("  Filter → Unread applied")
-    except Exception as e:
-        print(f"  Filter → Unread skipped ({e})")
+    mail.get_by_role("button", name="Filter").click(timeout=8_000)
+    time.sleep(0.4)
+    popover = mail.locator("#FilterPopover")
+    popover.wait_for(state="visible", timeout=4_000)
+    popover.get_by_role("button", name="Unread").click(timeout=8_000)
+    time.sleep(1.0)
+    print("  Filter → Unread applied")
+
+
+def _prepare_mailbox(page, mailbox: str) -> None:
+    """Open the mailbox and Unread filter. Refresh once if those controls do not appear."""
+    last = None
+    for attempt in range(2):
+        try:
+            page.locator(MAIL_IFRAME).wait_for(state="visible", timeout=8_000)
+            mail = _mail(page)
+            _open_mailbox(mail, mailbox)
+            _apply_unread_filter(mail)
+            return
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                print(f"  Mailbox {mailbox!r} did not open ({e})")
+                _reload_mail_app(page)
+                continue
+    raise RuntimeError(f"Mailbox {mailbox!r} did not open: {last}") from last
 
 
 _IS_UNREAD_JS = """
@@ -579,11 +625,10 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
     print(f"[{filter_id}] Mailbox '{mailbox}' → subject contains {subject!r}")
     print(f"[{filter_id}] Saving to: {download_dir}")
 
-    mail = _mail(page)
-    _open_mailbox(mail, mailbox)
-    _apply_unread_filter(mail)
+    _prepare_mailbox(page, mailbox)
 
     for i in range(MAX_MAILS_PER_TICK):
+        mail = _mail(page)
         if not _click_unread_email(mail, subject, mailbox=mailbox, filter_id=filter_id):
             if i == 0:
                 print(f"[{filter_id}] No unread mail — skipping download.")
@@ -639,8 +684,7 @@ def check_filter(page, mail_filter, processed_subjects, on_download=None):
 
         # Back to the mailbox list — re-apply Filter → Unread each time,
         # because opening a mail clears the filter in W1.
-        _open_mailbox(mail, mailbox)
-        _apply_unread_filter(mail)
+        _prepare_mailbox(page, mailbox)
 
     return downloaded
 

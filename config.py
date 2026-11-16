@@ -37,6 +37,9 @@ DOWNLOAD_DIR = os.path.join(DESKTOP_DIR, "Order-Extract")
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome-profile")
 
 W1_URL = "http://w1.samsung.net"
+# Cold open of the bare host often lands on a dead loginapp page. Portal home
+# is the real shell (Mail button / SSO form) and loads on the first try more often.
+W1_HOME_URL = "http://w1.samsung.net/portalapp/home"
 
 # Set True to hide the browser window on scheduled W1 runs.
 HEADLESS = False

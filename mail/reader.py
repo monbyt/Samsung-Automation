@@ -133,15 +133,21 @@ def _wait_for_w1_shell(page, timeout_s: float = 8) -> bool:
     return _w1_shell_visible(page)
 
 
+def _w1_home() -> str:
+    return getattr(config, "W1_HOME_URL", None) or config.W1_URL
+
+
 def _goto_w1(page):
-    page.goto(config.W1_URL)
+    # Open portal home (not the bare host) so the first paint is the real shell.
+    home = _w1_home()
+    page.goto(home)
     if not _wait_for_w1_shell(page):
         print(f"  W1 did not load on first open ({page.url}) — reloading…")
         try:
             page.reload()
         except Exception as e:
-            print(f"  W1 reload failed ({e}); opening {config.W1_URL} again…")
-            page.goto(config.W1_URL)
+            print(f"  W1 reload failed ({e}); opening {home} again…")
+            page.goto(home)
         if not _wait_for_w1_shell(page):
             raise RuntimeError(
                 f"W1 still did not load after refresh ({page.url})"
@@ -152,15 +158,16 @@ def _goto_w1(page):
 
 def _reload_mail_app(page):
     """Refresh W1 and open Mail again. Call this when a control never appears."""
+    home = _w1_home()
     print("  Component did not open — refreshing…")
     try:
         page.reload()
     except Exception as e:
-        print(f"  Reload failed ({e}); opening {config.W1_URL} again…")
-        page.goto(config.W1_URL)
+        print(f"  Reload failed ({e}); opening {home} again…")
+        page.goto(home)
     if not _wait_for_w1_shell(page):
         print(f"  W1 still not up after refresh ({page.url}) — opening again…")
-        page.goto(config.W1_URL)
+        page.goto(home)
         if not _wait_for_w1_shell(page):
             raise RuntimeError(
                 f"W1 still did not load after refresh ({page.url})"

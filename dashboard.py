@@ -540,7 +540,7 @@ def jobs_list():
 
     body = """
   <h1>Mail Jobs</h1>
-  <div class="sub">Cron jobs snap to a 5-minute clock grid and are staggered so they don’t overlap — e.g. 12:00, 12:15, 12:30, 12:45. Scheduler checks every {{ tick }}s.</div>
+  <div class="sub">Cron jobs snap to a 5-minute clock grid and are staggered so they don’t overlap — e.g. 12:00, 12:15, 12:30, 12:45. Scheduler checks every {{ tick }}s. W1 login / expired session recovery uses <a href="/settings">Settings → W1 mail login</a> (not editable on this page).</div>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """

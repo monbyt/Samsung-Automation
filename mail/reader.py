@@ -74,18 +74,47 @@ def _mail(page):
     return page.locator(MAIL_IFRAME).content_frame
 
 
+def _has_expired_session(page) -> bool:
+    """W1 / SSO 'User session expired' / 'Expired session' dialog or page text."""
+    try:
+        body = (page.locator("body").inner_text(timeout=1_500) or "").lower()
+    except Exception:
+        body = ""
+    if "session expired" in body or (
+        "user session" in body and "expir" in body
+    ):
+        return True
+    try:
+        if page.get_by_text(re.compile(r"session\s+expired", re.I)).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _mail_button_visible(page) -> bool:
+    try:
+        mail = page.get_by_role("button", name="Mail", exact=True)
+        return mail.count() > 0 and mail.first.is_visible()
+    except Exception:
+        return False
+
+
 def _maybe_sso_login(page):
     """If W1 shows a login form, fill W1 credentials from Settings (not NERP)."""
     try:
         user_box = page.get_by_role("textbox", name="User Account")
         if user_box.count() == 0:
-            return
+            return False
         from mail.settings_db import get_w1_password, get_w1_username
         username = get_w1_username() or config.NERP_USERNAME
         password = get_w1_password() or config.NERP_PASSWORD
         if not username or not password:
-            print("  W1 login form detected but username/password not set in Settings.")
-            return
+            print(
+                "  W1 login form detected but username/password not set. "
+                "Open dashboard → Settings → W1 mail login (not Mail Jobs)."
+            )
+            return False
         print(f"  W1 login as {username}…")
         user_box.first.click(timeout=3_000)
         user_box.first.fill(username)
@@ -95,8 +124,34 @@ def _maybe_sso_login(page):
         pw.first.press("Enter")
         page.wait_for_timeout(2_000)
         _click_ok_popups(page)
+        return True
     except Exception as e:
         print(f"  SSO auto-login skipped: {e}")
+        return False
+
+
+def _recover_expired_session(page) -> None:
+    """Acknowledge expired-session UI, then sign in again via Settings credentials."""
+    print("  W1 session expired — signing in again…")
+    _click_ok_popups(page)
+    time.sleep(0.5)
+    if _mail_button_visible(page):
+        return
+    if _on_broken_w1_login(page) or not _w1_shell_visible(page):
+        page.goto(config.W1_URL)
+        _wait_for_w1_shell(page)
+    _click_ok_popups(page)
+    if not _maybe_sso_login(page):
+        # Wait briefly for manual login in the headed Chrome window.
+        deadline = time.time() + 90
+        print("  Waiting up to 90s for W1 login (Mail button)…")
+        while time.time() < deadline:
+            if _mail_button_visible(page):
+                return
+            _click_ok_popups(page)
+            _maybe_sso_login(page)
+            page.wait_for_timeout(500)
+    _wait_for_w1_shell(page, timeout_s=12)
 
 
 def _on_broken_w1_login(page) -> bool:
@@ -106,12 +161,8 @@ def _on_broken_w1_login(page) -> bool:
 
 def _w1_shell_visible(page) -> bool:
     """Mail button (already in) or the real SSO form (User Account)."""
-    try:
-        mail = page.get_by_role("button", name="Mail", exact=True)
-        if mail.count() > 0 and mail.first.is_visible():
-            return True
-    except Exception:
-        pass
+    if _mail_button_visible(page):
+        return True
     try:
         user = page.get_by_role("textbox", name="User Account")
         if user.count() > 0 and user.first.is_visible():
@@ -125,6 +176,8 @@ def _wait_for_w1_shell(page, timeout_s: float = 8) -> bool:
     """First navigation often stops on a dead login URL. A reload then loads W1."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
+        if _has_expired_session(page):
+            return False
         if _on_broken_w1_login(page):
             return False
         if _w1_shell_visible(page):
@@ -133,41 +186,46 @@ def _wait_for_w1_shell(page, timeout_s: float = 8) -> bool:
     return _w1_shell_visible(page)
 
 
-def _w1_home() -> str:
-    return getattr(config, "W1_HOME_URL", None) or config.W1_URL
-
-
 def _goto_w1(page):
-    # Open portal home (not the bare host) so the first paint is the real shell.
-    home = _w1_home()
-    page.goto(home)
+    # Bare host — same as when mail jobs worked. Portal home can force expired session.
+    page.goto(config.W1_URL)
+    if _has_expired_session(page) or _on_broken_w1_login(page):
+        _recover_expired_session(page)
     if not _wait_for_w1_shell(page):
         print(f"  W1 did not load on first open ({page.url}) — reloading…")
         try:
             page.reload()
         except Exception as e:
-            print(f"  W1 reload failed ({e}); opening {home} again…")
-            page.goto(home)
+            print(f"  W1 reload failed ({e}); opening {config.W1_URL} again…")
+            page.goto(config.W1_URL)
+        if _has_expired_session(page) or _on_broken_w1_login(page):
+            _recover_expired_session(page)
         if not _wait_for_w1_shell(page):
             raise RuntimeError(
                 f"W1 still did not load after refresh ({page.url})"
             )
-    _click_ok_popups(page)
-    _maybe_sso_login(page)
+    if _has_expired_session(page):
+        _recover_expired_session(page)
+    else:
+        _click_ok_popups(page)
+        _maybe_sso_login(page)
 
 
 def _reload_mail_app(page):
     """Refresh W1 and open Mail again. Call this when a control never appears."""
-    home = _w1_home()
     print("  Component did not open — refreshing…")
     try:
         page.reload()
     except Exception as e:
-        print(f"  Reload failed ({e}); opening {home} again…")
-        page.goto(home)
+        print(f"  Reload failed ({e}); opening {config.W1_URL} again…")
+        page.goto(config.W1_URL)
+    if _has_expired_session(page) or _on_broken_w1_login(page):
+        _recover_expired_session(page)
     if not _wait_for_w1_shell(page):
         print(f"  W1 still not up after refresh ({page.url}) — opening again…")
-        page.goto(home)
+        page.goto(config.W1_URL)
+        if _has_expired_session(page) or _on_broken_w1_login(page):
+            _recover_expired_session(page)
         if not _wait_for_w1_shell(page):
             raise RuntimeError(
                 f"W1 still did not load after refresh ({page.url})"
@@ -186,6 +244,8 @@ def _open_mail(page):
         page.locator(MAIL_IFRAME).wait_for(state="visible", timeout=10_000)
     except Exception as e:
         print(f"  Mail did not open ({e})")
+        if _has_expired_session(page) or _on_broken_w1_login(page):
+            _recover_expired_session(page)
         _reload_mail_app(page)
 
 

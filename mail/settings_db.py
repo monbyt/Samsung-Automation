@@ -38,6 +38,10 @@ W1_KEYS = (
     "w1_password",
 )
 
+OTP_KEYS = (
+    "otp_secret",
+)
+
 ALERT_KEYS = (
     "alert_emails",
     "alert_cc_emails",
@@ -158,6 +162,20 @@ def save_w1_credentials(username: str, password: str, *, keep_password_if_blank:
     set_setting("w1_username", username)
     if password or not keep_password_if_blank:
         set_setting("w1_password", password.strip())
+
+
+def get_otp_secret() -> str:
+    """Base32 TOTP secret for MFA (Tableau / web traffic, etc.)."""
+    return (get_setting("otp_secret", "") or "").strip()
+
+
+def save_otp_secret(secret: str) -> None:
+    """Persist the TOTP secret. Pass empty to clear."""
+    set_setting("otp_secret", (secret or "").strip())
+
+
+def clear_otp_secret() -> None:
+    set_setting("otp_secret", "")
 
 
 def get_nerp_env() -> str:

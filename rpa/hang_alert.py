@@ -58,6 +58,20 @@ def _secret_values() -> List[str]:
         os.environ.get("NERP_USERNAME", "") or "",
         os.environ.get("NERP_PASSWORD", "") or "",
     ])
+    try:
+        from mail.settings_db import get_otp_secret, get_sso_password, get_w1_password
+        vals.extend([
+            get_otp_secret() or "",
+            get_sso_password() or "",
+            get_w1_password() or "",
+        ])
+    except Exception:
+        pass
+    try:
+        from mail.otp import current_code
+        vals.append(current_code() or "")
+    except Exception:
+        pass
     out: List[str] = []
     seen = set()
     for raw in vals:

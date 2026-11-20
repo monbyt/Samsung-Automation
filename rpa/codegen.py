@@ -247,10 +247,34 @@ def _inject_nerp_url(source: str) -> str:
     )
 
 
+_OTP_FIELD_HINT_RE = re.compile(
+    r"verification|one[\s-]?time|otp|passcode|authenticator|"
+    r"security code|mfa|2fa|two[\s-]?factor|totp",
+    re.I,
+)
+
+
+def _line_looks_like_otp_field(stripped: str) -> bool:
+    if _OTP_FIELD_HINT_RE.search(stripped):
+        return True
+    # Common Playwright get_by_role / get_by_label names for MFA boxes.
+    for needle in (
+        'name="OTP"',
+        "name='OTP'",
+        'name="Code"',
+        "name='Code'",
+        'name="Token"',
+        "name='Token'",
+    ):
+        if needle in stripped:
+            return True
+    return False
+
+
 def _inject_sso_credentials(source: str) -> str:
-    """Rewrite hardcoded User Account / Password fills to use RPA_USERNAME / RPA_PASSWORD."""
+    """Rewrite User Account / Password / OTP fills to RPA_* values."""
     out = []
-    pending = None  # "user" | "pass" | None
+    pending = None  # "user" | "pass" | "otp" | None
     for line in source.splitlines():
         stripped = line.lstrip()
         if 'name="User Account"' in stripped or "name='User Account'" in stripped:
@@ -265,9 +289,19 @@ def _inject_sso_credentials(source: str) -> str:
                 pending = None
             else:
                 pending = "pass"
+        elif _line_looks_like_otp_field(stripped):
+            if ".fill(" in stripped:
+                # Call at fill time so the code is fresh (30s window).
+                line = re.sub(r'\.fill\((["\']).*?\1\)', ".fill(RPA_OTP())", line)
+                pending = None
+            else:
+                pending = "otp"
         elif pending and ".fill(" in stripped and "print(" not in stripped:
-            token = "RPA_USERNAME" if pending == "user" else "RPA_PASSWORD"
-            line = re.sub(r'\.fill\((["\']).*?\1\)', f".fill({token})", line)
+            if pending == "otp":
+                line = re.sub(r'\.fill\((["\']).*?\1\)', ".fill(RPA_OTP())", line)
+            else:
+                token = "RPA_USERNAME" if pending == "user" else "RPA_PASSWORD"
+                line = re.sub(r'\.fill\((["\']).*?\1\)', f".fill({token})", line)
             pending = None
         elif stripped and not stripped.startswith("#"):
             # clicked something else — clear pending intent
@@ -757,6 +791,16 @@ def run_recorded_script(
     _log(f"NERP environment: {get_nerp_env()} → {nerp_url}")
     _log(f"Sales Org from Excel: {sales_org}")
 
+    def _rpa_otp() -> str:
+        """Fresh TOTP at fill time (codes expire every 30s)."""
+        from mail.otp import current_code
+        code = current_code()
+        if not code:
+            raise RuntimeError(
+                "MFA OTP secret not set — add it under Settings → MFA OTP"
+            )
+        return code
+
     run_globals = {
         "__name__": "__main__",
         "__file__": path,
@@ -768,6 +812,7 @@ def run_recorded_script(
         "RPA_SALES_ORG": sales_org,
         "RPA_USERNAME": get_sso_username() or config.NERP_USERNAME,
         "RPA_PASSWORD": get_sso_password() or config.NERP_PASSWORD,
+        "RPA_OTP": _rpa_otp,
         "win_open_file": dismiss_open_file_dialog,
         "win_save_as": dismiss_save_as_dialog,
     }

@@ -7,7 +7,7 @@ Wire into dashboard.py with:
 """
 from html import escape as html_escape
 
-from flask import Blueprint, redirect, render_template_string, request, url_for
+from flask import Blueprint, jsonify, redirect, render_template_string, request, url_for
 
 from mail.email_jobs_db import (
     delete_email_job, get_email_job_for_rpa, list_email_jobs,
@@ -114,6 +114,13 @@ _AGENT_LABELS = {
 }
 
 
+@email_bp.route("/settings/otp/code")
+def settings_otp_code():
+    """Live TOTP for the Settings panel (and RPA health checks)."""
+    from mail.otp import code_status
+    return jsonify(code_status())
+
+
 @email_bp.route("/settings", methods=["GET", "POST"])
 def settings_page():
     from mail.settings_db import (
@@ -141,6 +148,26 @@ def settings_page():
                     keep_password_if_blank=True,
                 )
                 msg = "W1 login credentials saved."
+            elif section == "otp_clear":
+                from mail.otp import clear_secret
+                clear_secret()
+                msg = "MFA OTP secret cleared."
+            elif section == "otp":
+                from mail.otp import save_secret
+                raw = (form.get("otp_secret", "") or "").strip()
+                upload = request.files.get("otp_file")
+                if upload and upload.filename:
+                    try:
+                        file_text = upload.read().decode("utf-8", errors="replace")
+                    except Exception as e:
+                        raise ValueError(f"Could not read uploaded file: {e}") from e
+                    raw = file_text if file_text.strip() else raw
+                if not raw:
+                    raise ValueError(
+                        "Paste a secret / otpauth:// URI, or upload otp_secret.txt."
+                    )
+                save_secret(raw)
+                msg = "MFA OTP secret saved. Live codes appear below."
             elif section == "nerp_env":
                 from mail.settings_db import save_nerp_env, get_nerp_url
                 env = save_nerp_env(form.get("nerp_env", "prod"))
@@ -173,7 +200,8 @@ def settings_page():
             msg = f"Failed to save: {e}"
 
     cfg = get_agent_config()
-    from mail.settings_db import get_setting, get_nerp_env, get_nerp_url
+    from mail.settings_db import get_setting, get_nerp_env, get_nerp_url, get_otp_secret
+    from mail.otp import code_status
     alert_to = get_setting("alert_emails", "")
     alert_cc = get_setting("alert_cc_emails", "")
     stuck = get_setting("stuck_minutes", "60") or "60"
@@ -185,6 +213,23 @@ def settings_page():
     nerp_url = get_nerp_url()
     nerp_prod_sel = "selected" if nerp_env == "prod" else ""
     nerp_test_sel = "selected" if nerp_env == "test" else ""
+    otp_status = code_status()
+    has_otp = bool(get_otp_secret())
+    otp_code_display = html_escape(otp_status.get("code") or "——————")
+    otp_remaining = int(otp_status.get("remaining") or 0)
+    otp_err = html_escape(otp_status.get("error") or "")
+    otp_live = (
+        f'<p class="ok">Secret saved ✓ — current code '
+        f'<code id="otp-code" style="font-size:1.4em;letter-spacing:0.12em">'
+        f'{otp_code_display}</code> '
+        f'(<span id="otp-remaining">{otp_remaining}</span>s left)</p>'
+        if has_otp and not otp_err
+        else (
+            f'<p class="err">{otp_err}</p>'
+            if otp_err
+            else '<p class="muted">No secret saved yet.</p>'
+        )
+    )
     rows = []
     for key in AGENT_KEYS:
         label, hint = _AGENT_LABELS[key]
@@ -209,7 +254,7 @@ def settings_page():
 
     body = f"""
     <h1>Settings</h1>
-    <div class="sub">W1 mail login, NERP login, Agent API, hang alerts, and the Order Creation daily digest.</div>
+    <div class="sub">W1 mail login, NERP login, MFA OTP, Agent API, hang alerts, and the Order Creation daily digest.</div>
     {_flash(msg, ok)}
     <div class="panel">
       <h2>NERP environment</h2>
@@ -279,6 +324,50 @@ def settings_page():
         </div>
         <button type="submit" class="btn-run">Save NERP login</button>
       </form>
+    </div>
+    <div class="panel">
+      <h2>MFA OTP (authenticator)</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Same secret you put into <code>otp.exe</code> / Google Authenticator.
+        Paste the base32 key, an <code>otpauth://</code> URI (from a QR), or upload
+        <code>otp_secret.txt</code>. Recorded RPA scripts then fill OTP fields with
+        a fresh code via <code>RPA_OTP()</code>.
+      </p>
+      {otp_live}
+      <form method="post" enctype="multipart/form-data" style="margin-top:12px">
+        <input type="hidden" name="section" value="otp">
+        <div class="form-row">
+          <label for="otp_secret">Secret or otpauth:// URI</label>
+          <textarea id="otp_secret" name="otp_secret" rows="3"
+                    placeholder="JBSWY3DPEHPK3PXP  or  otpauth://totp/...?secret=..."
+                    autocomplete="off" style="width:100%;font-family:ui-monospace,monospace"></textarea>
+        </div>
+        <div class="form-row">
+          <label for="otp_file">Or upload otp_secret.txt</label>
+          <input type="file" id="otp_file" name="otp_file" accept=".txt,text/plain,*/*">
+        </div>
+        <button type="submit" class="btn-run">Save MFA secret</button>
+      </form>
+      <form method="post" style="margin-top:12px"
+            onsubmit="return confirm('Clear the saved MFA secret?');">
+        <input type="hidden" name="section" value="otp_clear">
+        <button type="submit">Clear MFA secret</button>
+      </form>
+      <script>
+      (function () {{
+        var codeEl = document.getElementById("otp-code");
+        var remEl = document.getElementById("otp-remaining");
+        if (!codeEl || !remEl) return;
+        function tick() {{
+          fetch("/settings/otp/code").then(function (r) {{ return r.json(); }})
+            .then(function (d) {{
+              if (d.code) codeEl.textContent = d.code;
+              if (typeof d.remaining === "number") remEl.textContent = d.remaining;
+            }}).catch(function () {{}});
+        }}
+        setInterval(tick, 1000);
+      }})();
+      </script>
     </div>
     <div class="panel">
       <h2>Agent (mail) API</h2>

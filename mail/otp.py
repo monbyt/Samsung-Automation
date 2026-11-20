@@ -3,9 +3,13 @@ TOTP (authenticator) helper for MFA.
 
 Store the same base32 secret you put in otp.exe / Google Authenticator.
 Then current_code() returns the live 6-digit code for RPA login fills.
+
+On save, also writes otp_secret.txt in the project folder so you can copy
+that file to another PC and upload it under Settings → MFA OTP.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
@@ -72,22 +76,55 @@ def _secret_from_otpauth(uri: str) -> str:
     return secret
 
 
+def otp_secret_path() -> str:
+    """Project-root otp_secret.txt — transfer this file to another PC."""
+    import config
+    return os.path.join(config.BASE_DIR, "otp_secret.txt")
+
+
 def get_stored_secret() -> str:
     from mail.settings_db import get_otp_secret
     return get_otp_secret()
 
 
+def _write_otp_secret_file(secret: str) -> str:
+    path = otp_secret_path()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write((secret or "").strip() + "\n")
+    return path
+
+
+def _remove_otp_secret_file() -> None:
+    path = otp_secret_path()
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def sync_otp_secret_file() -> str:
+    """Ensure otp_secret.txt matches the DB secret (create/update or delete)."""
+    secret = get_stored_secret()
+    if secret:
+        return _write_otp_secret_file(secret)
+    _remove_otp_secret_file()
+    return ""
+
+
 def save_secret(raw: str) -> str:
-    """Normalize and persist. Returns the cleaned secret."""
+    """Normalize, persist to Settings DB, and write otp_secret.txt. Returns secret."""
     from mail.settings_db import save_otp_secret
     secret = normalize_secret(raw)
     save_otp_secret(secret)
+    _write_otp_secret_file(secret)
     return secret
 
 
 def clear_secret() -> None:
     from mail.settings_db import clear_otp_secret
     clear_otp_secret()
+    _remove_otp_secret_file()
 
 
 def current_code(secret: Optional[str] = None) -> str:

@@ -167,7 +167,11 @@ def settings_page():
                         "Paste a secret / otpauth:// URI, or upload otp_secret.txt."
                     )
                 save_secret(raw)
-                msg = "MFA OTP secret saved. Live codes appear below."
+                from mail.otp import otp_secret_path
+                msg = (
+                    f"MFA OTP secret saved. Live codes appear below. "
+                    f"Copy {otp_secret_path()} to another PC to transfer it."
+                )
             elif section == "nerp_env":
                 from mail.settings_db import save_nerp_env, get_nerp_url
                 env = save_nerp_env(form.get("nerp_env", "prod"))
@@ -201,7 +205,12 @@ def settings_page():
 
     cfg = get_agent_config()
     from mail.settings_db import get_setting, get_nerp_env, get_nerp_url, get_otp_secret
-    from mail.otp import code_status
+    from mail.otp import code_status, otp_secret_path, sync_otp_secret_file
+    # Keep otp_secret.txt in sync so an already-saved secret is exportable.
+    try:
+        sync_otp_secret_file()
+    except Exception:
+        pass
     alert_to = get_setting("alert_emails", "")
     alert_cc = get_setting("alert_cc_emails", "")
     stuck = get_setting("stuck_minutes", "60") or "60"
@@ -330,8 +339,9 @@ def settings_page():
       <p class="muted" style="margin-bottom:14px;line-height:1.5">
         Same secret you put into <code>otp.exe</code> / Google Authenticator.
         Paste the base32 key, an <code>otpauth://</code> URI (from a QR), or upload
-        <code>otp_secret.txt</code>. Recorded RPA scripts then fill OTP fields with
-        a fresh code via <code>RPA_OTP()</code>.
+        <code>otp_secret.txt</code>. Saving also writes
+        <code>{html_escape(otp_secret_path())}</code> — copy that file to another
+        PC and upload it there. RPA fills OTP fields via <code>RPA_OTP()</code>.
       </p>
       {otp_live}
       <form method="post" enctype="multipart/form-data" style="margin-top:12px">

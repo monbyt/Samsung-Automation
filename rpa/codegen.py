@@ -833,13 +833,39 @@ def run_recorded_script(
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog
-    from mail.settings_db import get_nerp_env, get_nerp_url, get_sso_password, get_sso_username
+    from mail.settings_db import (
+        get_nerp_env,
+        get_nerp_url,
+        get_sso_password,
+        get_sso_username,
+        get_tableau_password,
+        get_tableau_username,
+    )
     from rpa.excel_meta import detect_sales_org
 
     nerp_url = get_nerp_url()
     sales_org = detect_sales_org(sap_upload or upload_file)
     _log(f"NERP environment: {get_nerp_env()} → {nerp_url}")
     _log(f"Sales Org from Excel: {sales_org}")
+
+    # Tableau / d2cbi jobs use a different password than NERP.
+    use_tableau_login = (
+        (rpa_id or "").startswith("traffic")
+        or "d2cbi" in (start_url or "").lower()
+        or "tableau" in (rpa_id or "").lower()
+    )
+    if use_tableau_login:
+        rpa_user = get_tableau_username() or get_sso_username() or config.NERP_USERNAME
+        rpa_pass = get_tableau_password()
+        if not rpa_pass:
+            raise RuntimeError(
+                "Tableau / d2cbi password not set — open Settings → "
+                "Tableau / d2cbi login and save it (separate from NERP)."
+            )
+        _log("Using Tableau / d2cbi credentials from Settings")
+    else:
+        rpa_user = get_sso_username() or config.NERP_USERNAME
+        rpa_pass = get_sso_password() or config.NERP_PASSWORD
 
     def _rpa_otp() -> str:
         """Fresh TOTP at fill time (codes expire every 30s)."""
@@ -860,8 +886,8 @@ def run_recorded_script(
         "RPA_DOWNLOAD_DIR": download_dir or "",
         "RPA_NERP_URL": nerp_url,
         "RPA_SALES_ORG": sales_org,
-        "RPA_USERNAME": get_sso_username() or config.NERP_USERNAME,
-        "RPA_PASSWORD": get_sso_password() or config.NERP_PASSWORD,
+        "RPA_USERNAME": rpa_user,
+        "RPA_PASSWORD": rpa_pass,
         "RPA_OTP": _rpa_otp,
         "win_open_file": dismiss_open_file_dialog,
         "win_save_as": dismiss_save_as_dialog,

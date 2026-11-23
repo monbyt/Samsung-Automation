@@ -125,7 +125,7 @@ def settings_otp_code():
 def settings_page():
     from mail.settings_db import (
         get_sso_password, get_sso_username,
-        save_sso_credentials, save_w1_credentials,
+        save_sso_credentials, save_tableau_credentials, save_w1_credentials,
     )
 
     msg = ""
@@ -148,6 +148,13 @@ def settings_page():
                     keep_password_if_blank=True,
                 )
                 msg = "W1 login credentials saved."
+            elif section == "tableau":
+                save_tableau_credentials(
+                    form.get("tableau_username", ""),
+                    form.get("tableau_password", ""),
+                    keep_password_if_blank=True,
+                )
+                msg = "Tableau / d2cbi login credentials saved."
             elif section == "otp_clear":
                 from mail.otp import clear_secret
                 clear_secret()
@@ -260,6 +267,8 @@ def settings_page():
     # Show stored W1 fields (not NERP fallback) so the form is clear when unset.
     w1_user = get_setting("w1_username", "") or sso_user
     has_w1_pw = bool(get_setting("w1_password", ""))
+    tableau_user = get_setting("tableau_username", "") or sso_user
+    has_tableau_pw = bool(get_setting("tableau_password", ""))
 
     body = f"""
     <h1>Settings</h1>
@@ -332,6 +341,31 @@ def settings_page():
           </div>
         </div>
         <button type="submit" class="btn-run">Save NERP login</button>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Tableau / d2cbi login</h2>
+      <p class="muted" style="margin-bottom:14px;line-height:1.5">
+        Username + password for <code>mfa-d2cbi</code> / Traffic Raw. This is
+        <b>separate</b> from NERP and W1 — use the password for that site here.
+        Pair with <b>MFA OTP</b> below. Used by the <code>traffic_raw</code> RPA job.
+      </p>
+      <form method="post">
+        <input type="hidden" name="section" value="tableau">
+        <div class="grid-2">
+          <div class="form-row">
+            <label for="tableau_username">Username</label>
+            <input type="text" id="tableau_username" name="tableau_username"
+                   value="{tableau_user}" autocomplete="username">
+          </div>
+          <div class="form-row">
+            <label for="tableau_password">Password {"(saved ✓)" if has_tableau_pw else "(not set)"}</label>
+            <input type="password" id="tableau_password" name="tableau_password"
+                   value="" placeholder="{'••••••••' if has_tableau_pw else 'Enter Tableau / d2cbi password'}"
+                   autocomplete="new-password">
+          </div>
+        </div>
+        <button type="submit" class="btn-run">Save Tableau login</button>
       </form>
     </div>
     <div class="panel">

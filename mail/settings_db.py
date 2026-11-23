@@ -42,6 +42,11 @@ OTP_KEYS = (
     "otp_secret",
 )
 
+TABLEAU_KEYS = (
+    "tableau_username",
+    "tableau_password",
+)
+
 ALERT_KEYS = (
     "alert_emails",
     "alert_cc_emails",
@@ -162,6 +167,28 @@ def save_w1_credentials(username: str, password: str, *, keep_password_if_blank:
     set_setting("w1_username", username)
     if password or not keep_password_if_blank:
         set_setting("w1_password", password.strip())
+
+
+def get_tableau_username() -> str:
+    """d2cbi / Tableau MFA username. Falls back to NERP username if unset."""
+    stored = get_setting("tableau_username")
+    if stored:
+        return stored
+    return get_sso_username()
+
+
+def get_tableau_password() -> str:
+    """d2cbi / Tableau MFA password. Does NOT fall back to NERP — different site."""
+    return (get_setting("tableau_password", "") or "").strip()
+
+
+def save_tableau_credentials(username: str, password: str, *, keep_password_if_blank: bool = True):
+    """Persist Tableau / d2cbi login (separate from W1 and NERP)."""
+    username = (username or "").strip()
+    password = password if password is not None else ""
+    set_setting("tableau_username", username)
+    if password or not keep_password_if_blank:
+        set_setting("tableau_password", password.strip())
 
 
 def get_otp_secret() -> str:

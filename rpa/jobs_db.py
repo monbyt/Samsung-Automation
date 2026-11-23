@@ -156,6 +156,23 @@ def seed_from_config():
             enabled=1,
             created_at=now,
         ))
+    if "traffic_raw" not in existing:
+        to_insert.append(dict(
+            rpa_id="traffic_raw",
+            name="Tableau Traffic Raw (CSV)",
+            tool="codegen",
+            start_url=(
+                "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
+                "?:embed=n&:iid=1&:origin=card_share_link"
+            ),
+            description=(
+                "Sign in to d2cbi (username/password + MFA OTP from Settings), "
+                "open Traffic Raw, download Crosstab CSV."
+            ),
+            trigger_mail_job="",
+            enabled=1,
+            created_at=now,
+        ))
 
     if not to_insert:
         return

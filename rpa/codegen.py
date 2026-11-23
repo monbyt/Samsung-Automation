@@ -271,13 +271,52 @@ def _line_looks_like_otp_field(stripped: str) -> bool:
     return False
 
 
+_USERNAME_FIELD_RE = re.compile(
+    r'name=(["\'])(?:User Account|Username|Email Address|E-mail)\1',
+    re.I,
+)
+
+# One-time OpenID auth URLs die after one use — rewrite to the Tableau view.
+_MFA_AUTH_GOTO_RE = re.compile(
+    r"""page\.goto\(\s*(['"])https?://mfa-d2cbi\.sec\.samsung\.net/[^'"]*\1\s*\)""",
+    re.I,
+)
+_TRAFFIC_VIEW_DEFAULT = (
+    "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
+    "?:embed=n&:iid=1&:origin=card_share_link"
+)
+
+
+def _strip_capslock_noise(source: str) -> str:
+    """Codegen often records CapsLock presses while typing a password — drop them."""
+    out = []
+    for line in source.splitlines():
+        if re.search(r'\.press\(\s*([\'"])CapsLock\1\s*\)', line):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _rewrite_mfa_auth_gotos(source: str, start_url: str = "") -> str:
+    target = (start_url or "").strip() or _TRAFFIC_VIEW_DEFAULT
+    if not _MFA_AUTH_GOTO_RE.search(source):
+        return source
+    replaced = _MFA_AUTH_GOTO_RE.sub(
+        lambda m: f'page.goto({m.group(1)}{target}{m.group(1)})',
+        source,
+    )
+    if replaced != source:
+        _log(f"Rewrote mfa-d2cbi one-time auth goto → {target!r}")
+    return replaced
+
+
 def _inject_sso_credentials(source: str) -> str:
-    """Rewrite User Account / Password / OTP fills to RPA_* values."""
+    """Rewrite User Account / Username / Password / OTP fills to RPA_* values."""
     out = []
     pending = None  # "user" | "pass" | "otp" | None
     for line in source.splitlines():
         stripped = line.lstrip()
-        if 'name="User Account"' in stripped or "name='User Account'" in stripped:
+        if _USERNAME_FIELD_RE.search(stripped):
             if ".fill(" in stripped:
                 line = re.sub(r'\.fill\((["\']).*?\1\)', ".fill(RPA_USERNAME)", line)
                 pending = None
@@ -347,12 +386,15 @@ def prepare_script_source(
     source: str,
     upload_file: Optional[str] = None,
     download_dir: Optional[str] = None,
+    start_url: str = "",
 ) -> str:
     from rpa.debug_log import debug_log
 
     source = _inject_no_timeout_setup(_strip_action_timeouts(source))
+    source = _strip_capslock_noise(source)
     source = _sanitize_upload_literals(source)
     source = _inject_nerp_url(source)
+    source = _rewrite_mfa_auth_gotos(source, start_url=start_url)
     source = _inject_sso_credentials(source)
     source = _inject_sales_org(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
@@ -542,7 +584,7 @@ def _patch_playwright_no_timeout() -> None:
 
 def _fill_is_secret(locator, value) -> bool:
     loc = str(locator)
-    if re.search(r"Password|User Account", loc, re.I):
+    if re.search(r"Password|User Account|Username|One-time|OTP", loc, re.I):
         return True
     if not isinstance(value, str) or len(value) < 3:
         return False
@@ -776,10 +818,18 @@ def run_recorded_script(
     with open(path, encoding="utf-8") as f:
         raw = f.read()
     sap_upload = os.environ.get("RPA_UPLOAD_FILE") or None
+    start_url = ""
+    try:
+        from rpa.jobs_db import get_rpa_job
+        job = get_rpa_job(rpa_id) or {}
+        start_url = (job.get("start_url") or "").strip()
+    except Exception:
+        start_url = ""
     source = prepare_script_source(
         raw,
         upload_file=sap_upload or upload_file,
         download_dir=download_dir,
+        start_url=start_url,
     )
 
     from win_file_dialog import dismiss_open_file_dialog, dismiss_save_as_dialog

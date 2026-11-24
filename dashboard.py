@@ -1004,6 +1004,7 @@ def api_docs():
     <tr><td>GET</td><td><code>/api/table/orders?limit=100&amp;offset=0</code></td><td>Rows from a table (paginated)</td></tr>
     <tr><td>GET</td><td><code>/api/table/orders/latest?filter_id=order_extract</code></td><td>Latest snapshot for one job</td></tr>
     <tr><td>GET</td><td><code>/api/ingestions</code></td><td>Ingestion history</td></tr>
+    <tr><td>GET</td><td><code>/api/rpa/work-items?limit=50&amp;status=</code></td><td>RPA work queue + 24h counts</td></tr>
     <tr><td>POST</td><td><code>/api/query</code></td><td>Read-only SQL (JSON body)</td></tr>
   </table></div>
   <div class="panel"><h2>Examples (curl)</h2>
@@ -1145,6 +1146,16 @@ def rpa_list():
         "FROM rpa_runs ORDER BY id DESC LIMIT 20"
     )
     runs = runs_df.to_dict("records") if not runs_df.empty else []
+    try:
+        from rpa.work_queue import list_work_items, work_item_counts_24h
+        work_items = list_work_items(limit=50)
+        work_counts = work_item_counts_24h()
+    except Exception:
+        work_items = []
+        work_counts = {
+            "succeeded": 0, "failed": 0, "skipped_duplicate": 0,
+            "running": 0, "cancelled": 0, "total": 0,
+        }
 
     body = """
   <h1>RPA Tools</h1>
@@ -1152,6 +1163,31 @@ def rpa_list():
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """
+  <div class="panel">
+    <h2>Work queue (last 24h)</h2>
+    <p class="muted" style="margin-bottom:10px">
+      Durable per-file tracking — prevents duplicate SAP uploads and shows mistakes.
+      <span class="pill">ok {{ work_counts.succeeded }}</span>
+      <span class="pill">failed {{ work_counts.failed }}</span>
+      <span class="pill">dup skip {{ work_counts.skipped_duplicate }}</span>
+      <span class="pill">in flight {{ work_counts.running }}</span>
+      <span class="pill">cancelled {{ work_counts.cancelled }}</span>
+    </p>
+    <div class="scroll">
+    {% if work_items %}<table>
+    <tr><th>When</th><th>Tool</th><th>File</th><th>Status</th><th>Attempt</th><th>Work</th><th>Detail</th></tr>
+    {% for w in work_items %}<tr>
+      <td>{{ w.finished_at or w.started_at or w.created_at or '—' }}</td>
+      <td><span class="pill">{{ w.rpa_id }}</span></td>
+      <td>{{ w.source_file or '—' }}</td>
+      <td class="{{ 'ok' if w.status=='succeeded' else 'err' if w.status in ('failed','cancelled') else '' }}">{{ w.status }}</td>
+      <td>{{ w.attempt or 1 }}</td>
+      <td class="muted">{{ (w.work_id or '')[:8] }}</td>
+      <td class="muted" style="max-width:280px;word-break:break-word">{{ w.error or w.message or '' }}</td>
+    </tr>{% endfor %}</table>
+    {% else %}<p class="muted">No work items yet — they appear after mail-triggered or manual RPA runs.</p>{% endif %}
+    </div>
+  </div>
   <p><a href="/rpa/new"><button type="button">+ New recorded script</button></a></p>
   <div class="panel"><h2>Registered tools</h2><div class="scroll">
     {% if jobs %}<table>
@@ -1204,7 +1240,7 @@ def rpa_list():
       5. <b>Run</b> to execute, or link to a mail job for auto-trigger after download
     </p>
   </div>
-  <div class="panel"><h2>Recent RPA runs</h2><div class="scroll">
+  <div class="panel"><h2>Recent RPA runs (legacy log)</h2><div class="scroll">
     {% if runs %}<table>
     <tr><th>Time</th><th>Tool</th><th>File</th><th>Status</th><th>Detail</th></tr>
     {% for r in runs %}<tr>
@@ -1215,7 +1251,9 @@ def rpa_list():
   </div></div>
 """
     return _layout(
-        "RPA Tools", "rpa", body, jobs=jobs, runs=runs, msg=msg, err=err, meta_refresh=0,
+        "RPA Tools", "rpa", body,
+        jobs=jobs, runs=runs, work_items=work_items, work_counts=work_counts,
+        msg=msg, err=err, meta_refresh=0,
     )
 
 
@@ -1519,12 +1557,45 @@ def api_ingestions():
     return jsonify({"ingestions": df.to_dict("records")})
 
 
+@app.route("/api/rpa/work-items")
+def api_rpa_work_items():
+    """Recent durable RPA work items + 24h status counts."""
+    if err := _api_guard():
+        return err
+    from rpa.work_queue import list_work_items, work_item_counts_24h
+
+    limit = request.args.get("limit", 50, type=int)
+    status = (request.args.get("status") or "").strip() or None
+    rpa_id = (request.args.get("rpa_id") or "").strip() or None
+    items = list_work_items(limit=limit, status=status, rpa_id=rpa_id)
+    # JSON-serialize datetimes
+    for item in items:
+        for key in (
+            "claimed_at", "lease_until", "started_at", "finished_at", "created_at",
+        ):
+            val = item.get(key)
+            if hasattr(val, "isoformat"):
+                item[key] = val.isoformat(timespec="seconds")
+    return jsonify({
+        "work_items": items,
+        "counts_24h": work_item_counts_24h(),
+    })
+
+
 if __name__ == "__main__":
     from rpa.hang_alert import install_dashboard_tee, start_watchdog
     log_path = install_dashboard_tee()
     print(f"Logging to {log_path}")
     seed_from_config()
     seed_rpa()
+    try:
+        from rpa.work_queue import init_work_queue, reclaim_stale_work
+        init_work_queue()
+        n = reclaim_stale_work()
+        if n:
+            print(f"Reclaimed {n} orphaned RPA work item(s)")
+    except Exception as e:
+        print(f"RPA work queue init failed: {e}")
     start_watchdog()
     if config.DASHBOARD_RUNS_SCHEDULER:
         from mail.cron import start_background

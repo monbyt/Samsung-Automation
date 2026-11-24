@@ -60,10 +60,15 @@ def init_db():
             conn.execute(text("PRAGMA journal_mode=WAL"))
             conn.execute(text("PRAGMA synchronous=NORMAL"))
     _migrate_columns()
+    try:
+        from rpa.work_queue import init_work_queue
+        init_work_queue()
+    except Exception:
+        pass
 
 
 def _migrate_columns():
-    """Add new ingestion_log columns on existing databases."""
+    """Add new ingestion_log / rpa_runs columns on existing databases."""
     if not config.DB_URL.startswith("sqlite"):
         return
     with engine.begin() as conn:
@@ -75,6 +80,12 @@ def _migrate_columns():
             conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN filter_id VARCHAR(64)"))
         if "mail_subject" not in cols:
             conn.execute(text("ALTER TABLE ingestion_log ADD COLUMN mail_subject VARCHAR(500)"))
+        rpa_cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(rpa_runs)"))
+        }
+        if rpa_cols and "work_id" not in rpa_cols:
+            conn.execute(text("ALTER TABLE rpa_runs ADD COLUMN work_id VARCHAR(64)"))
 
 
 def record_monitor_run(summary, job_id=None):
@@ -93,16 +104,27 @@ def record_monitor_run(summary, job_id=None):
         ))
 
 
-def record_rpa_run(rpa_id, status, message=None, upload_file=None):
+def record_rpa_run(rpa_id, status, message=None, upload_file=None, work_id=None):
     init_db()
+    values = dict(
+        rpa_id=rpa_id,
+        upload_file=os.path.basename(upload_file) if upload_file else None,
+        status=status,
+        message=(message or "")[:2000],
+        ran_at=datetime.now(),
+    )
+    if work_id and config.DB_URL.startswith("sqlite"):
+        with engine.begin() as conn:
+            cols = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(rpa_runs)"))
+            }
+            if "work_id" in cols:
+                values["work_id"] = work_id
+            conn.execute(rpa_runs.insert().values(**values))
+        return
     with engine.begin() as conn:
-        conn.execute(rpa_runs.insert().values(
-            rpa_id=rpa_id,
-            upload_file=os.path.basename(upload_file) if upload_file else None,
-            status=status,
-            message=(message or "")[:2000],
-            ran_at=datetime.now(),
-        ))
+        conn.execute(rpa_runs.insert().values(**values))
 
 
 def get_engine():

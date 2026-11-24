@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Optional, Tuple
 
 import config
-from db import record_rpa_run
 from rpa.jobs_db import get_rpa_job, list_for_mail_job, mark_rpa_finished, get_next_rpa
 
 _UPLOAD_EXT = (".xlsx", ".xls", ".xlsm", ".csv")
@@ -253,16 +252,24 @@ def run_rpa(
     upload_dir: Optional[str] = None,
     download_dir: Optional[str] = None,
     run_label: Optional[str] = None,
+    work_id: Optional[str] = None,
+    mail_job_id: Optional[str] = None,
+    pipeline_run_id: Optional[str] = None,
 ) -> dict:
     """Run one RPA tool by id. Chains to next_rpa on success.
 
     send_email — if False, skip the post-RPA mail send.
     upload_dir / download_dir — optional isolated folders for parallel workers.
     run_label — optional Live-execution card title.
+    work_id — durable work-queue id (created automatically for manual runs).
     """
     from pipeline_progress import (
         PipelineCancelled, begin_step, check_cancelled, current_run_id,
         finish_run, finish_step, start_run,
+    )
+    from rpa.work_queue import (
+        attach_pipeline_run, claim_work, enqueue_or_skip, finish_work,
+        mark_running,
     )
 
     if _visited is None:
@@ -275,6 +282,29 @@ def run_rpa(
     job = get_rpa_job(rpa_id)
     if not job:
         raise ValueError(f"Unknown RPA job: {rpa_id}")
+
+    # Manual / chained runs without a pre-enqueued work item.
+    if not work_id:
+        enq = enqueue_or_skip(
+            rpa_id,
+            source_file=upload_file,
+            mail_job_id=mail_job_id or job.get("trigger_mail_job"),
+            pipeline_run_id=pipeline_run_id,
+        )
+        work_id = enq.get("work_id")
+        if enq.get("skipped"):
+            _log(f"Work queue skip: {enq.get('message')}")
+            return {
+                "rpa_id": rpa_id,
+                "status": "skipped_duplicate",
+                "message": enq.get("message") or "duplicate",
+                "work_id": work_id,
+                "upload_file": upload_file,
+            }
+        claim_work(work_id, worker_pid=os.getpid())
+
+    mark_running(work_id)
+    result = {"rpa_id": rpa_id, "status": "ok", "message": "", "work_id": work_id}
 
     owns_run = current_run_id() is None
     if owns_run:
@@ -289,9 +319,14 @@ def run_rpa(
                 ("cleanup", "Clean up files"),
             ],
         )
+        try:
+            attach_pipeline_run(work_id, current_run_id() or "")
+        except Exception:
+            pass
 
     print(f"\n[RPA] Running {job['name']} ({rpa_id})...")
     _log(f"Tool type: {job['tool']}")
+    _log(f"Work item: {(work_id or '')[:8]}")
     if job.get("trigger_mail_job"):
         _log(f"Linked mail job: {job['trigger_mail_job']}")
     try:
@@ -301,7 +336,6 @@ def run_rpa(
         _log(f"NERP environment lookup failed: {e}")
     if job.get("start_url"):
         _log(f"Job start_url (ignored for NERP gotos; env switch wins): {job['start_url']}")
-    result = {"rpa_id": rpa_id, "status": "ok", "message": ""}
     used_path = None
     resolved_upload_dir = ""
     resolved_download_dir = ""
@@ -312,6 +346,8 @@ def run_rpa(
         if job["tool"] == "nerp":
             from nerp.rpa import run as nerp_run
 
+            # NOTE: NERP_UPLOAD_FILE is a shared path — unsafe if two nerp
+            # runs overlap. Prefer codegen + isolated worker folders for parallel.
             path = _prepare_upload_file(upload_file, job)
             used_path = path
             if owns_run:
@@ -370,7 +406,12 @@ def run_rpa(
 
         check_cancelled()
         mark_rpa_finished(rpa_id, "ok")
-        record_rpa_run(rpa_id, "ok", upload_file=used_path)
+        finish_work(
+            work_id,
+            "succeeded",
+            message=f"{job['name']} complete",
+            upload_file=used_path,
+        )
         print(f"[RPA] {job['name']} complete.")
         finish_step("rpa", "ok", f"{job['name']} finished")
 
@@ -409,7 +450,13 @@ def run_rpa(
             check_cancelled()
             _log(f"Chaining to next step: {next_id}")
             try:
-                run_rpa(next_id, upload_file=used_path, _visited=_visited)
+                run_rpa(
+                    next_id,
+                    upload_file=used_path,
+                    _visited=_visited,
+                    mail_job_id=mail_job_id or job.get("trigger_mail_job"),
+                    pipeline_run_id=pipeline_run_id,
+                )
             except PipelineCancelled:
                 raise
             except Exception as chain_err:
@@ -424,7 +471,13 @@ def run_rpa(
         result["status"] = "cancelled"
         result["message"] = str(e)
         mark_rpa_finished(rpa_id, "error", str(e))
-        record_rpa_run(rpa_id, "error", message=str(e), upload_file=used_path or upload_file)
+        finish_work(
+            work_id,
+            "cancelled",
+            message=str(e),
+            error=str(e),
+            upload_file=used_path or upload_file,
+        )
         finish_step("rpa", "error", str(e))
         if owns_run:
             finish_run("cancelled", str(e))
@@ -445,7 +498,13 @@ def run_rpa(
         result["status"] = "error"
         result["message"] = str(e)
         mark_rpa_finished(rpa_id, "error", err)
-        record_rpa_run(rpa_id, "error", message=err, upload_file=used_path or upload_file)
+        finish_work(
+            work_id,
+            "failed",
+            message=str(e),
+            error=err,
+            upload_file=used_path or upload_file,
+        )
         print(f"[RPA] {job['name']} failed: {e}")
         finish_step("rpa", "error", str(e))
         if owns_run:
@@ -472,6 +531,7 @@ def run_rpa(
                     "upload_file": used_path or upload_file,
                     "upload_dir": resolved_upload_dir,
                     "download_dir": resolved_download_dir,
+                    "work_id": work_id,
                 },
             )
         except Exception as alert_err:
@@ -713,9 +773,18 @@ def _parallel_worker(payload: dict) -> dict:
     from pipeline_progress import set_current_run
     set_current_run(None)
 
+    from rpa.work_queue import claim_work
+
     rpa_id = payload["rpa_id"]
     path = payload.get("upload_file")
     label = payload.get("label") or f"RPA · {rpa_id}"
+    work_id = payload.get("work_id")
+    if work_id:
+        claim_work(
+            work_id,
+            worker_pid=os.getpid(),
+            chrome_port=payload.get("chrome_port"),
+        )
     try:
         return run_rpa(
             rpa_id,
@@ -724,6 +793,9 @@ def _parallel_worker(payload: dict) -> dict:
             upload_dir=payload.get("upload_dir"),
             download_dir=payload.get("download_dir"),
             run_label=label,
+            work_id=work_id,
+            mail_job_id=payload.get("mail_job_id"),
+            pipeline_run_id=payload.get("pipeline_run_id"),
         )
     except Exception as e:
         return {
@@ -731,6 +803,7 @@ def _parallel_worker(payload: dict) -> dict:
             "status": "error",
             "message": str(e),
             "upload_file": path,
+            "work_id": work_id,
         }
 
 
@@ -822,6 +895,7 @@ def trigger_for_mail_job(
     mail_job_id: str,
     upload_file: Optional[str] = None,
     upload_files: Optional[list] = None,
+    pipeline_run_id: Optional[str] = None,
 ):
     """Run linked RPA tools for each downloaded mail Excel.
 
@@ -831,10 +905,14 @@ def trigger_for_mail_job(
 
     One Excel with several SOs still becomes multiple PDFs on that worker's
     outgoing email.
+
+    Each (rpa_id × file) is enqueued in rpa_work_items first — duplicates of
+    an already succeeded/in-flight file are skipped without spawning Chrome.
     """
     import time
 
     from pipeline_progress import PipelineCancelled, check_cancelled, request_stop
+    from rpa.work_queue import enqueue_or_skip
 
     linked = list_for_mail_job(mail_job_id)
     if not linked:
@@ -856,6 +934,26 @@ def trigger_for_mail_job(
         _purge_stale_worker_dirs(base_upload, base_download)
         payloads = []
         for i, path in enumerate(files):
+            enq = enqueue_or_skip(
+                rpa_id,
+                source_file=path,
+                mail_job_id=mail_job_id,
+                pipeline_run_id=pipeline_run_id,
+            )
+            if enq.get("skipped"):
+                _log(
+                    f"Skip duplicate {os.path.basename(path or '') or '(no file)'} "
+                    f"for {rpa_id}: {enq.get('message')}"
+                )
+                results.append({
+                    "rpa_id": rpa_id,
+                    "status": "skipped_duplicate",
+                    "message": enq.get("message") or "duplicate",
+                    "work_id": enq.get("work_id"),
+                    "upload_file": path,
+                })
+                continue
+
             chrome_profile = _chrome_profile_dir(i + 1, token)
             if path:
                 w_upload, w_download = _worker_slot_dirs(base_upload, base_download, i + 1, token)
@@ -875,7 +973,13 @@ def trigger_for_mail_job(
                 "chrome_profile": chrome_profile,
                 "chrome_port": 9330 + i,
                 "label": label,
+                "work_id": enq.get("work_id"),
+                "mail_job_id": mail_job_id,
+                "pipeline_run_id": pipeline_run_id,
             })
+
+        if not payloads:
+            continue
 
         _log(
             f"===== RPA BATCH: {len(payloads)} Excel file(s) → "

@@ -75,7 +75,7 @@ def main() -> int:
         result = {"status": "ok", "raw": str(result)}
     _write_result(result_path, result)
     status = (result.get("status") or "ok").lower()
-    return 0 if status in ("ok", "skipped") else 1
+    return 0 if status in ("ok", "skipped", "skipped_duplicate", "succeeded") else 1
 
 
 if __name__ == "__main__":

@@ -142,8 +142,14 @@ def run_job(job_id: str) -> dict:
         )
         check_cancelled()
         try:
-            results = trigger_for_mail_job(job_id, upload_files=paths)
+            results = trigger_for_mail_job(
+                job_id, upload_files=paths, pipeline_run_id=run_id,
+            )
             errs = [r for r in (results or []) if r.get("status") == "error"]
+            skips = [
+                r for r in (results or [])
+                if r.get("status") == "skipped_duplicate"
+            ]
             if errs:
                 messages = [e.get("message", "error") for e in errs]
                 summary.setdefault("errors", []).extend(messages)
@@ -157,13 +163,24 @@ def run_job(job_id: str) -> dict:
                 skip_step("email", "No RPA → no email")
                 skip_step("cleanup", "Nothing to clean")
                 finish_run("ok", "Mail done — no RPA", run_id=run_id)
+            elif skips and len(skips) == len(results):
+                finish_step(
+                    "rpa", "ok",
+                    f"All {len(skips)} file(s) skipped as duplicates",
+                )
+                skip_step("email", "Duplicates — no new RPA")
+                skip_step("cleanup", "Nothing to clean")
+                finish_run("ok", "All RPA work skipped (duplicates)", run_id=run_id)
             else:
                 from pipeline_progress import get_run
                 snap = get_run(run_id) or {}
                 for s in snap.get("steps") or []:
                     if s["key"] in ("email", "cleanup") and s["status"] == "pending":
                         skip_step(s["key"], "Not configured for this run")
-                finish_run("ok", run_id=run_id)
+                msg = ""
+                if skips:
+                    msg = f"{len(skips)} duplicate(s) skipped"
+                finish_run("ok", msg, run_id=run_id)
         except PipelineCancelled:
             finish_run("cancelled", "Stopped by user", run_id=run_id)
             raise
@@ -178,8 +195,20 @@ def run_job(job_id: str) -> dict:
     return summary
 
 
+def _reclaim_stale_rpa_work():
+    """Fail work items whose claim/running lease expired (orphaned Chrome)."""
+    try:
+        from rpa.work_queue import reclaim_stale_work
+        n = reclaim_stale_work()
+        if n:
+            print(f"[RPA] Reclaimed {n} orphaned work item(s) (lease expired)", flush=True)
+    except Exception as e:
+        print(f"[RPA] Work reclaim skipped: {e}", flush=True)
+
+
 def tick():
     """Run all jobs that are due right now."""
+    _reclaim_stale_rpa_work()
     due = get_due_jobs()
     for job in due:
         try:
@@ -212,6 +241,12 @@ def scheduler_loop():
     seed_from_config()
     from rpa.jobs_db import seed_from_config as seed_rpa
     seed_rpa()
+    try:
+        from rpa.work_queue import init_work_queue
+        init_work_queue()
+    except Exception as e:
+        print(f"RPA work queue init failed: {e}", flush=True)
+    _reclaim_stale_rpa_work()
     try:
         from rpa.hang_alert import start_watchdog
         start_watchdog()

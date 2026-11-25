@@ -174,6 +174,34 @@ def seed_from_config():
             created_at=now,
         ))
 
+    # Same BI / traffic_raw recording — each workbook opens a different start_url.
+    _bi_workbook_jobs = (
+        ("traffic_wb_15", "BI Workbook 15", 15),
+        ("traffic_wb_16", "BI Workbook 16", 16),
+        ("traffic_wb_19", "BI Workbook 19", 19),
+        ("traffic_wb_21", "BI Workbook 21", 21),
+        ("traffic_wb_363", "BI Workbook 363", 363),
+    )
+    for rid, name, wb_id in _bi_workbook_jobs:
+        if rid in existing:
+            continue
+        to_insert.append(dict(
+            rpa_id=rid,
+            name=name,
+            tool="codegen",
+            start_url=(
+                f"https://d2cbi.sec.samsung.net/#/workbooks/{wb_id}"
+                "?:origin=card_share_link"
+            ),
+            description=(
+                f"Same BI flow as traffic_raw (reuses that script) for workbook "
+                f"{wb_id}. Tableau login + MFA from Settings."
+            ),
+            trigger_mail_job="",
+            enabled=1,
+            created_at=now,
+        ))
+
     if not to_insert:
         return
     with engine.begin() as conn:

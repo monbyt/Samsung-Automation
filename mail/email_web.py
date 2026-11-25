@@ -348,7 +348,8 @@ def settings_page():
       <p class="muted" style="margin-bottom:14px;line-height:1.5">
         Username + password for <code>mfa-d2cbi</code> / Traffic Raw. This is
         <b>separate</b> from NERP and W1 — use the password for that site here.
-        Pair with <b>MFA OTP</b> below. Used by the <code>traffic_raw</code> RPA job.
+        Pair with <b>MFA OTP</b> below. Used by <code>traffic_raw</code> and
+        <code>traffic_wb_*</code> BI workbook RPA jobs.
       </p>
       <form method="post">
         <input type="hidden" name="section" value="tableau">

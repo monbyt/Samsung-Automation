@@ -67,12 +67,30 @@ def script_path(rpa_id: str) -> str:
     return os.path.join(config.RPA_SCRIPTS_DIR, f"{rpa_id}.py")
 
 
+def resolve_script_rpa_id(rpa_id: str) -> str:
+    """Return the rpa_id whose .py file to run.
+
+    BI workbook clones (traffic_wb_*) reuse the traffic_raw recording when they
+    have no script of their own — only start_url differs per job.
+    """
+    if not rpa_id:
+        return rpa_id
+    own = script_path(rpa_id)
+    if os.path.isfile(own):
+        return rpa_id
+    if (rpa_id or "").startswith("traffic_wb_"):
+        shared = script_path("traffic_raw")
+        if os.path.isfile(shared):
+            return "traffic_raw"
+    return rpa_id
+
+
 def has_script(rpa_id: str) -> bool:
-    return os.path.isfile(script_path(rpa_id))
+    return os.path.isfile(script_path(resolve_script_rpa_id(rpa_id)))
 
 
 def read_script(rpa_id: str) -> str:
-    path = script_path(rpa_id)
+    path = script_path(resolve_script_rpa_id(rpa_id))
     if not os.path.isfile(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -281,6 +299,11 @@ _MFA_AUTH_GOTO_RE = re.compile(
     r"""page\.goto\(\s*(['"])https?://mfa-d2cbi\.sec\.samsung\.net/[^'"]*\1\s*\)""",
     re.I,
 )
+# Recorded Traffic Raw / workbook gotos — swap to this job's start_url.
+_D2CBI_DEST_GOTO_RE = re.compile(
+    r"""page\.goto\(\s*(['"])https?://d2cbi\.sec\.samsung\.net/[^'"]*\1\s*\)""",
+    re.I,
+)
 _TRAFFIC_VIEW_DEFAULT = (
     "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
     "?:embed=n&:iid=1&:origin=card_share_link"
@@ -307,6 +330,22 @@ def _rewrite_mfa_auth_gotos(source: str, start_url: str = "") -> str:
     )
     if replaced != source:
         _log(f"Rewrote mfa-d2cbi one-time auth goto → {target!r}")
+    return replaced
+
+
+def _rewrite_d2cbi_dest_gotos(source: str, start_url: str = "") -> str:
+    """Point recorded d2cbi view/workbook gotos at this job's start_url."""
+    target = (start_url or "").strip()
+    if not target or "d2cbi.sec.samsung.net" not in target.lower():
+        return source
+    if not _D2CBI_DEST_GOTO_RE.search(source):
+        return source
+    replaced = _D2CBI_DEST_GOTO_RE.sub(
+        lambda m: f'page.goto({m.group(1)}{target}{m.group(1)})',
+        source,
+    )
+    if replaced != source:
+        _log(f"Rewrote d2cbi destination goto → {target!r}")
     return replaced
 
 
@@ -395,6 +434,7 @@ def prepare_script_source(
     source = _sanitize_upload_literals(source)
     source = _inject_nerp_url(source)
     source = _rewrite_mfa_auth_gotos(source, start_url=start_url)
+    source = _rewrite_d2cbi_dest_gotos(source, start_url=start_url)
     source = _inject_sso_credentials(source)
     source = _inject_sales_org(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))
@@ -768,15 +808,19 @@ def run_recorded_script(
     os.environ.setdefault("NO_PROXY", "*")
     os.environ.setdefault("no_proxy", "*")
 
-    path = script_path(rpa_id)
+    script_id = resolve_script_rpa_id(rpa_id)
+    path = script_path(script_id)
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"No script for '{rpa_id}'. Open Record in the dashboard and save codegen output."
+            f"No script for '{rpa_id}'"
+            + (f" (shared '{script_id}')" if script_id != rpa_id else "")
+            + ". Open Record in the dashboard and save codegen output "
+            "(or record traffic_raw for BI workbook clones)."
         )
 
     os.environ.setdefault("RPA_CHROME_DEBUG_PORT", "9329")
 
-    _log(f"Starting script: {rpa_id}")
+    _log(f"Starting script: {rpa_id}" + (f" → {script_id}.py" if script_id != rpa_id else ""))
     if upload_dir:
         _log(f"Upload folder: {upload_dir}")
         os.environ["RPA_UPLOAD_DIR"] = upload_dir
@@ -801,7 +845,7 @@ def run_recorded_script(
             sap_upload = dest
             staged = [dest]
         else:
-            staged = stage_upload_for_script(rpa_id, upload_abs)
+            staged = stage_upload_for_script(script_id, upload_abs)
             sap_upload = staged[0] if staged else upload_abs
         os.environ["RPA_UPLOAD_FILE"] = sap_upload
         _log(f"Upload file: {sap_upload} ({os.path.getsize(sap_upload)} bytes)")

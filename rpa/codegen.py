@@ -30,6 +30,21 @@ _PLAYWRIGHT_PATCHED = False
 _LOG_PATCHED = False
 _FILECHOOSER_PATCHED = False
 
+# Transient browser network failures on d2cbi / Tableau hash navigations.
+_GOTO_RETRY_HINTS = (
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_ABORTED",
+    "ERR_CONNECTION_FAILED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_TIMED_OUT",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_HTTP2",
+    "net::ERR_",
+    "Timeout",
+    "NS_ERROR_NET",
+)
+
 
 def _log(msg: str) -> None:
     print(f"[RPA {datetime.now():%H:%M:%S}] {msg}", flush=True)
@@ -70,15 +85,15 @@ def script_path(rpa_id: str) -> str:
 def resolve_script_rpa_id(rpa_id: str) -> str:
     """Return the rpa_id whose .py file to run.
 
-    BI workbook clones (traffic_wb_*) reuse the traffic_raw recording when they
-    have no script of their own - only start_url differs per job.
+    BI view clones (traffic_*, traffic_wb_*) reuse the traffic_raw recording when
+    they have no script of their own — only start_url differs per job.
     """
     if not rpa_id:
         return rpa_id
     own = script_path(rpa_id)
     if os.path.isfile(own):
         return rpa_id
-    if (rpa_id or "").startswith("traffic_wb_"):
+    if rpa_id != "traffic_raw" and (rpa_id.startswith("traffic_") or rpa_id.startswith("traffic_wb_")):
         shared = script_path("traffic_raw")
         if os.path.isfile(shared):
             return "traffic_raw"
@@ -684,6 +699,10 @@ def _patch_playwright_logging() -> None:
         except Exception:
             pass
 
+    def _is_transient_goto(exc: BaseException) -> bool:
+        msg = str(exc) or ""
+        return any(h in msg for h in _GOTO_RETRY_HINTS)
+
     def _wrap(cls, name):
         original = getattr(cls, name)
 
@@ -699,6 +718,37 @@ def _patch_playwright_logging() -> None:
             elif name == "set_input_files" and args:
                 label = f"set_input_files {args[0]!r}"
             _log(f"{cls.__name__}.{label}")
+            if name == "goto":
+                # d2cbi Tableau hash views often reset the TCP connection on
+                # wait_until="load". Prefer domcontentloaded + retry.
+                opts = dict(kwargs)
+                url = str(args[0]) if args else ""
+                if "d2cbi.sec.samsung.net" in url.lower():
+                    opts.setdefault("wait_until", "domcontentloaded")
+                    opts.setdefault("timeout", 120_000)
+                attempts = 4 if "d2cbi.sec.samsung.net" in url.lower() else 1
+                last_exc: Optional[BaseException] = None
+                for i in range(1, attempts + 1):
+                    try:
+                        return original(self, *args, **opts)
+                    except Exception as exc:
+                        last_exc = exc
+                        if i >= attempts or not _is_transient_goto(exc):
+                            _snap_failure_screen(self)
+                            raise
+                        wait_ms = min(8000, 1500 * i)
+                        _log(
+                            f"Page.goto transient failure {i}/{attempts}: {exc} "
+                            f"— retry in {wait_ms}ms"
+                        )
+                        try:
+                            self.wait_for_timeout(wait_ms)
+                        except Exception:
+                            import time as _time
+                            _time.sleep(wait_ms / 1000.0)
+                if last_exc:
+                    raise last_exc
+                return None
             if name == "set_input_files":
                 upload_path = args[0] if args else ""
                 # region agent log

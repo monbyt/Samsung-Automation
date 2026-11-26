@@ -9,10 +9,39 @@ import re
 
 from playwright.sync_api import Playwright, sync_playwright
 
-TRAFFIC_VIEW = (
-    "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
-    "?:embed=n&:iid=1&:origin=card_share_link"
-)
+TRAFFIC_VIEW = "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
+
+
+def _goto(page, url: str, attempts: int = 4) -> None:
+    """Navigate with soft wait + retries — d2cbi often hits ERR_CONNECTION_RESET."""
+    last = None
+    for i in range(1, attempts + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+            return
+        except Exception as exc:
+            last = exc
+            msg = str(exc)
+            transient = any(
+                h in msg
+                for h in (
+                    "ERR_CONNECTION_RESET",
+                    "ERR_CONNECTION_CLOSED",
+                    "ERR_CONNECTION_ABORTED",
+                    "ERR_NETWORK_CHANGED",
+                    "ERR_TIMED_OUT",
+                    "ERR_EMPTY_RESPONSE",
+                    "net::ERR_",
+                    "Timeout",
+                )
+            )
+            if not transient or i >= attempts:
+                raise
+            wait_ms = min(8000, 1500 * i)
+            print(f"[RPA] goto failed {i}/{attempts}: {exc} — retry in {wait_ms}ms", flush=True)
+            page.wait_for_timeout(wait_ms)
+    if last:
+        raise last
 
 
 def run(playwright: Playwright) -> None:
@@ -22,7 +51,7 @@ def run(playwright: Playwright) -> None:
 
     # Start at the Tableau view — SSO/MFA redirects here when needed.
     # Do NOT use a one-time mfa-d2cbi .../auth?state=... URL from codegen.
-    page.goto(TRAFFIC_VIEW)
+    _goto(page, TRAFFIC_VIEW)
 
     # Login: fill BOTH fields, then click Sign In. Never press Enter on
     # Username (that can submit before Password is filled).
@@ -63,7 +92,7 @@ def run(playwright: Playwright) -> None:
     page.get_by_role("button", name="Sign In").click()
 
     page.wait_for_url(re.compile(r"d2cbi\.sec\.samsung\.net"), timeout=120_000)
-    page.goto(TRAFFIC_VIEW)
+    _goto(page, TRAFFIC_VIEW)
 
     viz = page.locator('iframe[title="Data Visualization"]').content_frame
     viz.get_by_role("button", name="Download").click()

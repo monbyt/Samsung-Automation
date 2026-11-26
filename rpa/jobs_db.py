@@ -156,57 +156,89 @@ def seed_from_config():
             enabled=1,
             created_at=now,
         ))
-    if "traffic_raw" not in existing:
-        to_insert.append(dict(
-            rpa_id="traffic_raw",
-            name="Tableau Traffic Raw (CSV)",
-            tool="codegen",
-            start_url=(
-                "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
-                "?:embed=n&:iid=1&:origin=card_share_link"
-            ),
-            description=(
-                "Sign in to d2cbi (username/password + MFA OTP from Settings), "
-                "open Traffic Raw, download Crosstab CSV."
-            ),
-            trigger_mail_job="",
-            enabled=1,
-            created_at=now,
-        ))
-
-    # Same BI / traffic_raw recording — each workbook opens a different start_url.
-    _bi_workbook_jobs = (
-        ("traffic_wb_15", "BI Workbook 15", 15),
-        ("traffic_wb_16", "BI Workbook 16", 16),
-        ("traffic_wb_19", "BI Workbook 19", 19),
-        ("traffic_wb_21", "BI Workbook 21", 21),
-        ("traffic_wb_363", "BI Workbook 363", 363),
+    # BI / d2cbi views — same traffic_raw script; only start_url differs.
+    _bi_view_jobs = (
+        (
+            "traffic_sales_raw",
+            "BI Sales Raw",
+            "https://d2cbi.sec.samsung.net/#/views/2-4_SalesRaw/2-4-1_SalesRaw?:iid=1&:original_view=y",
+        ),
+        (
+            "traffic_raw",
+            "BI Traffic Raw ALLDIV",
+            "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw",
+        ),
+        (
+            "traffic_mx",
+            "BI Traffic Raw MX",
+            "https://d2cbi.sec.samsung.net/#/views/04_MX/04-7_TrafficRaw",
+        ),
+        (
+            "traffic_vd",
+            "BI Traffic Raw VD",
+            "https://d2cbi.sec.samsung.net/#/views/05_VD/05-7_TrafficRaw?:iid=1",
+        ),
+        (
+            "traffic_da",
+            "BI Traffic Raw DA",
+            "https://d2cbi.sec.samsung.net/#/views/06_DA/06-7_TrafficRaw?:iid=2",
+        ),
     )
-    for rid, name, wb_id in _bi_workbook_jobs:
+    for rid, name, url in _bi_view_jobs:
         if rid in existing:
             continue
         to_insert.append(dict(
             rpa_id=rid,
             name=name,
             tool="codegen",
-            start_url=(
-                f"https://d2cbi.sec.samsung.net/#/workbooks/{wb_id}"
-                "?:origin=card_share_link"
-            ),
+            start_url=url,
             description=(
-                f"Same BI flow as traffic_raw (reuses that script) for workbook "
-                f"{wb_id}. Tableau login + MFA from Settings."
+                "Same BI Crosstab CSV flow as traffic_raw (reuses that script). "
+                "Tableau login + MFA from Settings."
             ),
             trigger_mail_job="",
             enabled=1,
             created_at=now,
         ))
 
-    if not to_insert:
-        return
+    if to_insert:
+        with engine.begin() as conn:
+            for row in to_insert:
+                conn.execute(rpa_jobs.insert().values(**row))
+
+    # Keep start_urls / names in sync when links change; disable old workbook clones.
+    _sync_bi_view_jobs(_bi_view_jobs)
+
+
+def _sync_bi_view_jobs(jobs: tuple) -> None:
+    """Upsert BI view start_urls and turn off obsolete traffic_wb_* workbook jobs."""
+    _ensure_tables()
     with engine.begin() as conn:
-        for row in to_insert:
-            conn.execute(rpa_jobs.insert().values(**row))
+        for rid, name, url in jobs:
+            conn.execute(
+                update(rpa_jobs)
+                .where(rpa_jobs.c.rpa_id == rid)
+                .values(
+                    name=name,
+                    start_url=url,
+                    tool="codegen",
+                    enabled=1,
+                    description=(
+                        "Same BI Crosstab CSV flow as traffic_raw (reuses that script). "
+                        "Tableau login + MFA from Settings."
+                    ),
+                )
+            )
+        # Old workbook-number clones used wrong #/workbooks/N links.
+        conn.execute(
+            update(rpa_jobs)
+            .where(rpa_jobs.c.rpa_id.like("traffic_wb_%"))
+            .values(
+                enabled=0,
+                last_message="Disabled — use traffic_sales_raw / traffic_raw / "
+                "traffic_mx / traffic_vd / traffic_da view jobs instead.",
+            )
+        )
 
 
 def list_rpa_jobs():

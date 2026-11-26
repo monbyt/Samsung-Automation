@@ -85,15 +85,15 @@ def script_path(rpa_id: str) -> str:
 def resolve_script_rpa_id(rpa_id: str) -> str:
     """Return the rpa_id whose .py file to run.
 
-    BI view clones (traffic_*, traffic_wb_*) reuse the traffic_raw recording when
-    they have no script of their own — only start_url differs per job.
+    BI view clones (traffic_*) reuse the traffic_raw recording when they have no
+    script of their own - only start_url differs per job.
     """
     if not rpa_id:
         return rpa_id
     own = script_path(rpa_id)
     if os.path.isfile(own):
         return rpa_id
-    if rpa_id != "traffic_raw" and (rpa_id.startswith("traffic_") or rpa_id.startswith("traffic_wb_")):
+    if rpa_id != "traffic_raw" and rpa_id.startswith("traffic_"):
         shared = script_path("traffic_raw")
         if os.path.isfile(shared):
             return "traffic_raw"

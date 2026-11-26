@@ -206,13 +206,14 @@ def seed_from_config():
             for row in to_insert:
                 conn.execute(rpa_jobs.insert().values(**row))
 
-    # Keep start_urls / names in sync when links change; disable old workbook clones.
+    # Keep start_urls / names in sync when links change; drop old workbook clones.
     _sync_bi_view_jobs(_bi_view_jobs)
 
 
 def _sync_bi_view_jobs(jobs: tuple) -> None:
-    """Upsert BI view start_urls and turn off obsolete traffic_wb_* workbook jobs."""
+    """Upsert BI view start_urls and delete obsolete traffic_wb_* workbook jobs."""
     _ensure_tables()
+    removed_ids: list[str] = []
     with engine.begin() as conn:
         for rid, name, url in jobs:
             conn.execute(
@@ -229,15 +230,32 @@ def _sync_bi_view_jobs(jobs: tuple) -> None:
                     ),
                 )
             )
-        # Old workbook-number clones used wrong #/workbooks/N links.
-        conn.execute(
-            update(rpa_jobs)
-            .where(rpa_jobs.c.rpa_id.like("traffic_wb_%"))
-            .values(
-                enabled=0,
-                last_message="Disabled — use traffic_sales_raw / traffic_raw / "
-                "traffic_mx / traffic_vd / traffic_da view jobs instead.",
+        # Old workbook-number clones (traffic_wb_15, …) used wrong #/workbooks/N links.
+        old_rows = conn.execute(
+            select(rpa_jobs.c.rpa_id).where(rpa_jobs.c.rpa_id.like("traffic_wb_%"))
+        ).fetchall()
+        removed_ids = [r[0] for r in old_rows]
+        if removed_ids:
+            conn.execute(
+                delete(rpa_jobs).where(rpa_jobs.c.rpa_id.like("traffic_wb_%"))
             )
+    if removed_ids:
+        try:
+            from rpa.codegen import script_path
+        except Exception:
+            script_path = None
+        for rid in removed_ids:
+            if not script_path:
+                break
+            try:
+                path = script_path(rid)
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        print(
+            f"[RPA] Removed obsolete workbook jobs: {', '.join(removed_ids)}",
+            flush=True,
         )
 
 

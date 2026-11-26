@@ -152,8 +152,12 @@ def alert_cc_emails() -> str:
         return ""
 
 
-def _merge_alert_cc(*parts: str) -> str:
-    """Settings Cc + captured sender, minus anyone already on To."""
+def _merge_alert_cc(*_parts: str) -> str:
+    """Settings Alert Cc only — never W1 order senders or other captured addresses.
+
+    Extra *_parts are ignored on purpose so hang/error alerts cannot leak to
+    random people from mail meta.
+    """
     to_set = {
         p.strip().lower()
         for p in re.split(r"[\s,;]+", alert_emails())
@@ -161,13 +165,12 @@ def _merge_alert_cc(*parts: str) -> str:
     }
     seen = set(to_set)
     out: List[str] = []
-    for part in (alert_cc_emails(),) + parts:
-        for addr in re.split(r"[\s,;]+", part or ""):
-            a = addr.strip()
-            if not a or a.lower() in seen:
-                continue
-            seen.add(a.lower())
-            out.append(a)
+    for addr in re.split(r"[\s,;]+", alert_cc_emails() or ""):
+        a = addr.strip()
+        if not a or a.lower() in seen:
+            continue
+        seen.add(a.lower())
+        out.append(a)
     return ", ".join(out)
 
 
@@ -914,6 +917,7 @@ def send_error_alert(
             run = get_run(rid)
     except Exception:
         run = None
+    # Keep original W1 From in the body for debugging — never Cc/To them.
     mail_from = _mail_from_for_alert(worker)
     label = (
         (run or {}).get("label")
@@ -926,14 +930,13 @@ def send_error_alert(
     try:
         files = _error_screenshots(worker, extra_files)
         body = _simple_error_body(label, upload, error, bool(files))
+        if mail_from:
+            body = body.rstrip() + f"\n\nOriginal mail From (not emailed): {mail_from}\n"
         subject = f"Stopped: {label}"
         if file_name:
             subject = f"Stopped: {label} ({file_name})"
-        _send(subject, body, files, cc=mail_from)
-        _log(
-            f"Sent error alert for {label} to {to}"
-            + (f" cc {mail_from}" if mail_from else "")
-        )
+        _send(subject, body, files)
+        _log(f"Sent error alert for {label} to {to} (Settings only; no W1 sender Cc)")
     except Exception:
         _log("Error alert send failed:\n" + traceback.format_exc()[-800:])
 
@@ -1126,7 +1129,7 @@ def check_once() -> List[str]:
             body, files = gather_evidence(run, worker)
             mins = round(dur / 60, 1)
             subject = f"[ALERT] RPA still running {mins:.0f} min — {run.get('label') or run.get('ref_id')}"
-            _send(subject, body, files, cc=_mail_from_for_alert(worker))
+            _send(subject, body, files)
             sent.append(run.get("label") or run["id"])
             _log(f"Sent hang alert for {run.get('label')} ({mins} min) to {to}")
         except Exception:
@@ -1153,7 +1156,7 @@ def check_once() -> List[str]:
                 f"[ALERT] RPA worker PID {pid} still running "
                 f"{mins:.0f} min — {worker.get('label') or worker.get('rpa_id')}"
             )
-            _send(subject, body, files, cc=_mail_from_for_alert(worker))
+            _send(subject, body, files)
             sent.append(worker.get("label") or str(pid))
             _log(f"Sent hang alert for worker PID {pid} to {to}")
         except Exception:

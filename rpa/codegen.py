@@ -71,7 +71,7 @@ def resolve_script_rpa_id(rpa_id: str) -> str:
     """Return the rpa_id whose .py file to run.
 
     BI workbook clones (traffic_wb_*) reuse the traffic_raw recording when they
-    have no script of their own — only start_url differs per job.
+    have no script of their own - only start_url differs per job.
     """
     if not rpa_id:
         return rpa_id
@@ -220,6 +220,11 @@ def _inject_step_logging(source: str) -> str:
                 "expect_download",
             )
         ) and "print(" not in stripped:
+            # Skip multi-line call tails like `).click()` — injecting a print
+            # between get_by_role( and ).click() causes SyntaxError.
+            if stripped.startswith(")") or stripped.startswith("."):
+                out.append(line)
+                continue
             indent = line[: len(line) - len(stripped)]
             snippet = stripped[:100].replace('"', "'")
             if "Password" in snippet or "User Account" in snippet:
@@ -349,6 +354,25 @@ def _rewrite_d2cbi_dest_gotos(source: str, start_url: str = "") -> str:
     return replaced
 
 
+def _rewrite_traffic_view_constant(source: str, start_url: str = "") -> str:
+    """Override TRAFFIC_VIEW = (...) so workbook clones open their own start_url."""
+    target = (start_url or "").strip()
+    if not target or "TRAFFIC_VIEW" not in source:
+        return source
+    if "d2cbi.sec.samsung.net" not in target.lower():
+        return source
+    replaced, n = re.subn(
+        r"^TRAFFIC_VIEW\s*=\s*\([\s\S]*?\)\s*$",
+        f"TRAFFIC_VIEW = {target!r}",
+        source,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n:
+        _log(f"Rewrote TRAFFIC_VIEW constant → {target!r}")
+    return replaced
+
+
 def _inject_sso_credentials(source: str) -> str:
     """Rewrite User Account / Username / Password / OTP fills to RPA_* values."""
     out = []
@@ -435,6 +459,7 @@ def prepare_script_source(
     source = _inject_nerp_url(source)
     source = _rewrite_mfa_auth_gotos(source, start_url=start_url)
     source = _rewrite_d2cbi_dest_gotos(source, start_url=start_url)
+    source = _rewrite_traffic_view_constant(source, start_url=start_url)
     source = _inject_sso_credentials(source)
     source = _inject_sales_org(source)
     needs_upload = bool(upload_file and os.path.isfile(upload_file))

@@ -431,9 +431,9 @@ def settings_page():
         and logs, then close that session and clean its upload/PDF files.
         When an RPA worker fails, a short email goes out with a picture of the
         screen. Other parallel workers keep running.
-        <b>To</b> is you (this field). Optional <b>Cc</b> always gets hang/fail alerts.
-        If W1 From was captured, that sender is Cc'd as well. Test alert is To-only
-        plus your extra Cc (not the order sender).
+        <b>To</b> and optional <b>Cc</b> are the <u>only</u> recipients — hang/fail
+        alerts never go to the original W1 order sender (that address is noted
+        in the email body only).
       </p>
       <form method="post">
         <input type="hidden" name="section" value="alerts">

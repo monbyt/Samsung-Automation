@@ -400,6 +400,55 @@ _PIPELINE_PANEL = """
         }).join("")
         + '</tbody></table>';
     }
+    let flashClearedUrl = false;
+    let lastFlashKey = "";
+    function updateLiveFlash(runs) {
+      const flash = document.getElementById("rpa-live-flash");
+      if (!flash) return;
+      if (!flashClearedUrl) {
+        flashClearedUrl = true;
+        try {
+          const u = new URL(window.location.href);
+          if (u.searchParams.has("msg") || u.searchParams.has("started")) {
+            const started = u.searchParams.get("started") || "";
+            u.searchParams.delete("msg");
+            u.searchParams.delete("started");
+            history.replaceState({}, "", u.pathname + (u.search || "") + u.hash);
+            if (started && !(runs || []).length) {
+              flash.hidden = false;
+              flash.className = "flash ok";
+              flash.textContent = "Starting '" + started + "' — Live execution updates below";
+            }
+          }
+        } catch (e) {}
+      }
+      const live = (runs || []).filter(function (r) { return r.status === "running"; });
+      if (live.length) {
+        const parts = live.map(function (run) {
+          const step = (run.steps || []).find(function (s) { return s.status === "running"; });
+          const bit = (step && (step.message || step.title)) || run.message || "running";
+          return (run.label || run.ref_id || "run") + " — " + bit;
+        });
+        const key = "live:" + parts.join("|");
+        if (key !== lastFlashKey) {
+          lastFlashKey = key;
+          flash.hidden = false;
+          flash.className = "flash ok";
+          flash.textContent = parts.join(" · ");
+        }
+        return;
+      }
+      // Just finished — show outcome briefly, then hide (never stick on Started…).
+      if (lastFlashKey.indexOf("live:") === 0) {
+        lastFlashKey = "idle";
+        flash.hidden = false;
+        flash.className = "flash ok";
+        flash.textContent = "No live run — finished or stopped";
+        setTimeout(function () {
+          if (lastFlashKey === "idle") flash.hidden = true;
+        }, 4000);
+      }
+    }
     async function tick() {
       try {
         if (document.hidden) {
@@ -410,6 +459,7 @@ _PIPELINE_PANEL = """
         const data = await r.json();
         const runs = data.runs || [];
         renderLive(runs);
+        updateLiveFlash(runs);
         setTimeout(tick, runs.length ? 1500 : 5000);
       } catch (e) {
         setTimeout(tick, 5000);
@@ -542,6 +592,7 @@ def jobs_list():
     body = """
   <h1>Mail Jobs</h1>
   <div class="sub">Cron jobs snap to a 5-minute clock grid and are staggered so they don’t overlap — e.g. 12:00, 12:15, 12:30, 12:45. Scheduler checks every {{ tick }}s. W1 login / expired session recovery uses <a href="/settings">Settings → W1 mail login</a> (not editable on this page).</div>
+  <div id="rpa-live-flash" class="flash ok" hidden></div>
   {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """
@@ -866,7 +917,7 @@ def jobs_run(job_id):
     if not get_job(job_id):
         return redirect(url_for("jobs_list", err="Job not found"))
     threading.Thread(target=_bg, daemon=True, name=f"run-{job_id}").start()
-    return redirect(url_for("jobs_list", msg=f"Started '{job_id}' — watch Live execution above"))
+    return redirect(url_for("jobs_list", started=job_id))
 
 
 @app.route("/jobs/<job_id>/toggle", methods=["POST"])
@@ -1165,7 +1216,7 @@ def rpa_list():
     body = """
   <h1>RPA Tools</h1>
   <div class="sub">Record Playwright codegen scripts with a start URL, or use the built-in NERP flow.</div>
-  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+  <div id="rpa-live-flash" class="flash ok" hidden></div>
   {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
 """ + _PIPELINE_PANEL + """
   <div class="panel">
@@ -1506,12 +1557,17 @@ def rpa_run(rpa_id):
             print(f"RPA run failed: {e}")
 
     threading.Thread(target=_bg, daemon=True, name=f"rpa-{rpa_id}").start()
-    return redirect(url_for("rpa_list", msg=f"Started '{rpa_id}' — watch Live execution above"))
+    # Don't put a sticky ?msg= in the URL — the Live panel + flash update from the poll.
+    return redirect(url_for("rpa_list", started=rpa_id))
 
 
 @app.route("/api/pipeline/active")
 def api_pipeline_active():
-    from pipeline_progress import get_active_run, get_active_runs
+    from pipeline_progress import get_active_run, get_active_runs, reap_orphan_runs
+    try:
+        reap_orphan_runs()
+    except Exception:
+        pass
     runs = get_active_runs()
     return jsonify({"runs": runs, "run": runs[0] if runs else get_active_run()})
 

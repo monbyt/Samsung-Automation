@@ -219,7 +219,8 @@ def seed_from_config():
         (
             "traffic_raw",
             "BI Traffic Raw ALLDIV",
-            "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw",
+            "https://d2cbi.sec.samsung.net/#/views/03_ALLDIV/03-7_TrafficRaw"
+            "?:embed=n&:iid=1&:origin=card_share_link",
         ),
         (
             "traffic_mx",

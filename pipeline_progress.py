@@ -314,6 +314,18 @@ def finish_run(
         return
     now = datetime.now()
     with _engine.begin() as conn:
+        # Idempotent: browser-disconnect + exception handler may both call us.
+        still = conn.execute(
+            text("SELECT status FROM pipeline_runs WHERE id=:r"),
+            {"r": run_id},
+        ).first()
+        if not still or still[0] != "running":
+            with _lock:
+                _active_run_ids.discard(run_id)
+                _stop_events.pop(run_id, None)
+            if current_run_id() == run_id:
+                set_current_run(None)
+            return
         if status == "ok":
             conn.execute(
                 text(
@@ -339,7 +351,7 @@ def finish_run(
         conn.execute(
             text(
                 "UPDATE pipeline_runs SET status=:s, message=:m, finished_at=:t "
-                "WHERE id=:r"
+                "WHERE id=:r AND status='running'"
             ),
             {"s": status, "m": (message or "")[:2000], "t": now, "r": run_id},
         )
@@ -348,6 +360,103 @@ def finish_run(
         _stop_events.pop(run_id, None)
     if current_run_id() == run_id:
         set_current_run(None)
+
+
+def reap_orphan_runs(max_age_s: float = 3600.0) -> int:
+    """Mark Live runs done when their Chrome/worker is already dead.
+
+    Called from the dashboard poll so a closed window clears the card quickly
+    even if the Python thread is still unwinding. Browser disconnect is the
+    fast path; this covers dead worker PIDs and finished work-queue rows.
+    """
+    _init()
+    closed = 0
+    with _engine.connect() as conn:
+        running_ids = [
+            r[0]
+            for r in conn.execute(
+                text("SELECT id FROM pipeline_runs WHERE status='running'")
+            ).fetchall()
+        ]
+    if not running_ids:
+        return 0
+
+    try:
+        from rpa.hang_alert import live_workers, _pid_alive
+    except Exception:
+        live_workers = None
+        _pid_alive = None
+
+    workers = []
+    if live_workers:
+        try:
+            workers = live_workers()
+        except Exception:
+            workers = []
+
+    worker_by_label = {
+        (w.get("label") or "").strip(): w
+        for w in workers
+        if (w.get("label") or "").strip()
+    }
+    worker_by_rpa = {
+        (w.get("rpa_id") or "").strip(): w
+        for w in workers
+        if (w.get("rpa_id") or "").strip()
+    }
+
+    work_by_run: Dict[str, list] = {}
+    try:
+        from rpa.work_queue import list_work_items
+        for item in list_work_items(limit=80):
+            prid = (item.get("pipeline_run_id") or "").strip()
+            if prid:
+                work_by_run.setdefault(prid, []).append(item)
+    except Exception:
+        work_by_run = {}
+
+    for rid in running_ids:
+        run = get_run(rid)
+        if not run or run.get("status") != "running":
+            continue
+
+        linked = work_by_run.get(rid) or []
+        if linked:
+            terminal = [
+                i for i in linked
+                if i.get("status") in (
+                    "succeeded", "failed", "cancelled", "skipped_duplicate",
+                )
+            ]
+            if terminal and len(terminal) == len(linked):
+                st = "ok" if all(i.get("status") == "succeeded" for i in terminal) else "error"
+                if any(i.get("status") == "cancelled" for i in terminal):
+                    st = "cancelled"
+                finish_run(st, terminal[0].get("message") or "Work finished", run_id=rid)
+                closed += 1
+                continue
+
+        w = worker_by_label.get((run.get("label") or "").strip()) or worker_by_rpa.get(
+            (run.get("ref_id") or "").strip()
+        )
+        if w and _pid_alive and not _pid_alive(int(w.get("pid") or 0)):
+            finish_run("cancelled", "Worker process exited", run_id=rid)
+            closed += 1
+            continue
+
+        started = run.get("started_at")
+        if not workers and started and max_age_s:
+            try:
+                if isinstance(started, str):
+                    started_dt = datetime.strptime(started, "%Y-%m-%d %H:%M:%S")
+                else:
+                    started_dt = started
+                if (datetime.now() - started_dt).total_seconds() > max_age_s:
+                    finish_run("error", "Orphaned Live run (no worker)", run_id=rid)
+                    closed += 1
+            except Exception:
+                pass
+    return closed
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:

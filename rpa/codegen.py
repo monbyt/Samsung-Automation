@@ -22,9 +22,11 @@ _PERSISTENT_CONTEXT_RE = re.compile(
     r"(context\s*=\s*\w+\.chromium\.launch_persistent_context\([^)]*\)\s*\n)",
     re.MULTILINE,
 )
+# Action default stays "wait forever" for slow SAP clicks, but navigation MUST
+# have a finite timeout — otherwise a flaky d2cbi goto hangs Live forever.
 _NO_TIMEOUT_BLOCK = (
     "    context.set_default_timeout(0)\n"
-    "    context.set_default_navigation_timeout(0)\n"
+    "    context.set_default_navigation_timeout(120_000)\n"
 )
 _PLAYWRIGHT_PATCHED = False
 _LOG_PATCHED = False
@@ -113,7 +115,28 @@ def read_script(rpa_id: str) -> str:
 
 
 def _strip_action_timeouts(source: str) -> str:
-    return _ACTION_TIMEOUT_RE.sub("", source)
+    """Strip short codegen timeouts that fail on slow SAP; keep intentional ones.
+
+    Recorded scripts often have timeout=5000 on clicks. Those get removed so SAP
+    can take longer. Explicit waits >= 15s (login probe, goto retries, OTP) are
+    kept so a missing UI element cannot hang the Live card forever under
+    default timeout 0.
+    """
+
+    def _repl(match: re.Match) -> str:
+        token = match.group(0)
+        num = re.search(r"timeout=(\d+(?:_\d+)*)", token)
+        if not num:
+            return ""
+        try:
+            val = int(num.group(1).replace("_", ""))
+        except ValueError:
+            return ""
+        if val >= 15_000:
+            return token
+        return ""
+
+    return _ACTION_TIMEOUT_RE.sub(_repl, source)
 
 
 def _inject_no_timeout_setup(source: str) -> str:
@@ -606,11 +629,43 @@ def _patch_playwright_no_timeout() -> None:
 
     from playwright.sync_api import Browser, BrowserType
 
+    def _mark_browser_closed(
+        run_id: Optional[str] = None,
+        reason: str = "Browser window closed",
+    ) -> None:
+        """Flip the Live card as soon as Chromium dies — don't wait for the next hang."""
+        try:
+            from pipeline_progress import current_run_id, finish_run, finish_step
+
+            rid = run_id or current_run_id()
+            if not rid:
+                return
+            finish_step("rpa", "error", reason, run_id=rid)
+            finish_run("cancelled", reason, run_id=rid)
+            _log(f"Live run marked stopped ({reason})")
+        except Exception as exc:
+            _log(f"Browser-close Live update skipped: {exc}")
+
     def _disable(ctx):
         ctx.set_default_timeout(0)
-        ctx.set_default_navigation_timeout(0)
+        ctx.set_default_navigation_timeout(120_000)
         _bind_file_chooser_context(ctx)
         return ctx
+
+    def _watch_browser(browser) -> None:
+        # Capture run id NOW (worker thread TLS). Disconnect may fire on another thread.
+        try:
+            from pipeline_progress import current_run_id
+            rid = current_run_id()
+        except Exception:
+            rid = None
+        try:
+            browser.on(
+                "disconnected",
+                lambda: _mark_browser_closed(run_id=rid),
+            )
+        except Exception as exc:
+            _log(f"Could not attach browser disconnect watcher: {exc}")
 
     _orig_new_context = Browser.new_context
 
@@ -639,7 +694,9 @@ def _patch_playwright_no_timeout() -> None:
         kwargs["args"] = extra
         kwargs.setdefault("headless", False)
         _log(f"Playwright Chromium launch (not installed Chrome) port={port or '-'}")
-        return _orig_launch(self, *args, **kwargs)
+        browser = _orig_launch(self, *args, **kwargs)
+        _watch_browser(browser)
+        return browser
 
     BrowserType.launch = launch
 
@@ -656,7 +713,14 @@ def _patch_playwright_no_timeout() -> None:
             else:
                 kwargs["user_data_dir"] = profile
         _log(f"Playwright Chromium persistent profile={profile or kwargs.get('user_data_dir')}")
-        return _disable(_orig_persistent(self, *args, **kwargs))
+        ctx = _disable(_orig_persistent(self, *args, **kwargs))
+        try:
+            browser = getattr(ctx, "browser", None)
+            if browser is not None:
+                _watch_browser(browser)
+        except Exception:
+            pass
+        return ctx
 
     BrowserType.launch_persistent_context = launch_persistent_context
     _PLAYWRIGHT_PATCHED = True

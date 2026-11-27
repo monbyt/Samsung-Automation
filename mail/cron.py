@@ -206,6 +206,45 @@ def _reclaim_stale_rpa_work():
         print(f"[RPA] Work reclaim skipped: {e}", flush=True)
 
 
+def _run_due_scheduled_rpas():
+    """Daily-clock RPA jobs (BI Traffic, etc.) — claim next_run then run in a thread."""
+    try:
+        from rpa.jobs_db import claim_scheduled_rpa, get_due_scheduled_rpas
+        due = get_due_scheduled_rpas()
+    except Exception as e:
+        print(f"[RPA] Scheduled RPA check failed: {e}", flush=True)
+        return
+    if not due:
+        return
+    for job in due:
+        rpa_id = job["rpa_id"]
+        try:
+            if not claim_scheduled_rpa(rpa_id):
+                continue
+            print(
+                f"[RPA] Scheduled run due: {rpa_id} "
+                f"(daily {job.get('schedule_time')})",
+                flush=True,
+            )
+
+            def _bg(rid=rpa_id):
+                try:
+                    from rpa.runner import run_rpa
+                    run_rpa(rid)
+                except Exception:
+                    print(f"[RPA] Scheduled {rid} failed:\n{traceback.format_exc()[-500:]}", flush=True)
+
+            threading.Thread(
+                target=_bg, daemon=True, name=f"rpa-sched-{rpa_id}"
+            ).start()
+        except Exception:
+            print(
+                f"[RPA] Could not start scheduled {rpa_id}:\n"
+                f"{traceback.format_exc()[-400:]}",
+                flush=True,
+            )
+
+
 def tick():
     """Run all jobs that are due right now."""
     _reclaim_stale_rpa_work()
@@ -223,6 +262,7 @@ def tick():
                 "errors": [err],
                 "job_id": job["job_id"],
             })
+    _run_due_scheduled_rpas()
     try:
         from mail.oc_digest import maybe_send_daily_digest
         maybe_send_daily_digest()

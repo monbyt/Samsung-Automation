@@ -1,9 +1,12 @@
 """
-RPA tool definitions — managed from the dashboard, triggered after mail jobs.
+RPA tool definitions — managed from the dashboard, triggered after mail jobs
+or on an optional daily clock schedule.
 """
+from __future__ import annotations
+
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text, delete, select, update
 
@@ -38,6 +41,10 @@ rpa_jobs = Table(
     Column("last_message", Text),
     Column("created_at", DateTime),
     Column("next_rpa", String(64)),
+    # Daily clock schedule (optional) — independent of mail triggers.
+    Column("schedule_enabled", Integer, default=0),
+    Column("schedule_time", String(8)),  # "HH:MM" 24h local
+    Column("next_run", DateTime),
 )
 
 _BUILTIN_IDS = frozenset({"nerp_upload_pi"})
@@ -63,6 +70,14 @@ def _migrate_rpa_columns():
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN download_folder VARCHAR(500)"))
         if "next_rpa" not in cols:
             conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN next_rpa VARCHAR(64)"))
+        if "schedule_enabled" not in cols:
+            conn.execute(
+                sqltext("ALTER TABLE rpa_jobs ADD COLUMN schedule_enabled INTEGER DEFAULT 0")
+            )
+        if "schedule_time" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN schedule_time VARCHAR(8)"))
+        if "next_run" not in cols:
+            conn.execute(sqltext("ALTER TABLE rpa_jobs ADD COLUMN next_run DATETIME"))
         conn.execute(
             sqltext(
                 "UPDATE rpa_jobs SET start_url = :url "
@@ -70,6 +85,38 @@ def _migrate_rpa_columns():
             ),
             {"url": _nerp_start_url()},
         )
+
+
+def normalize_schedule_time(raw: str) -> str:
+    """Accept '8:00', '08:00', '8:00 AM' → 'HH:MM' 24h. Empty → ''."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    m = re.match(r"^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$", text)
+    if not m:
+        raise ValueError("Schedule time must look like 08:00 or 8:30 AM")
+    hh, mm = int(m.group(1)), int(m.group(2))
+    ampm = (m.group(3) or "").upper()
+    if ampm == "PM" and hh < 12:
+        hh += 12
+    elif ampm == "AM" and hh == 12:
+        hh = 0
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError("Schedule time out of range")
+    return f"{hh:02d}:{mm:02d}"
+
+
+def next_daily_run(from_time: datetime | None, schedule_time: str) -> datetime | None:
+    """Next local datetime at schedule_time (HH:MM), strictly after from_time."""
+    hhmm = normalize_schedule_time(schedule_time)
+    if not hhmm:
+        return None
+    hh, mm = map(int, hhmm.split(":"))
+    base = from_time or datetime.now()
+    candidate = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if candidate <= base:
+        candidate += timedelta(days=1)
+    return candidate
 
 
 def _normalize_rpa_id(raw: str) -> str:
@@ -83,6 +130,9 @@ def _normalize_rpa_id(raw: str) -> str:
 
 
 def _row_to_dict(row):
+    schedule_enabled = bool(getattr(row, "schedule_enabled", 0) or 0)
+    schedule_time = (getattr(row, "schedule_time", None) or "") or ""
+    next_run = getattr(row, "next_run", None)
     return {
         "id": row.id,
         "rpa_id": row.rpa_id,
@@ -95,6 +145,9 @@ def _row_to_dict(row):
         "trigger_mail_job": row.trigger_mail_job or "",
         "next_rpa": row.next_rpa or "",
         "enabled": bool(row.enabled),
+        "schedule_enabled": schedule_enabled,
+        "schedule_time": schedule_time,
+        "next_run": next_run,
         "last_run": row.last_run,
         "last_status": row.last_status,
         "last_message": row.last_message,
@@ -333,21 +386,79 @@ def update_rpa_job(rpa_id: str, **fields):
     allowed = {
         "name", "description", "trigger_mail_job", "enabled", "start_url",
         "upload_folder", "download_folder", "next_rpa",
+        "schedule_enabled", "schedule_time", "next_run",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
     if "enabled" in updates:
         updates["enabled"] = 1 if updates["enabled"] else 0
+    if "schedule_enabled" in updates:
+        updates["schedule_enabled"] = 1 if updates["schedule_enabled"] else 0
     if "trigger_mail_job" in updates and updates["trigger_mail_job"] is None:
         updates["trigger_mail_job"] = ""
     if "start_url" in updates and updates["start_url"] is not None:
         updates["start_url"] = updates["start_url"].strip()
+    if "schedule_time" in updates:
+        updates["schedule_time"] = normalize_schedule_time(updates["schedule_time"] or "")
+
+    # Recompute next_run when schedule toggled/time changed (unless caller set next_run).
+    if "next_run" not in updates and (
+        "schedule_enabled" in updates or "schedule_time" in updates
+    ):
+        current = get_rpa_job(rpa_id) or {}
+        sched_on = updates.get(
+            "schedule_enabled",
+            current.get("schedule_enabled"),
+        )
+        sched_on = bool(sched_on)
+        hhmm = updates.get("schedule_time", current.get("schedule_time") or "")
+        if sched_on and hhmm:
+            updates["next_run"] = next_daily_run(datetime.now(), hhmm)
+        else:
+            updates["next_run"] = None
+
     _ensure_tables()
     with engine.begin() as conn:
         conn.execute(
             update(rpa_jobs).where(rpa_jobs.c.rpa_id == rpa_id).values(**updates)
         )
+
+
+def get_due_scheduled_rpas(now: datetime | None = None) -> list[dict]:
+    """Enabled RPAs whose daily schedule next_run is due."""
+    _ensure_tables()
+    now = now or datetime.now()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(rpa_jobs)
+            .where(rpa_jobs.c.enabled == 1)
+            .where(rpa_jobs.c.schedule_enabled == 1)
+            .where(rpa_jobs.c.next_run.isnot(None))
+            .where(rpa_jobs.c.next_run <= now)
+            .order_by(rpa_jobs.c.next_run.asc())
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def claim_scheduled_rpa(rpa_id: str, now: datetime | None = None) -> bool:
+    """Advance next_run to tomorrow so the tick cannot double-fire. Returns True if claimed."""
+    _ensure_tables()
+    now = now or datetime.now()
+    job = get_rpa_job(rpa_id)
+    if not job or not job.get("schedule_enabled") or not job.get("schedule_time"):
+        return False
+    nxt = next_daily_run(now, job["schedule_time"])
+    with engine.begin() as conn:
+        result = conn.execute(
+            update(rpa_jobs)
+            .where(rpa_jobs.c.rpa_id == rpa_id)
+            .where(rpa_jobs.c.schedule_enabled == 1)
+            .where(rpa_jobs.c.next_run.isnot(None))
+            .where(rpa_jobs.c.next_run <= now)
+            .values(next_run=nxt)
+        )
+        return bool(result.rowcount)
 
 
 def delete_rpa_job(rpa_id: str):
